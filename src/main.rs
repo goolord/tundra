@@ -1,4 +1,4 @@
-use iced::{container, Color, Container, Element, Length, Row, Sandbox, Settings};
+use iced::{Container, Element, Length, Row, Sandbox, Settings};
 use std::env;
 mod types;
 use cauldron::audio::AudioSegment;

@@ -78,7 +78,7 @@ impl FileSelector {
             .map(|x| x.unwrap().path())
             .collect();
         FileSelector {
-            file_list: file_list,
+            file_list,
             selected_file: None,
         }
     }
