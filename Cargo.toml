@@ -1,0 +1,18 @@
+[package]
+name = "tundra"
+version = "0.1.0"
+authors = ["Zachary Churchill <zacharyachurchill@gmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+iced = { version = "0.1.1", features = ["svg"] }
+cauldron = { git = "https://github.com/deep110/cauldron", rev = "c6170b2e60a6635ca37ccdacf81018711ddf892b", version = "0.0.3"}
+svg = "0.8.0"
+
+[profile.dev]
+opt-level = 0
+
+[profile.release]
+opt-level = 3
