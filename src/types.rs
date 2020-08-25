@@ -1,9 +1,9 @@
 use cauldron::audio::AudioSegment;
 use iced::svg::Handle;
-use iced::{Column, Container, Element, Length, Row, Sandbox, Settings, Svg, Text};
-use std::fs::{self, DirEntry};
-use std::io;
-use std::ops::Div;
+use iced::{Column, Container, Length, Svg, Text};
+use std::fs::{self};
+
+
 use std::path::PathBuf;
 use svg::node::element::path::Data;
 use svg::Document;
