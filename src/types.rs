@@ -1,9 +1,10 @@
 use cauldron::audio::AudioSegment;
 use iced::svg::Handle;
-use iced::{Column, Container, Length, Svg, Text};
+use iced::{button, container, Background, Color, Column, Container, Length, Svg, Text};
+use rodio::Source;
+use std::fs::File;
 use std::fs::{self};
-
-
+use std::io::BufReader;
 use std::path::PathBuf;
 use svg::node::element::path::Data;
 use svg::Document;
@@ -49,32 +50,123 @@ fn audio_to_svg(samples: Vec<i32>) -> Data {
 }
 
 pub struct FileSelector {
+    pub file_list: Vec<PathBuf>,
     pub selected_file: Option<PathBuf>,
+}
+
+pub struct FileButton {
+    pub file_button: button::State,
+}
+
+impl Default for FileButton {
+    fn default() -> Self {
+        FileButton {
+            file_button: button::State::new(),
+        }
+    }
+}
+
+pub enum FileSelectorMessage {
+    SelectedFile(Option<PathBuf>),
 }
 
 impl FileSelector {
     pub fn new() -> Self {
+        let dir = std::env::current_dir().unwrap();
+        let file_list = fs::read_dir(dir)
+            .unwrap()
+            .map(|x| x.unwrap().path())
+            .collect();
         FileSelector {
+            file_list: file_list,
             selected_file: None,
         }
     }
 
-    pub fn view(self) -> Column<'static, ()> {
-        let dir = std::env::current_dir().unwrap();
-        fs::read_dir(dir).unwrap().fold(Column::new(), |col, path| {
-            let path = path.unwrap();
-            match path.path().to_str() {
-                Some(path_str) => col.push(
-                    Container::new(
+    pub fn update(&mut self, message: FileSelectorMessage) {
+        match message {
+            FileSelectorMessage::SelectedFile(selected_file) => {
+                self.selected_file = selected_file;
+                // play the file
+                match &self.selected_file {
+                    Some(file_path) => {
+                        println!("{:?}", file_path);
+                        let device = rodio::default_output_device().unwrap();
+                        let file = File::open(file_path).unwrap();
+                        let source = rodio::Decoder::new(BufReader::new(file)).unwrap();
+                        rodio::play_raw(&device, source.convert_samples());
+                    }
+                    None => (),
+                }
+            }
+        }
+    }
+
+    pub fn view(&mut self) -> Column<'static, ()> {
+        self.file_list
+            .iter()
+            .fold(Column::new(), |col, path| match path.to_str() {
+                Some(path_str) => {
+                    let mut container = Container::new(
                         Text::new(path_str)
                             .size(16)
                             .width(Length::Fill)
                             .height(Length::Fill),
                     )
-                    .padding(5),
-                ),
+                    .padding(5);
+                    if Some(path.canonicalize().unwrap())
+                        == self
+                            .selected_file
+                            .as_ref()
+                            .map(|x| x.canonicalize().unwrap())
+                    {
+                        container = container.style(SelectedContainer)
+                    }
+                    col.push(container)
+                }
                 None => col,
-            }
-        })
+            })
+    }
+}
+
+pub const DEBUG_BORDER_BOUNDS: BoxedContainer = BoxedContainer;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Theme {
+    Light,
+    // Dark,
+}
+
+impl Default for Theme {
+    fn default() -> Theme {
+        Theme::Light
+    }
+}
+
+pub struct BoxedContainer;
+
+impl container::StyleSheet for BoxedContainer {
+    fn style(&self) -> container::Style {
+        container::Style {
+            border_width: 3,
+            border_color: Color::from_rgb(0xff as f32, 0x00 as f32, 0x00 as f32),
+            ..container::Style::default()
+        }
+    }
+}
+
+pub struct SelectedContainer;
+
+impl container::StyleSheet for SelectedContainer {
+    fn style(&self) -> container::Style {
+        container::Style {
+            text_color: Some(Color::from_rgb(0xff as f32, 0xff as f32, 0xff as f32)),
+            background: Some(Background::Color(Color::from_rgb(
+                0x00 as f32,
+                0x00 as f32,
+                0xaa as f32,
+            ))),
+            ..container::Style::default()
+        }
     }
 }

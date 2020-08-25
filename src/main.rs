@@ -1,4 +1,4 @@
-use iced::{Container, Element, Length, Row, Sandbox, Settings};
+use iced::{container, Color, Container, Element, Length, Row, Sandbox, Settings};
 use std::env;
 mod types;
 use cauldron::audio::AudioSegment;
@@ -8,13 +8,18 @@ fn main() {
     App::run(Settings::default())
 }
 
-struct App;
+struct App {
+    file_selector: FileSelector,
+}
 
 impl Sandbox for App {
     type Message = ();
 
     fn new() -> Self {
-        App
+        let args: Vec<String> = env::args().collect();
+        let mut file_selector = FileSelector::new();
+        file_selector.update(FileSelectorMessage::SelectedFile(Some((&args[1]).into())));
+        App { file_selector }
     }
 
     fn title(&self) -> String {
@@ -25,6 +30,7 @@ impl Sandbox for App {
 
     fn view(&mut self) -> Element<()> {
         let args: Vec<String> = env::args().collect();
+
         let mut wave = WaveForm {
             wave: AudioSegment::read(&args[1]).unwrap(),
         };
@@ -33,15 +39,19 @@ impl Sandbox for App {
             .width(Length::Fill)
             .height(Length::Fill)
             .padding(10)
+            .style(DEBUG_BORDER_BOUNDS)
             .center_x()
             .center_y();
-        let file_selector_container = Container::new(FileSelector::new().view())
+
+        let file_selector_container = Container::new(self.file_selector.view())
             .width(Length::Fill)
             .height(Length::Fill)
+            .style(DEBUG_BORDER_BOUNDS)
             .center_x();
+
         Row::new()
-            .push(svg_container)
             .push(file_selector_container)
+            .push(svg_container)
             .into()
     }
 }
