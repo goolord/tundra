@@ -8,6 +8,8 @@ edition = "2018"
 
 [dependencies]
 iced = { version = "0.1.1", features = ["svg"] }
+iced_audio = "0.4.0"
+rodio = "0.11.0"
 cauldron = { git = "https://github.com/deep110/cauldron", rev = "c6170b2e60a6635ca37ccdacf81018711ddf892b", version = "0.0.3"}
 svg = "0.8.0"
 
