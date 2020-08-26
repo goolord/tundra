@@ -1,6 +1,5 @@
 mod types;
-use iced::svg::Handle;
-use iced::{Container, Element, Length, Row, Sandbox, Settings, Svg, Space};
+use iced::{Container, Element, Length, Row, Sandbox, Settings, Space};
 use cauldron::audio::AudioSegment;
 use types::*;
 

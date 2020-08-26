@@ -1,6 +1,6 @@
 use cauldron::audio::AudioSegment;
 use iced::svg::Handle;
-use iced::{button, Button, Column, Container, Element, Length, Svg, Text};
+use iced::{button, Button, Column, Container, Svg, Text};
 use rodio::Source;
 use std::fs::File;
 use std::fs::{self};
