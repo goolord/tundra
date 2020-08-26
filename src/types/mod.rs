@@ -1,5 +1,5 @@
 use iced::svg::Handle;
-use iced::{button, Button, Column, Container, Svg, Text, Length};
+use iced::{button, Button, Column, Container, Length, Svg, Text};
 use rodio::Source;
 use std::fs::File;
 use std::fs::{self};
@@ -71,7 +71,7 @@ pub enum Message {
     SelectedFile(Option<PathBuf>),
 }
 
-pub fn play_file(file_path: &PathBuf) -> () {
+pub fn play_file(file_path: &PathBuf) {
     let device = rodio::default_output_device().unwrap();
     let file = File::open(file_path).unwrap();
     let source = rodio::Decoder::new(BufReader::new(file)).unwrap();
