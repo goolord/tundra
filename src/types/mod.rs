@@ -1,6 +1,5 @@
-use cauldron::audio::AudioSegment;
 use iced::svg::Handle;
-use iced::{button, Button, Column, Container, Svg, Text};
+use iced::{button, Button, Column, Container, Svg, Text, Length};
 use rodio::Source;
 use std::fs::File;
 use std::fs::{self};
@@ -12,30 +11,34 @@ mod style;
 pub use style::*;
 
 pub struct WaveForm {
-    pub wave: AudioSegment,
+    pub samples: Vec<i32>,
+    pub bits_per_sample: u32,
 }
 
 impl WaveForm {
-    pub fn view(&mut self) -> Svg {
-        let samples: Vec<i32> = self.wave.samples().unwrap().map(|r| r.unwrap()).collect();
-        let samples_len = samples.len();
-        let max = 2_i64.pow(self.wave.info().bits_per_sample);
-        let data = audio_to_svg(samples);
+    pub fn svg(self) -> Document {
+        let max = 2_i64.pow(self.bits_per_sample);
+        let data = audio_to_svg(&self.samples);
         let path = svg::node::element::Path::new()
             .set("fill", "none")
             .set("stroke", "black")
             .set("stroke-width", 5)
             .set("d", data);
-        let document = Document::new()
-            .set("viewBox", (0, -max, samples_len, max * 2))
+        Document::new()
+            .set("viewBox", (0, -max, self.samples.len(), max * 2))
             .set("preserveAspectRatio", "none")
-            .add(path);
-        let svg_data: Vec<u8> = Vec::from(document.to_string());
-        Svg::new(Handle::from_memory(svg_data))
+            .add(path)
     }
 }
 
-fn audio_to_svg(samples: Vec<i32>) -> Data {
+pub fn view_wave_form(document: &Document) -> Svg {
+    let svg_data: Vec<u8> = Vec::from(document.to_string());
+    Svg::new(Handle::from_memory(svg_data))
+        .width(Length::Fill)
+        .height(Length::Fill)
+}
+
+fn audio_to_svg(samples: &Vec<i32>) -> Data {
     // let truncate = 100; // (samples.len() as u64).div(100 as u64);
     samples
         .iter()
@@ -68,6 +71,13 @@ pub enum Message {
     SelectedFile(Option<PathBuf>),
 }
 
+pub fn play_file(file_path: &PathBuf) -> () {
+    let device = rodio::default_output_device().unwrap();
+    let file = File::open(file_path).unwrap();
+    let source = rodio::Decoder::new(BufReader::new(file)).unwrap();
+    rodio::play_raw(&device, source.convert_samples());
+}
+
 impl FileSelector {
     pub fn new() -> Self {
         let dir = std::env::current_dir().unwrap();
@@ -81,24 +91,6 @@ impl FileSelector {
         FileSelector {
             file_list,
             selected_file: None,
-        }
-    }
-
-    pub fn update(&mut self, message: Message) {
-        match message {
-            Message::SelectedFile(selected_file) => {
-                self.selected_file = selected_file;
-                // play the file
-                match &self.selected_file {
-                    Some(file_path) => {
-                        let device = rodio::default_output_device().unwrap();
-                        let file = File::open(file_path).unwrap();
-                        let source = rodio::Decoder::new(BufReader::new(file)).unwrap();
-                        rodio::play_raw(&device, source.convert_samples());
-                    }
-                    None => (),
-                }
-            }
         }
     }
 
