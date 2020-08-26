@@ -91,7 +91,6 @@ impl FileSelector {
                 // play the file
                 match &self.selected_file {
                     Some(file_path) => {
-                        println!("{:?}", file_path);
                         let device = rodio::default_output_device().unwrap();
                         let file = File::open(file_path).unwrap();
                         let source = rodio::Decoder::new(BufReader::new(file)).unwrap();
