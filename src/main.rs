@@ -1,4 +1,5 @@
-use iced::{Container, Element, Length, Row, Sandbox, Settings};
+use iced::{Container, Element, Length, Row, Sandbox, Settings, Svg};
+use iced::svg::Handle;
 use std::env;
 mod types;
 use cauldron::audio::AudioSegment;
@@ -31,12 +32,15 @@ impl Sandbox for App {
     }
 
     fn view(&mut self) -> Element<Message> {
-        let args: Vec<String> = env::args().collect();
-
-        let mut wave = WaveForm {
-            wave: AudioSegment::read(&args[1]).unwrap(),
+        let svg = match &self.file_selector.selected_file {
+            Some(file) => {
+                let mut wave = WaveForm {
+                    wave: AudioSegment::read(file.to_str().unwrap()).unwrap(),
+                };
+                wave.view()
+            },
+            None => Svg::new(Handle::from_memory("")),
         };
-        let svg = wave.view();
         let svg_container = Container::new(svg)
             .width(Length::Fill)
             .height(Length::Fill)
