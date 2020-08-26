@@ -13,12 +13,12 @@ struct App {
 }
 
 impl Sandbox for App {
-    type Message = ();
+    type Message = Message;
 
     fn new() -> Self {
         let args: Vec<String> = env::args().collect();
         let mut file_selector = FileSelector::new();
-        file_selector.update(FileSelectorMessage::SelectedFile(Some((&args[1]).into())));
+        file_selector.update(Message::SelectedFile(Some((&args[1]).into())));
         App { file_selector }
     }
 
@@ -26,9 +26,11 @@ impl Sandbox for App {
         String::from("Tundra")
     }
 
-    fn update(&mut self, _message: ()) {}
+    fn update(&mut self, message: Message) {
+        self.file_selector.update(message)
+    }
 
-    fn view(&mut self) -> Element<()> {
+    fn view(&mut self) -> Element<Message> {
         let args: Vec<String> = env::args().collect();
 
         let mut wave = WaveForm {

@@ -1,6 +1,6 @@
 use cauldron::audio::AudioSegment;
 use iced::svg::Handle;
-use iced::{button, Column, Container, Length, Svg, Text};
+use iced::{button, Column, Container, Length, Svg, Text, Element, Button};
 use rodio::Source;
 use std::fs::File;
 use std::fs::{self};
@@ -51,24 +51,20 @@ fn audio_to_svg(samples: Vec<i32>) -> Data {
         .close()
 }
 
+#[derive(Debug, Clone)]
 pub struct FileSelector {
-    pub file_list: Vec<PathBuf>,
+    pub file_list: Vec<FileButton>,
     pub selected_file: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone)]
 pub struct FileButton {
     pub file_button: button::State,
+    pub file_path: PathBuf,
 }
 
-impl Default for FileButton {
-    fn default() -> Self {
-        FileButton {
-            file_button: button::State::new(),
-        }
-    }
-}
-
-pub enum FileSelectorMessage {
+#[derive(Debug, Clone)]
+pub enum Message {
     SelectedFile(Option<PathBuf>),
 }
 
@@ -77,7 +73,12 @@ impl FileSelector {
         let dir = std::env::current_dir().unwrap();
         let file_list = fs::read_dir(dir)
             .unwrap()
-            .map(|x| x.unwrap().path())
+            .map(|x| {
+                FileButton {
+                    file_button: button::State::new(),
+                    file_path: x.unwrap().path()
+                }
+            })
             .collect();
         FileSelector {
             file_list,
@@ -85,9 +86,9 @@ impl FileSelector {
         }
     }
 
-    pub fn update(&mut self, message: FileSelectorMessage) {
+    pub fn update(&mut self, message: Message) {
         match message {
-            FileSelectorMessage::SelectedFile(selected_file) => {
+            Message::SelectedFile(selected_file) => {
                 self.selected_file = selected_file;
                 // play the file
                 match &self.selected_file {
@@ -104,29 +105,29 @@ impl FileSelector {
         }
     }
 
-    pub fn view(&mut self) -> Column<'static, ()> {
+    pub fn view(&mut self) -> Column<Message> {
+        let selected_file = self.selected_file.as_ref();
         self.file_list
-            .iter()
-            .fold(Column::new(), |col, path| match path.to_str() {
-                Some(path_str) => {
-                    let mut container = Container::new(
-                        Text::new(path_str)
-                            .size(16)
-                            .width(Length::Fill)
-                            .height(Length::Fill),
-                    )
-                    .padding(5);
-                    if Some(path.canonicalize().unwrap())
-                        == self
-                            .selected_file
-                            .as_ref()
-                            .map(|x| x.canonicalize().unwrap())
-                    {
-                        container = container.style(SelectedContainer)
-                    }
-                    col.push(container)
+            .iter_mut()
+            .fold(Column::new(), |col, button| {
+                let path = button.file_path.to_owned();
+                let element: Button<Message> = button.view();
+                let mut container = Container::new(element).padding(5);
+                if Some(path.canonicalize().unwrap())
+                    == selected_file.map(|x| x.canonicalize().unwrap())
+                {
+                    container = container.style(SelectedContainer)
                 }
-                None => col,
+                col.push(container)
             })
+    }
+}
+
+impl FileButton {
+    pub fn view (&mut self) -> Button<Message> {
+        Button::new(
+            &mut self.file_button, 
+            Text::new(self.file_path.to_str().unwrap())
+        ).on_press(Message::SelectedFile(Some(self.file_path.to_owned())))
     }
 }
