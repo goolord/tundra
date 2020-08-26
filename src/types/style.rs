@@ -14,6 +14,8 @@ impl Default for Theme {
     }
 }
 
+///////////////////////////////////////////////////////////////////////////
+
 pub struct BoxedContainer;
 
 impl container::StyleSheet for BoxedContainer {
@@ -25,6 +27,8 @@ impl container::StyleSheet for BoxedContainer {
         }
     }
 }
+
+///////////////////////////////////////////////////////////////////////////
 
 pub struct SelectedContainer;
 
@@ -41,3 +45,5 @@ impl container::StyleSheet for SelectedContainer {
         }
     }
 }
+
+///////////////////////////////////////////////////////////////////////////

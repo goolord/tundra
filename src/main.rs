@@ -20,7 +20,7 @@ impl Sandbox for App {
     }
 
     fn title(&self) -> String {
-        String::from("Tundra")
+        String::from("Tundra Sample Browser")
     }
 
     fn update(&mut self, message: Message) {
