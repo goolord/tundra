@@ -1,6 +1,6 @@
 use cauldron::audio::AudioSegment;
 use iced::svg::Handle;
-use iced::{button, Column, Container, Length, Svg, Text, Element, Button};
+use iced::{button, Button, Column, Container, Element, Length, Svg, Text};
 use rodio::Source;
 use std::fs::File;
 use std::fs::{self};
@@ -73,11 +73,9 @@ impl FileSelector {
         let dir = std::env::current_dir().unwrap();
         let file_list = fs::read_dir(dir)
             .unwrap()
-            .map(|x| {
-                FileButton {
-                    file_button: button::State::new(),
-                    file_path: x.unwrap().path()
-                }
+            .map(|x| FileButton {
+                file_button: button::State::new(),
+                file_path: x.unwrap().path(),
             })
             .collect();
         FileSelector {
@@ -124,10 +122,11 @@ impl FileSelector {
 }
 
 impl FileButton {
-    pub fn view (&mut self) -> Button<Message> {
+    pub fn view(&mut self) -> Button<Message> {
         Button::new(
-            &mut self.file_button, 
-            Text::new(self.file_path.to_str().unwrap())
-        ).on_press(Message::SelectedFile(Some(self.file_path.to_owned())))
+            &mut self.file_button,
+            Text::new(self.file_path.to_str().unwrap()),
+        )
+        .on_press(Message::SelectedFile(Some(self.file_path.to_owned())))
     }
 }
