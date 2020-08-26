@@ -1,6 +1,6 @@
 mod types;
-use iced::{Container, Element, Length, Row, Sandbox, Settings, Space};
 use cauldron::audio::AudioSegment;
+use iced::{Container, Element, Length, Row, Sandbox, Settings, Space};
 use svg::Document;
 use types::*;
 
@@ -18,7 +18,7 @@ impl Sandbox for App {
 
     fn new() -> Self {
         let file_selector = FileSelector::new();
-        App { 
+        App {
             file_selector,
             audio_svg: None,
         }
@@ -40,16 +40,21 @@ impl Sandbox for App {
                             bits_per_sample: wave.info().bits_per_sample,
                         };
                         Some(audio_buffer.svg())
-                    },
+                    }
                     None => None,
                 };
                 self.file_selector.selected_file = selected_file
-            },
+            }
         }
     }
 
     fn view(&mut self) -> Element<Message> {
-        let svg: Element<Message> = self.audio_svg.as_ref().map_or(Space::new(Length::Fill, Length::Fill).into(), |document| view_wave_form(document).into());
+        let svg: Element<Message> = self
+            .audio_svg
+            .as_ref()
+            .map_or(Space::new(Length::Fill, Length::Fill).into(), |document| {
+                view_wave_form(document).into()
+            });
         let svg_container = Container::new(svg)
             .width(Length::Fill)
             .height(Length::Fill)
