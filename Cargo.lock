@@ -1516,6 +1516,7 @@ dependencies = [
  "glam 0.9.3",
  "iced_native 0.2.2 (git+https://github.com/hecrj/iced/?rev=fb015a85d22a7c4632bd251127a89259bfd0c346)",
  "iced_style 0.1.0 (git+https://github.com/hecrj/iced/?rev=fb015a85d22a7c4632bd251127a89259bfd0c346)",
+ "lyon",
  "raw-window-handle",
 ]
 

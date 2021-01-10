@@ -7,7 +7,7 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-iced = {git = "https://github.com/hecrj/iced/", rev="fb015a85d22a7c4632bd251127a89259bfd0c346", version = "0.1.1", features = ["svg"] }
+iced = {git = "https://github.com/hecrj/iced/", rev="fb015a85d22a7c4632bd251127a89259bfd0c346", version = "0.1.1", features = ["svg", "canvas"] }
 iced_audio = "0.4.0"
 rodio = "0.11.0"
 cauldron = { git = "https://github.com/deep110/cauldron", rev = "c6170b2e60a6635ca37ccdacf81018711ddf892b", version = "0.0.3"}

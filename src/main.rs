@@ -1,11 +1,14 @@
 mod types;
 use cauldron::audio::AudioSegment;
-use iced::{Container, Element, Length, Row, Sandbox, Settings, Space};
+use iced::{Container, Element, Length, Row, Command, Settings, Space, Application, executor};
 use svg::Document;
 use types::*;
 
-fn main() {
-    App::run(Settings::default())
+pub fn main() {
+    App::run(Settings {
+        antialiasing: true,
+        ..Settings::default()
+    })
 }
 
 struct App {
@@ -13,22 +16,25 @@ struct App {
     audio_svg: Option<Document>,
 }
 
-impl Sandbox for App {
+impl Application for App {
     type Message = Message;
+    type Executor = executor::Default;
+    type Flags = ();
 
-    fn new() -> Self {
+    fn new(_flags: ()) -> (Self, Command<Message>) {
         let file_selector = FileSelector::new();
-        App {
+        let app = App {
             file_selector,
             audio_svg: None,
-        }
+        };
+        (app, Command::none())
     }
 
     fn title(&self) -> String {
         String::from("Tundra Sample Browser")
     }
 
-    fn update(&mut self, message: Message) {
+    fn update(&mut self, message: Message) -> Command<Message> {
         match message {
             Message::SelectedFile(selected_file) => {
                 self.audio_svg = match &selected_file {
@@ -43,7 +49,8 @@ impl Sandbox for App {
                     }
                     None => None,
                 };
-                self.file_selector.selected_file = selected_file
+                self.file_selector.selected_file = selected_file;
+                Command::none()
             }
         }
     }
