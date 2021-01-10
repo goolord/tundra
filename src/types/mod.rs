@@ -1,10 +1,11 @@
 use iced::svg::Handle;
-use iced::{button, Button, Column, Container, Length, Svg, Text};
+use iced::{button, Button, Column, Container, Length, Svg, Text, canvas, Canvas};
 use rodio::Source;
 use std::fs::File;
 use std::fs::{self};
 use std::io::BufReader;
 use std::path::PathBuf;
+use std::ffi::OsStr;
 use svg::node::element::path::Data;
 use svg::Document;
 mod style;
@@ -78,14 +79,31 @@ pub fn play_file(file_path: &PathBuf) {
     rodio::play_raw(&device, source.convert_samples());
 }
 
+fn is_audio(x: &OsStr) -> bool {
+    let valid_extensions = ["flac", "wav", "mp3"];
+    valid_extensions.contains(&x.to_string_lossy().as_ref())
+}
+
 impl FileSelector {
     pub fn new() -> Self {
         let dir = std::env::current_dir().unwrap();
         let file_list = fs::read_dir(dir)
             .unwrap()
+            .filter_map(|x| match x {
+                Ok(x) => {
+                    let x_is_dir = x.path().is_dir();
+                    let x_is_audio = x.path().extension().map_or(false, is_audio);
+                    if x_is_dir || x_is_audio {
+                        Some(x)
+                    } else {
+                        None
+                    }
+                }
+                Err(_) => None
+            })
             .map(|x| FileButton {
                 file_button: button::State::new(),
-                file_path: x.unwrap().path(),
+                file_path: x.path(),
             })
             .collect();
         FileSelector {
