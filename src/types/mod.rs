@@ -85,8 +85,7 @@ fn is_audio(x: &OsStr) -> bool {
 }
 
 impl FileSelector {
-    pub fn new() -> Self {
-        let dir = std::env::current_dir().unwrap();
+    pub fn new(dir: &PathBuf) -> Self {
         let file_list = fs::read_dir(dir)
             .unwrap()
             .filter_map(|x| match x {

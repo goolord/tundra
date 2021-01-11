@@ -22,7 +22,8 @@ impl Application for App {
     type Flags = ();
 
     fn new(_flags: ()) -> (Self, Command<Message>) {
-        let file_selector = FileSelector::new();
+        let current_dir = std::env::current_dir().unwrap();
+        let file_selector = FileSelector::new(&current_dir);
         let app = App {
             file_selector,
             audio_svg: None,
@@ -37,19 +38,26 @@ impl Application for App {
     fn update(&mut self, message: Message) -> Command<Message> {
         match message {
             Message::SelectedFile(selected_file) => {
-                self.audio_svg = match &selected_file {
+                match &selected_file {
                     Some(file_path) => {
-                        play_file(&file_path);
-                        let mut wave = AudioSegment::read(file_path.to_str().unwrap()).unwrap();
-                        let audio_buffer = WaveForm {
-                            samples: wave.samples().unwrap().map(|r| r.unwrap()).collect(),
-                            bits_per_sample: wave.info().bits_per_sample,
-                        };
-                        Some(audio_buffer.svg())
+                        if selected_file.as_ref().map_or(false, |fp| fp.is_dir()) {
+                            self.file_selector = FileSelector::new(file_path);
+                        } else {
+                            play_file(&file_path);
+                            let mut wave = AudioSegment::read(file_path.to_str().unwrap()).unwrap();
+                            let audio_buffer = WaveForm {
+                                samples: wave.samples().unwrap().map(|r| r.unwrap()).collect(),
+                                bits_per_sample: wave.info().bits_per_sample,
+                            };
+                            self.audio_svg = Some(audio_buffer.svg());
+                            self.file_selector.selected_file = selected_file;
+                        }
                     }
-                    None => None,
-                };
-                self.file_selector.selected_file = selected_file;
+                    None => {
+                        self.audio_svg = None;
+                    }
+                }
+
                 Command::none()
             }
         }
