@@ -21,7 +21,7 @@ pub struct BoxedContainer;
 impl container::StyleSheet for BoxedContainer {
     fn style(&self) -> container::Style {
         container::Style {
-            border_width: 3,
+            border_width: 3.0,
             border_color: Color::from_rgb(0xff as f32, 0x00 as f32, 0x00 as f32),
             ..container::Style::default()
         }

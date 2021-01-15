@@ -8,7 +8,7 @@ pub fn main() {
     App::run(Settings {
         antialiasing: true,
         ..Settings::default()
-    })
+    }).unwrap();
 }
 
 struct App {

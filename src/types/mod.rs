@@ -73,10 +73,10 @@ pub enum Message {
 }
 
 pub fn play_file(file_path: &PathBuf) {
-    let device = rodio::default_output_device().unwrap();
+    let (_stream, stream_handle) = rodio::OutputStream::try_default().unwrap();
     let file = File::open(file_path).unwrap();
     let source = rodio::Decoder::new(BufReader::new(file)).unwrap();
-    rodio::play_raw(&device, source.convert_samples());
+    stream_handle.play_raw(source.convert_samples()).unwrap();
 }
 
 fn is_audio(x: &OsStr) -> bool {
