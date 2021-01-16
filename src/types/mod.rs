@@ -3,6 +3,7 @@ use iced::{
     button, canvas, scrollable, Button, Canvas, Column, Container, Length, Scrollable, Svg, Text,
 };
 use rodio::Source;
+use std::cmp::*;
 use std::ffi::OsStr;
 use std::fs::File;
 use std::fs::{self};
@@ -66,7 +67,7 @@ pub struct FileSelector {
     pub selected_file: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileButton {
     pub file_button: button::State,
     pub file_path: PathBuf,
@@ -97,18 +98,18 @@ fn is_audio(x: &OsStr) -> bool {
 
 impl DirUp {
     pub fn view(&mut self, cwd: PathBuf) -> Button<Message> {
-        Button::new(&mut self.button, Text::new("^^^")).on_press(Message::ChangeDirectory(
-            match cwd.parent() {
+        Button::new(&mut self.button, Text::new("^^^"))
+            .on_press(Message::ChangeDirectory(match cwd.parent() {
                 Some(x) => x.to_path_buf(),
                 None => cwd,
-            },
-        ))
+            }))
+            .width(Length::Fill)
     }
 }
 
 impl FileSelector {
     pub fn new(dir: &PathBuf) -> Self {
-        let file_list = fs::read_dir(dir)
+        let mut file_list = fs::read_dir(dir)
             .unwrap()
             .filter_map(|x| match x {
                 Ok(x) => {
@@ -123,7 +124,9 @@ impl FileSelector {
                 Err(_) => None,
             })
             .map(|x| FileButton::new(x.path()))
-            .collect();
+            .collect::<Vec<_>>();
+
+        file_list.sort();
         FileSelector {
             scroll_state: scrollable::State::new(),
             current_dir: dir.to_owned(),
@@ -137,12 +140,14 @@ impl FileSelector {
 
     pub fn view(&mut self) -> Scrollable<Message> {
         let selected_file = self.selected_file.as_ref();
-        let dir_up = Container::new(self.dir_up.view(self.current_dir.to_owned())).padding(5);
+        let dir_up = Container::new(self.dir_up.view(self.current_dir.to_owned()))
+            .padding(5)
+            .width(Length::Fill);
         let column = Column::new().push(dir_up);
         let new_col = self.file_list.iter_mut().fold(column, |col, button| {
             let path = button.file_path.to_owned();
             let element: Button<Message> = button.view();
-            let mut container = Container::new(element).padding(5);
+            let mut container = Container::new(element).padding(5).width(Length::Fill);
             if Some(path.canonicalize().unwrap())
                 == selected_file.map(|x| x.canonicalize().unwrap())
             {
@@ -150,7 +155,9 @@ impl FileSelector {
             }
             col.push(container)
         });
-        Scrollable::new(&mut self.scroll_state).push(new_col)
+        Scrollable::new(&mut self.scroll_state)
+            .push(new_col)
+            .width(Length::Fill)
     }
 }
 
@@ -168,5 +175,18 @@ impl FileButton {
             Text::new(self.file_path.to_str().unwrap()),
         )
         .on_press(Message::SelectedFile(Some(self.file_path.to_owned())))
+        .width(Length::Fill)
+    }
+}
+
+impl PartialOrd for FileButton {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for FileButton {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.file_path.cmp(&other.file_path)
     }
 }
