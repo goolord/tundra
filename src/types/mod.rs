@@ -1,13 +1,14 @@
+use cauldron::audio::AudioSegment;
 use iced::svg::Handle;
 use iced::{
     button, canvas, scrollable, Button, Canvas, Column, Container, Length, Scrollable, Svg, Text,
 };
-use rodio::Source;
+
 use std::cmp::*;
 use std::ffi::OsStr;
-use std::fs::File;
+
 use std::fs::{self};
-use std::io::BufReader;
+
 use std::path::PathBuf;
 use svg::node::element::path::Data;
 use svg::Document;
@@ -15,8 +16,8 @@ mod style;
 pub use style::*;
 
 pub struct WaveForm {
-    pub samples: Vec<i32>,
-    pub bits_per_sample: u32,
+    samples: Vec<i32>,
+    bits_per_sample: u32,
 }
 
 impl WaveForm {
@@ -35,6 +36,26 @@ impl WaveForm {
     }
 }
 
+impl Into<WaveForm> for AudioSegment {
+    fn into(mut self) -> WaveForm {
+        let number_channels = self.number_channels();
+        let number_channels_i32 = number_channels as i32;
+        let mut samples: Vec<i32> = Vec::new();
+        let all_samples = self
+            .samples()
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect::<Vec<i32>>();
+        for arr in all_samples.chunks_exact(number_channels) {
+            samples.push(arr.iter().sum::<i32>() / number_channels_i32);
+        }
+        WaveForm {
+            samples,
+            bits_per_sample: self.info().bits_per_sample,
+        }
+    }
+}
+
 pub fn view_wave_form(document: &Document) -> Svg {
     let svg_data: Vec<u8> = Vec::from(document.to_string());
     Svg::new(Handle::from_memory(svg_data))
@@ -42,7 +63,7 @@ pub fn view_wave_form(document: &Document) -> Svg {
         .height(Length::Fill)
 }
 
-fn audio_to_svg(samples: &Vec<i32>) -> Data {
+fn audio_to_svg(samples: &[i32]) -> Data {
     // let truncate = 100; // (samples.len() as u64).div(100 as u64);
     samples
         .iter()

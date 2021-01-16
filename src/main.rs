@@ -1,12 +1,12 @@
 mod types;
 use cauldron::audio::AudioSegment;
 use iced::{executor, Application, Command, Container, Element, Length, Row, Settings, Space};
-use svg::Document;
-use types::*;
+use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
-use std::fs::File;
-use rodio::Source;
+use svg::Document;
+use types::*;
+
 use std::thread;
 
 pub fn main() {
@@ -25,7 +25,7 @@ struct App {
 // todo: abstract this into a player type
 // ref: https://github.com/tindleaj/miso/blob/master/src/player.rs
 impl App {
-    fn play_file(&self, file_path: &PathBuf) -> () {
+    fn play_file(&self, file_path: &PathBuf) {
         let file = File::open(file_path).unwrap();
         thread::spawn(move || {
             let (_stream, stream_handle) = rodio::OutputStream::try_default().unwrap();
@@ -65,11 +65,8 @@ impl Application for App {
                             self.file_selector = FileSelector::new(file_path);
                         } else {
                             self.play_file(&file_path);
-                            let mut wave = AudioSegment::read(file_path.to_str().unwrap()).unwrap();
-                            let audio_buffer = WaveForm {
-                                samples: wave.samples().unwrap().map(|r| r.unwrap()).collect(),
-                                bits_per_sample: wave.info().bits_per_sample,
-                            };
+                            let wave = AudioSegment::read(file_path.to_str().unwrap()).unwrap();
+                            let audio_buffer: WaveForm = wave.into();
                             self.audio_svg = Some(audio_buffer.svg());
                             self.file_selector.selected_file = selected_file;
                         }
@@ -98,7 +95,7 @@ impl Application for App {
         let svg_container = Container::new(svg)
             .width(Length::Fill)
             .height(Length::Fill)
-            .padding(10)
+            .padding(1)
             .style(DEBUG_BORDER_BOUNDS)
             .center_x()
             .center_y();
