@@ -60,6 +60,10 @@ impl Application for App {
 
                 Command::none()
             }
+            Message::ChangeDirectory(parent_dir) => {
+                self.file_selector = FileSelector::new(&parent_dir);
+                Command::none()
+            }
         }
     }
 
