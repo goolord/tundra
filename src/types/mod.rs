@@ -84,13 +84,6 @@ pub enum Message {
     ChangeDirectory(PathBuf),
 }
 
-pub fn play_file(file_path: &PathBuf) {
-    let (_stream, stream_handle) = rodio::OutputStream::try_default().unwrap();
-    let file = File::open(file_path).unwrap();
-    let source = rodio::Decoder::new(BufReader::new(file)).unwrap();
-    stream_handle.play_raw(source.convert_samples()).unwrap();
-}
-
 fn is_audio(x: &OsStr) -> bool {
     let valid_extensions = ["flac", "wav", "mp3"];
     valid_extensions.contains(&x.to_string_lossy().as_ref())

@@ -3,6 +3,11 @@ use cauldron::audio::AudioSegment;
 use iced::{executor, Application, Command, Container, Element, Length, Row, Settings, Space};
 use svg::Document;
 use types::*;
+use std::io::BufReader;
+use std::path::PathBuf;
+use std::fs::File;
+use rodio::Source;
+use std::thread;
 
 pub fn main() {
     App::run(Settings {
@@ -15,6 +20,21 @@ pub fn main() {
 struct App {
     file_selector: FileSelector,
     audio_svg: Option<Document>,
+}
+
+// todo: abstract this into a player type
+// ref: https://github.com/tindleaj/miso/blob/master/src/player.rs
+impl App {
+    fn play_file(&self, file_path: &PathBuf) -> () {
+        let file = File::open(file_path).unwrap();
+        thread::spawn(move || {
+            let (_stream, stream_handle) = rodio::OutputStream::try_default().unwrap();
+            let sink = rodio::Sink::try_new(&stream_handle).unwrap();
+            let source = rodio::Decoder::new(BufReader::new(file)).unwrap();
+            sink.append(source);
+            sink.sleep_until_end()
+        });
+    }
 }
 
 impl Application for App {
@@ -44,7 +64,7 @@ impl Application for App {
                         if selected_file.as_ref().map_or(false, |fp| fp.is_dir()) {
                             self.file_selector = FileSelector::new(file_path);
                         } else {
-                            play_file(&file_path);
+                            self.play_file(&file_path);
                             let mut wave = AudioSegment::read(file_path.to_str().unwrap()).unwrap();
                             let audio_buffer = WaveForm {
                                 samples: wave.samples().unwrap().map(|r| r.unwrap()).collect(),
