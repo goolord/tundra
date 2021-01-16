@@ -1,5 +1,7 @@
 use iced::svg::Handle;
-use iced::{button, canvas, Button, Canvas, Column, Container, Length, Svg, Text};
+use iced::{
+    button, canvas, scrollable, Button, Canvas, Column, Container, Length, Scrollable, Svg, Text,
+};
 use rodio::Source;
 use std::ffi::OsStr;
 use std::fs::File;
@@ -57,6 +59,7 @@ fn audio_to_svg(samples: &Vec<i32>) -> Data {
 
 #[derive(Debug, Clone)]
 pub struct FileSelector {
+    pub scroll_state: scrollable::State,
     pub current_dir: PathBuf,
     pub dir_up: DirUp,
     pub file_list: Vec<FileButton>,
@@ -98,7 +101,7 @@ impl DirUp {
             match cwd.parent() {
                 Some(x) => x.to_path_buf(),
                 None => cwd,
-            }
+            },
         ))
     }
 }
@@ -122,6 +125,7 @@ impl FileSelector {
             .map(|x| FileButton::new(x.path()))
             .collect();
         FileSelector {
+            scroll_state: scrollable::State::new(),
             current_dir: dir.to_owned(),
             dir_up: DirUp {
                 button: button::State::new(),
@@ -131,11 +135,11 @@ impl FileSelector {
         }
     }
 
-    pub fn view(&mut self) -> Column<Message> {
+    pub fn view(&mut self) -> Scrollable<Message> {
         let selected_file = self.selected_file.as_ref();
         let dir_up = Container::new(self.dir_up.view(self.current_dir.to_owned())).padding(5);
         let column = Column::new().push(dir_up);
-        self.file_list.iter_mut().fold(column, |col, button| {
+        let new_col = self.file_list.iter_mut().fold(column, |col, button| {
             let path = button.file_path.to_owned();
             let element: Button<Message> = button.view();
             let mut container = Container::new(element).padding(5);
@@ -145,7 +149,8 @@ impl FileSelector {
                 container = container.style(SelectedContainer)
             }
             col.push(container)
-        })
+        });
+        Scrollable::new(&mut self.scroll_state).push(new_col)
     }
 }
 
