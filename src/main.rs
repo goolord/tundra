@@ -5,6 +5,7 @@ use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
 use svg::Document;
+use iced::canvas::*;
 use types::*;
 
 use std::thread;
@@ -19,7 +20,7 @@ pub fn main() {
 
 struct App {
     file_selector: FileSelector,
-    audio_svg: Option<Document>,
+    waveform: Option<WaveForm>,
 }
 
 // todo: abstract this into a player type
@@ -47,7 +48,7 @@ impl Application for App {
         let file_selector = FileSelector::new(&current_dir);
         let app = App {
             file_selector,
-            audio_svg: None,
+            waveform: None,
         };
         (app, Command::none())
     }
@@ -67,12 +68,12 @@ impl Application for App {
                             self.play_file(&file_path);
                             let wave = AudioSegment::read(file_path.to_str().unwrap()).unwrap();
                             let audio_buffer: WaveForm = wave.into();
-                            self.audio_svg = Some(audio_buffer.svg());
+                            self.waveform = Some(audio_buffer);
                             self.file_selector.selected_file = selected_file;
                         }
                     }
                     None => {
-                        self.audio_svg = None;
+                        self.waveform = None;
                     }
                 }
 
@@ -87,10 +88,13 @@ impl Application for App {
 
     fn view(&mut self) -> Element<Message> {
         let svg: Element<Message> = self
-            .audio_svg
+            .waveform
             .as_ref()
-            .map_or(Space::new(Length::Fill, Length::Fill).into(), |document| {
-                view_wave_form(document).into()
+            .map_or(Space::new(Length::Fill, Length::Fill).into(), |wf| {
+                let canvas = Canvas::new(wf)
+                    .width(Length::Fill)
+                    .height(Length::Fill);
+                canvas.into()
             });
         let svg_container = Container::new(svg)
             .width(Length::Fill)
