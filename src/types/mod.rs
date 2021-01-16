@@ -2,8 +2,9 @@ use cauldron::audio::AudioSegment;
 use iced::svg::Handle;
 use iced::{
     button, canvas, scrollable, Button, Canvas, Column, Container, Length, Scrollable, Svg, Text,
+    Color, Rectangle, Point, Vector
 };
-
+use iced::canvas::*;
 use std::cmp::*;
 use std::ffi::OsStr;
 
@@ -21,18 +22,56 @@ pub struct WaveForm {
 }
 
 impl WaveForm {
-    pub fn svg(self) -> Document {
-        let max = 2_i64.pow(self.bits_per_sample);
-        let data = audio_to_svg(&self.samples);
-        let path = svg::node::element::Path::new()
-            .set("fill", "none")
-            .set("stroke", "black")
-            .set("stroke-width", 5)
-            .set("d", data);
-        Document::new()
-            .set("viewBox", (0, -max, self.samples.len(), max * 2))
-            .set("preserveAspectRatio", "none")
-            .add(path)
+    pub fn audio_to_path(&self, frame: &Frame) -> Path {
+        // let truncate = 100; // (samples.len() as u64).div(100 as u64);
+        let max = 2_i32.pow(self.bits_per_sample);
+        let translate_y: f32 = (max / 2) as f32;
+        let height = frame.height();
+        let width = frame.width();
+        let scale_height = height / max as f32;
+        let scale_width = width / self.samples.len() as f32;
+        let mut builder = path::Builder::new();
+        self.samples
+            .iter()
+            .enumerate()
+            // .filter(|&(i, _)| (i as u64).div(truncate) == 0)
+            .for_each(|(i, s)| {
+                println!("{}, {}", s, translate_y);
+                let sample = s.to_owned() as f32;
+                let point = Point { 
+                        x: i as f32 * scale_width,
+                        y: (sample + translate_y) * scale_height
+                    };
+                if i % 2 == 0 {
+                    builder.move_to(point)
+                } else {
+                    builder.line_to(point)
+                }
+            });
+
+        builder.close();
+        builder.build()
+}
+
+}
+
+impl Program<Message> for &WaveForm {
+    fn draw(&self, bounds: Rectangle, _cursor: Cursor) -> Vec<Geometry> {
+        let mut frame = Frame::new(bounds.size());
+        // frame.scale(0.01);
+        // frame.translate(Vector { 
+            // x: 0.0,
+            // y: (max / 2) as f32 
+        // });
+        let path = self.audio_to_path(&frame);
+        let stroke = Stroke {
+            color: Color::BLACK,
+            width: 1.0,
+            line_cap: Default::default(),
+            line_join: Default::default(),
+        };
+        frame.stroke(&path, stroke);
+        vec![frame.into_geometry()]
     }
 }
 
@@ -54,29 +93,6 @@ impl Into<WaveForm> for AudioSegment {
             bits_per_sample: self.info().bits_per_sample,
         }
     }
-}
-
-pub fn view_wave_form(document: &Document) -> Svg {
-    let svg_data: Vec<u8> = Vec::from(document.to_string());
-    Svg::new(Handle::from_memory(svg_data))
-        .width(Length::Fill)
-        .height(Length::Fill)
-}
-
-fn audio_to_svg(samples: &[i32]) -> Data {
-    // let truncate = 100; // (samples.len() as u64).div(100 as u64);
-    samples
-        .iter()
-        .enumerate()
-        // .filter(|&(i, _)| (i as u64).div(truncate) == 0)
-        .fold(Data::new(), |data, (i, s)| {
-            if i % 2 == 0 {
-                data.move_to((i, s.to_owned()))
-            } else {
-                data.line_to((i, s.to_owned()))
-            }
-        })
-        .close()
 }
 
 #[derive(Debug, Clone)]
