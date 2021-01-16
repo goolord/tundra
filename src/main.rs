@@ -1,6 +1,6 @@
 mod types;
 use cauldron::audio::AudioSegment;
-use iced::{Container, Element, Length, Row, Command, Settings, Space, Application, executor};
+use iced::{executor, Application, Command, Container, Element, Length, Row, Settings, Space};
 use svg::Document;
 use types::*;
 
@@ -8,7 +8,8 @@ pub fn main() {
     App::run(Settings {
         antialiasing: true,
         ..Settings::default()
-    }).unwrap();
+    })
+    .unwrap();
 }
 
 struct App {
