@@ -1,18 +1,18 @@
 use cauldron::audio::AudioSegment;
-use iced::svg::Handle;
-use iced::{
-    button, canvas, scrollable, Button, Canvas, Column, Container, Length, Scrollable, Svg, Text,
-    Color, Rectangle, Point, Vector
-};
 use iced::canvas::*;
+
+use iced::{
+    button, canvas, scrollable, text_input, Button, Canvas, Color, Column, Container, Length,
+    Point, Rectangle, Scrollable, Svg, Text, TextInput, Vector,
+};
 use std::cmp::*;
 use std::ffi::OsStr;
 
 use std::fs::{self};
 
 use std::path::PathBuf;
-use svg::node::element::path::Data;
-use svg::Document;
+
+
 mod style;
 pub use style::*;
 
@@ -36,12 +36,11 @@ impl WaveForm {
             .enumerate()
             // .filter(|&(i, _)| (i as u64).div(truncate) == 0)
             .for_each(|(i, s)| {
-                println!("{}, {}", s, translate_y);
                 let sample = s.to_owned() as f32;
-                let point = Point { 
-                        x: i as f32 * scale_width,
-                        y: (sample + translate_y) * scale_height
-                    };
+                let point = Point {
+                    x: i as f32 * scale_width,
+                    y: (sample + translate_y) * scale_height,
+                };
                 if i % 2 == 0 {
                     builder.move_to(point)
                 } else {
@@ -51,17 +50,16 @@ impl WaveForm {
 
         builder.close();
         builder.build()
-}
-
+    }
 }
 
 impl Program<Message> for &WaveForm {
     fn draw(&self, bounds: Rectangle, _cursor: Cursor) -> Vec<Geometry> {
         let mut frame = Frame::new(bounds.size());
         // frame.scale(0.01);
-        // frame.translate(Vector { 
-            // x: 0.0,
-            // y: (max / 2) as f32 
+        // frame.translate(Vector {
+        // x: 0.0,
+        // y: (max / 2) as f32
         // });
         let path = self.audio_to_path(&frame);
         let stroke = Stroke {
@@ -102,6 +100,8 @@ pub struct FileSelector {
     pub dir_up: DirUp,
     pub file_list: Vec<FileButton>,
     pub selected_file: Option<PathBuf>,
+    pub search: text_input::State,
+    pub search_value: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,6 +119,7 @@ pub struct DirUp {
 pub enum Message {
     SelectedFile(Option<PathBuf>),
     ChangeDirectory(PathBuf),
+    Search(String),
 }
 
 fn is_audio(x: &OsStr) -> bool {
@@ -128,7 +129,7 @@ fn is_audio(x: &OsStr) -> bool {
 
 impl DirUp {
     pub fn view(&mut self, cwd: PathBuf) -> Button<Message> {
-        Button::new(&mut self.button, Text::new("^^^"))
+        Button::new(&mut self.button, Text::new("^^^ Go up"))
             .on_press(Message::ChangeDirectory(match cwd.parent() {
                 Some(x) => x.to_path_buf(),
                 None => cwd,
@@ -138,10 +139,14 @@ impl DirUp {
 }
 
 impl FileSelector {
-    pub fn new(dir: &PathBuf) -> Self {
-        let mut file_list = fs::read_dir(dir)
-            .unwrap()
-            .filter_map(|x| match x {
+    pub fn list_dir(
+        dir: &PathBuf,
+    ) -> std::iter::FilterMap<
+        std::fs::ReadDir,
+        fn(x: std::io::Result<std::fs::DirEntry>) -> Option<std::fs::DirEntry>,
+    > {
+        fn the_filter(x: std::io::Result<std::fs::DirEntry>) -> Option<std::fs::DirEntry> {
+            match x {
                 Ok(x) => {
                     let x_is_dir = x.path().is_dir();
                     let x_is_audio = x.path().extension().map_or(false, is_audio);
@@ -152,29 +157,40 @@ impl FileSelector {
                     }
                 }
                 Err(_) => None,
-            })
-            .map(|x| FileButton::new(x.path()))
-            .collect::<Vec<_>>();
+            }
+        }
+        fs::read_dir(dir).unwrap().filter_map(the_filter)
+    }
 
-        file_list.sort();
+    pub fn file_buttons(dir: &PathBuf) -> Vec<FileButton> {
+        let mut buttons: Vec<FileButton> = FileSelector::list_dir(dir)
+            .map(|x| FileButton::new(x.path()))
+            .collect();
+        buttons.sort();
+        buttons
+    }
+
+    pub fn new(dir: &PathBuf) -> Self {
         FileSelector {
             scroll_state: scrollable::State::new(),
             current_dir: dir.to_owned(),
             dir_up: DirUp {
                 button: button::State::new(),
             },
-            file_list,
+            file_list: FileSelector::file_buttons(dir),
             selected_file: None,
+            search: text_input::State::new(),
+            search_value: String::new(),
         }
     }
 
-    pub fn view(&mut self) -> Scrollable<Message> {
+    pub fn view(&mut self) -> Column<Message> {
         let selected_file = self.selected_file.as_ref();
         let dir_up = Container::new(self.dir_up.view(self.current_dir.to_owned()))
             .padding(5)
             .width(Length::Fill);
-        let column = Column::new().push(dir_up);
-        let new_col = self.file_list.iter_mut().fold(column, |col, button| {
+        let fs_column = Column::new().push(dir_up);
+        let new_col = self.file_list.iter_mut().fold(fs_column, |col, button| {
             let path = button.file_path.to_owned();
             let element: Button<Message> = button.view();
             let mut container = Container::new(element).padding(5).width(Length::Fill);
@@ -185,9 +201,18 @@ impl FileSelector {
             }
             col.push(container)
         });
-        Scrollable::new(&mut self.scroll_state)
+        let fs = Scrollable::new(&mut self.scroll_state)
             .push(new_col)
             .width(Length::Fill)
+            .height(Length::Fill);
+        let search = TextInput::new(
+            &mut self.search,
+            "This is the placeholder...",
+            &self.search_value,
+            Message::Search,
+        );
+
+        Column::new().push(fs).push(search)
     }
 }
 

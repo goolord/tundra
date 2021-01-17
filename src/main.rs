@@ -1,12 +1,15 @@
 mod types;
 use cauldron::audio::AudioSegment;
+use fuzzy_matcher::skim::SkimMatcherV2;
+use fuzzy_matcher::FuzzyMatcher;
+use iced::canvas::*;
 use iced::{executor, Application, Command, Container, Element, Length, Row, Settings, Space};
 use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
-use svg::Document;
-use iced::canvas::*;
+
 use types::*;
+use walkdir::WalkDir;
 
 use std::thread;
 
@@ -83,22 +86,50 @@ impl Application for App {
                 self.file_selector = FileSelector::new(&parent_dir);
                 Command::none()
             }
+            Message::Search(search_str) => {
+                if search_str.len() > 2 {
+                    let matcher = SkimMatcherV2::default();
+                    let file_list = WalkDir::new(&self.file_selector.current_dir)
+                        .max_depth(100)
+                        .max_open(100)
+                        .follow_links(true)
+                        .into_iter()
+                        .filter_map(|e| match e {
+                            Ok(e) => {
+                                if matcher
+                                    .fuzzy_match(e.path().to_string_lossy().as_ref(), &search_str)
+                                    .is_some()
+                                {
+                                    Some(FileButton::new(e.path().to_path_buf()))
+                                } else {
+                                    None
+                                }
+                            }
+                            Err(_) => None,
+                        })
+                        .collect();
+                    self.file_selector.file_list = file_list;
+                } else {
+                    self.file_selector.file_list =
+                        FileSelector::file_buttons(&self.file_selector.current_dir)
+                }
+                self.file_selector.search_value = search_str;
+                Command::none()
+            }
         }
     }
 
     fn view(&mut self) -> Element<Message> {
-        let svg: Element<Message> = self
-            .waveform
-            .as_ref()
-            .map_or(Space::new(Length::Fill, Length::Fill).into(), |wf| {
-                let canvas = Canvas::new(wf)
-                    .width(Length::Fill)
-                    .height(Length::Fill);
-                canvas.into()
-            });
+        let svg: Element<Message> =
+            self.waveform
+                .as_ref()
+                .map_or(Space::new(Length::Fill, Length::Fill).into(), |wf| {
+                    let canvas = Canvas::new(wf).width(Length::Fill).height(Length::Fill);
+                    canvas.into()
+                });
         let svg_container = Container::new(svg)
             .width(Length::Fill)
-            .height(Length::Fill)
+            .height(Length::FillPortion(1))
             .padding(1)
             .style(DEBUG_BORDER_BOUNDS)
             .center_x()
