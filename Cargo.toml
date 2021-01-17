@@ -12,6 +12,8 @@ iced_audio = "0.6.1"
 rodio = "0.13.0"
 cauldron = "0.0.3"
 svg = "0.8.1"
+walkdir = "2.3.1"
+fuzzy-matcher = "*"
 
 [profile.dev]
 opt-level = 0
