@@ -111,7 +111,7 @@ impl Application for App {
                     self.file_selector.file_list = file_list;
                 } else {
                     self.file_selector.file_list =
-                        FileSelector::file_buttons(&self.file_selector.current_dir)
+                        FileList::new(&self.file_selector.current_dir)
                 }
                 self.file_selector.search_value = search_str;
                 Command::none()
