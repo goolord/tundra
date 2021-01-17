@@ -104,6 +104,11 @@ pub struct FileSelector {
     pub search_value: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct FileList {
+    pub files: Vec<PathBuf>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileButton {
     pub file_button: button::State,
@@ -138,7 +143,7 @@ impl DirUp {
     }
 }
 
-impl FileSelector {
+impl FileList {
     pub fn list_dir(
         dir: &PathBuf,
     ) -> std::iter::FilterMap<
@@ -162,13 +167,16 @@ impl FileSelector {
         fs::read_dir(dir).unwrap().filter_map(the_filter)
     }
 
-    pub fn file_buttons(dir: &PathBuf) -> Vec<FileButton> {
-        let mut buttons: Vec<FileButton> = FileSelector::list_dir(dir)
+    pub fn new(dir: &PathBuf) -> Vec<FileButton> {
+        let mut buttons: Vec<FileButton> = FileList::list_dir(dir)
             .map(|x| FileButton::new(x.path()))
             .collect();
         buttons.sort();
         buttons
     }
+}
+
+impl FileSelector {
 
     pub fn new(dir: &PathBuf) -> Self {
         FileSelector {
@@ -177,7 +185,7 @@ impl FileSelector {
             dir_up: DirUp {
                 button: button::State::new(),
             },
-            file_list: FileSelector::file_buttons(dir),
+            file_list: FileList::new(dir),
             selected_file: None,
             search: text_input::State::new(),
             search_value: String::new(),
