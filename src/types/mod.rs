@@ -238,6 +238,7 @@ impl FileButton {
             &mut self.file_button,
             Text::new(self.file_path.to_str().unwrap()),
         )
+        .style(FileButton_)
         .on_press(Message::SelectedFile(Some(self.file_path.to_owned())))
         .width(Length::Fill)
     }
