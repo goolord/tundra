@@ -1,9 +1,10 @@
+use walkdir::DirEntry;
 use cauldron::audio::AudioSegment;
 use iced::canvas::*;
 
 use iced::{
-    button, canvas, scrollable, text_input, Button, Canvas, Color, Column, Container, Length,
-    Point, Rectangle, Scrollable, Svg, Text, TextInput, Vector,
+    button, scrollable, text_input, Button, Color, Column, Container, Length,
+    Point, Rectangle, Scrollable, Text, TextInput,
 };
 use std::cmp::*;
 use std::ffi::OsStr;
@@ -252,4 +253,11 @@ impl Ord for FileButton {
     fn cmp(&self, other: &Self) -> Ordering {
         self.file_path.cmp(&other.file_path)
     }
+}
+
+pub fn is_hidden(entry: &DirEntry) -> bool {
+    entry.file_name()
+         .to_str()
+         .map(|s| s.starts_with("."))
+         .unwrap_or(false)
 }
