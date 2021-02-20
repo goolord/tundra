@@ -1,10 +1,10 @@
-use walkdir::DirEntry;
 use cauldron::audio::AudioSegment;
 use iced::canvas::*;
+use walkdir::DirEntry;
 
 use iced::{
-    button, scrollable, text_input, Button, Color, Column, Container, Length,
-    Point, Rectangle, Scrollable, Text, TextInput,
+    button, scrollable, text_input, Button, Color, Column, Container, Length, Point, Rectangle,
+    Scrollable, Text, TextInput,
 };
 use std::cmp::*;
 use std::ffi::OsStr;
@@ -12,7 +12,6 @@ use std::ffi::OsStr;
 use std::fs::{self};
 
 use std::path::PathBuf;
-
 
 mod style;
 pub use style::*;
@@ -178,7 +177,6 @@ impl FileList {
 }
 
 impl FileSelector {
-
     pub fn new(dir: &PathBuf) -> Self {
         FileSelector {
             scroll_state: scrollable::State::new(),
@@ -216,10 +214,11 @@ impl FileSelector {
             .height(Length::Fill);
         let search = TextInput::new(
             &mut self.search,
-            "This is the placeholder...",
+            "Search",
             &self.search_value,
             Message::Search,
-        );
+        )
+        .padding(10);
 
         Column::new().push(fs).push(search)
     }
@@ -257,8 +256,9 @@ impl Ord for FileButton {
 }
 
 pub fn is_hidden(entry: &DirEntry) -> bool {
-    entry.file_name()
-         .to_str()
-         .map(|s| s.starts_with("."))
-         .unwrap_or(false)
+    entry
+        .file_name()
+        .to_str()
+        .map(|s| s.starts_with("."))
+        .unwrap_or(false)
 }
