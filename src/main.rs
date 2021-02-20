@@ -132,14 +132,12 @@ impl Application for App {
             .width(Length::Fill)
             .height(Length::FillPortion(1))
             .padding(1)
-            .style(DEBUG_BORDER_BOUNDS)
             .center_x()
             .center_y();
 
         let file_selector_container = Container::new(self.file_selector.view())
             .width(Length::Fill)
             .height(Length::Fill)
-            .style(DEBUG_BORDER_BOUNDS)
             .center_x();
 
         Row::new()
