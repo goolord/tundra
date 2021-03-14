@@ -44,10 +44,10 @@ impl Application for App {
             Message::SelectedFile(selected_file) => {
                 match &selected_file {
                     Some(file_path) => {
-                        if selected_file.as_ref().map_or(false, |fp| fp.is_dir()) {
+                        if file_path.is_dir() {
                             self.file_selector = FileSelector::new(file_path);
                         } else {
-                            self.player.play_file(&file_path);
+                            self.player.play_file(file_path.to_owned());
                             self.file_selector.selected_file = selected_file;
                         }
                     }
