@@ -1,20 +1,20 @@
 use cauldron::audio::AudioSegment;
 use iced::canvas::*;
-use walkdir::DirEntry;
-
 use iced::{
-    button, scrollable, text_input, Button, Color, Column, Container, Length, Point, Rectangle,
-    Scrollable, Text, TextInput,
+    button, scrollable, text_input, Button, Color, Column, Container, Element, Length, Point,
+    Rectangle, Scrollable, Space, Text, TextInput,
 };
 use std::cmp::*;
 use std::ffi::OsStr;
-
-use std::fs::{self};
-
+use std::fs;
+use std::fs::File;
+use std::io::BufReader;
 use std::path::PathBuf;
+pub use style::*;
+use walkdir::DirEntry;
+use std::thread;
 
 mod style;
-pub use style::*;
 
 pub struct WaveForm {
     samples: Vec<i32>,
@@ -261,4 +261,47 @@ pub fn is_hidden(entry: &DirEntry) -> bool {
         .to_str()
         .map(|s| s.starts_with("."))
         .unwrap_or(false)
+}
+
+// todo: abstract this into a player type
+// ref: https://github.com/tindleaj/miso/blob/master/src/player.rs
+pub struct Player {
+    pub waveform: Option<WaveForm>,
+}
+
+impl Player {
+    pub fn new() -> Self {
+        Player { waveform: None }
+    }
+
+    pub fn view(&self) -> Container<'_, Message> {
+        let svg: Element<Message> =
+            self.waveform
+                .as_ref()
+                .map_or(Space::new(Length::Fill, Length::Fill).into(), |wf| {
+                    let canvas = Canvas::new(wf).width(Length::Fill).height(Length::Fill);
+                    canvas.into()
+                });
+        let svg_container = Container::new(svg)
+            .width(Length::Fill)
+            .height(Length::FillPortion(1))
+            .padding(1)
+            .center_x()
+            .center_y();
+        return svg_container;
+    }
+
+    pub fn play_file(&mut self, file_path: &PathBuf) {
+        let file = File::open(file_path).unwrap();
+        let wave = AudioSegment::read(file_path.to_str().unwrap()).unwrap();
+        let audio_buffer: WaveForm = wave.into();
+        thread::spawn(move || {
+            let (_stream, stream_handle) = rodio::OutputStream::try_default().unwrap();
+            let sink = rodio::Sink::try_new(&stream_handle).unwrap();
+            let source = rodio::Decoder::new(BufReader::new(file)).unwrap();
+            sink.append(source);
+            sink.sleep_until_end()
+        });
+        self.waveform = Some(audio_buffer);
+    }
 }
