@@ -1,7 +1,7 @@
 use super::*;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
-use iced::{executor, Application, Command, Container, Element, Length, Row};
+use iced::{Application, Clipboard, Command, Container, Element, Length, Row, executor};
 use walkdir::WalkDir;
 
 pub struct App {
@@ -29,7 +29,7 @@ impl Application for App {
         String::from("Tundra Sample Browser")
     }
 
-    fn update(&mut self, message: Message) -> Command<Message> {
+    fn update(&mut self, message: Message, _clipboard: &mut Clipboard) -> Command<Message> {
         match message {
             Message::SelectedFile(selected_file) => {
                 match &selected_file {
@@ -63,11 +63,12 @@ impl Application for App {
                         .filter_entry(|e| !is_hidden(e))
                         .filter_map(|e| match e {
                             Ok(e) => {
+                                let epath = e.path();
                                 if matcher
-                                    .fuzzy_match(e.path().to_string_lossy().as_ref(), &search_str)
+                                    .fuzzy_match(epath.to_string_lossy().as_ref(), &search_str)
                                     .is_some()
                                 {
-                                    Some(FileButton::new(e.path().to_path_buf()))
+                                    Some(FileButton::new(epath.to_path_buf()))
                                 } else {
                                     None
                                 }

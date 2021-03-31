@@ -17,7 +17,7 @@ impl WaveForm {
     pub fn audio_to_path(&self, frame: &Frame) -> Path {
         // let truncate = 100; // (samples.len() as u64).div(100 as u64);
         let max = 2_i32.pow(self.bits_per_sample);
-        let translate_y: f32 = (max / 2) as f32;
+        let translate_y = (max / 2) as f32;
         let height = frame.height();
         let width = frame.width();
         let scale_height = height / max as f32;
@@ -50,8 +50,8 @@ impl Program<Message> for &WaveForm {
         let mut frame = Frame::new(bounds.size());
         // frame.scale(0.01);
         // frame.translate(Vector {
-        // x: 0.0,
-        // y: (max / 2) as f32
+        //     x: 0.0,
+        //     y: (max / 2) as f32
         // });
         let path = self.audio_to_path(&frame);
         let stroke = Stroke {
@@ -68,15 +68,14 @@ impl Program<Message> for &WaveForm {
 impl From<AudioSegment> for WaveForm {
     fn from(mut audio_segment: AudioSegment) -> WaveForm {
         let number_channels = audio_segment.number_channels();
-        let number_channels_i32 = number_channels as i32;
         let mut samples: Vec<i32> = Vec::new();
-        let all_samples = audio_segment
+        let all_samples: Vec<i32> = audio_segment
             .samples()
             .unwrap()
             .map(|r| r.unwrap())
-            .collect::<Vec<i32>>();
+            .collect();
         for arr in all_samples.chunks_exact(number_channels) {
-            samples.push(arr.iter().sum::<i32>() / number_channels_i32);
+            samples.push(arr.iter().sum::<i32>() / number_channels as i32);
         }
         WaveForm {
             samples,
