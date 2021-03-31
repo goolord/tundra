@@ -7,7 +7,7 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-iced = { version = "0.2", features = ["svg", "canvas"] }
+iced = { version = "0.3", features = ["svg", "canvas"] }
 iced_audio = "0.6.1"
 rodio = "0.13.0"
 cauldron = "0.0.3"

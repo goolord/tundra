@@ -15,9 +15,8 @@ pub fn is_audio(x: &OsStr) -> bool {
 }
 
 pub fn is_hidden(entry: &DirEntry) -> bool {
-    entry
-        .file_name()
-        .to_str()
-        .map(|s| s.starts_with('.'))
-        .unwrap_or(false)
+    match entry.file_name().to_str() {
+        Some(s) => s.starts_with('.'),
+        None => false,
+    }
 }
