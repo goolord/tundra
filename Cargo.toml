@@ -1,18 +1,20 @@
+cargo-features = ["edition2021"]
+
 [package]
 name = "tundra"
 version = "0.1.0"
 authors = ["Zachary Churchill <zacharyachurchill@gmail.com>"]
-edition = "2018"
+edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 iced = { version = "0.3", features = ["svg", "canvas"] }
 iced_audio = "0.6.1"
-rodio = "0.13.0"
+rodio = "0.13.1"
 cauldron = "0.0.3"
-svg = "0.8.1"
-walkdir = "2.3.1"
+svg = "0.9.1"
+walkdir = "2.3.2"
 fuzzy-matcher = "*"
 
 [profile.dev]
