@@ -1,5 +1,6 @@
 pub use super::common::*;
 pub use super::style::*;
+use iced::Row;
 use iced::{
     button, scrollable, text_input, Button, Column, Container, Length, Scrollable, Text, TextInput,
 };
@@ -36,11 +37,16 @@ pub struct DirUp {
 
 impl DirUp {
     pub fn view(&mut self, cwd: PathBuf) -> Button<Message> {
-        Button::new(&mut self.button, Text::new("^^^ Go up"))
+        Button::new( &mut self.button
+                   , Row::new()
+                        .push(iced::Svg::from_path("resources/up_chevron.svg").height(Length::Units(16)))
+                        .push(Text::new("  Go up").size(24))
+                   )
             .on_press(Message::ChangeDirectory(match cwd.parent() {
                 Some(x) => x.to_path_buf(),
                 None => cwd,
             }))
+            .style(DirUpButton)
             .width(Length::Fill)
     }
 }
@@ -120,6 +126,8 @@ impl FileSelector {
             &self.search_value,
             Message::Search,
         )
+        .style(FileSearch)
+        .size(32)
         .padding(10);
 
         Column::new().push(fs).push(search)
@@ -137,7 +145,8 @@ impl FileButton {
     pub fn view(&mut self) -> Button<Message> {
         Button::new(
             &mut self.file_button,
-            Text::new(self.file_path.to_str().unwrap()),
+            Text::new(self.file_path.to_str().unwrap())
+                .size(24),
         )
         .style(FileButton_)
         .on_press(Message::SelectedFile(Some(self.file_path.to_owned())))
