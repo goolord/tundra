@@ -55,7 +55,7 @@ impl Program<Message> for &WaveForm {
         // });
         let path = self.audio_to_path(&frame);
         let stroke = Stroke {
-            color: Color::BLACK,
+            color: Color::from_rgb8(0x50, 0x7a, 0xe0),
             width: 1.0,
             line_cap: Default::default(),
             line_join: Default::default(),
@@ -106,6 +106,7 @@ impl Player {
         let svg_container = Container::new(svg)
             .width(Length::Fill)
             .height(Length::FillPortion(1))
+            .style(PlayerContainer)
             .padding(1)
             .center_x()
             .center_y();

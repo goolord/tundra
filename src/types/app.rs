@@ -3,6 +3,7 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use iced::{Application, Clipboard, Command, Container, Element, Length, Row, executor};
 use walkdir::WalkDir;
+use std::thread;
 
 pub struct App {
     pub file_selector: FileSelector,
@@ -91,6 +92,7 @@ impl Application for App {
         let file_selector_container = Container::new(self.file_selector.view())
             .width(Length::Fill)
             .height(Length::Fill)
+            .style(Container_)
             .center_x();
 
         Row::new().push(file_selector_container).push(player).into()
