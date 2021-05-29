@@ -33,7 +33,7 @@ impl WaveForm {
                     x: i as f32 * scale_width,
                     y: (sample + translate_y) * scale_height,
                 };
-                if i % 2 == 0 {
+                if i & 1 == 0 {
                     builder.move_to(point)
                 } else {
                     builder.line_to(point)
