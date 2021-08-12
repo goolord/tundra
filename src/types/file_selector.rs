@@ -53,6 +53,9 @@ impl DirUp {
 }
 
 impl FileList {
+    pub fn file_filter(x: &PathBuf) -> bool {
+        x.is_dir() || x.extension().map_or(false, is_audio)
+    }
     pub fn list_dir(
         dir: &PathBuf,
     ) -> std::iter::FilterMap<
@@ -62,9 +65,7 @@ impl FileList {
         fn the_filter(x: std::io::Result<std::fs::DirEntry>) -> Option<std::fs::DirEntry> {
             match x {
                 Ok(x) => {
-                    let x_is_dir = x.path().is_dir();
-                    let x_is_audio = x.path().extension().map_or(false, is_audio);
-                    if x_is_dir || x_is_audio {
+                    if FileList::file_filter(&x.path()) {
                         Some(x)
                     } else {
                         None

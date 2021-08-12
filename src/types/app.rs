@@ -61,7 +61,7 @@ impl Application for App {
                         .max_open(100)
                         .follow_links(true)
                         .into_iter()
-                        .filter_entry(|e| !is_hidden(e))
+                        .filter_entry(|e| FileList::file_filter(&e.path().into()))
                         .filter_map(|e| match e {
                             Ok(e) => {
                                 let epath = e.path();
