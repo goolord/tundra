@@ -1,12 +1,14 @@
 use std::ffi::OsStr;
 use std::path::PathBuf;
 use walkdir::DirEntry;
+use futures::future::{Abortable, AbortHandle, Aborted, AbortRegistration};
 
 #[derive(Debug, Clone)]
 pub enum Message {
     SelectedFile(Option<PathBuf>),
     ChangeDirectory(PathBuf),
     Search(String),
+    SearchCompleted(Result<Vec<PathBuf>, Aborted>)
 }
 
 pub fn is_audio(x: &OsStr) -> bool {

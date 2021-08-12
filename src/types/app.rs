@@ -4,10 +4,12 @@ use fuzzy_matcher::FuzzyMatcher;
 use iced::{executor, Application, Clipboard, Command, Container, Element, Length, Row};
 use std::thread;
 use walkdir::WalkDir;
+use futures::future::{Abortable, AbortHandle, Aborted, AbortRegistration};
 
 pub struct App {
     pub file_selector: FileSelector,
     pub player: Player,
+    pub search_thread: AbortHandle
 }
 
 impl Application for App {
@@ -19,9 +21,11 @@ impl Application for App {
         let current_dir = std::env::current_dir().unwrap();
         let file_selector = FileSelector::new(&current_dir);
         let player = Player::new();
+        let search_thread = AbortHandle::new_pair().0;
         let app = App {
             file_selector,
             player,
+            search_thread,
         };
         (app, Command::none())
     }
@@ -54,34 +58,52 @@ impl Application for App {
                 Command::none()
             }
             Message::Search(search_str) => {
-                if search_str.len() > 2 {
+                self.search_thread.abort();
+                let (abort_handle, abort_reg) = AbortHandle::new_pair();
+                self.search_thread = abort_handle;
+                self.file_selector.search_value = search_str.clone();
+                let current_dir = self.file_selector.current_dir.clone();
+                if search_str.len() > 2 { 
                     let matcher = SkimMatcherV2::default();
-                    let file_list = WalkDir::new(&self.file_selector.current_dir)
-                        .max_depth(100)
-                        .max_open(100)
-                        .follow_links(true)
-                        .into_iter()
-                        .filter_entry(|e| FileList::file_filter(&e.path().into()))
-                        .filter_map(|e| match e {
-                            Ok(e) => {
-                                let epath = e.path();
-                                if matcher
-                                    .fuzzy_match(epath.to_string_lossy().as_ref(), &search_str)
-                                    .is_some()
-                                {
-                                    Some(FileButton::new(epath.to_path_buf()))
-                                } else {
-                                    None
+                    let file_list = Abortable::new(async move {
+                        WalkDir::new(&current_dir)
+                            .max_depth(100)
+                            .max_open(100)
+                            .follow_links(true)
+                            .into_iter()
+                            .filter_entry(|e| FileList::file_filter(&e.path().into()))
+                            .filter_map(|e| match e {
+                                Ok(e) => {
+                                    let epath = e.path();
+                                    if matcher
+                                        .fuzzy_match(epath.to_string_lossy().as_ref(), &search_str)
+                                        .is_some()
+                                    {
+                                        Some(epath.to_path_buf())
+                                    } else {
+                                        None
+                                    }
                                 }
-                            }
-                            Err(_) => None,
-                        })
-                        .collect();
-                    self.file_selector.file_list = file_list;
+                                Err(_) => None,
+                            })
+                            .collect()
+                    }, abort_reg);
+                    Command::perform(file_list, Message::SearchCompleted)
                 } else {
-                    self.file_selector.file_list = FileList::new(&self.file_selector.current_dir)
+                    self.file_selector.file_list = FileList::new(&self.file_selector.current_dir);
+                    Command::none()
                 }
-                self.file_selector.search_value = search_str;
+            }
+            Message::SearchCompleted(file_list_res) => {
+                match file_list_res {
+                    Ok (file_list) => {
+                        self.file_selector.file_list = file_list.iter().map(|x| FileButton::new(x.to_path_buf())).collect();
+                    },
+                    Err (_) => {
+                        // aborted
+                        ()
+                    }
+                }
                 Command::none()
             }
         }

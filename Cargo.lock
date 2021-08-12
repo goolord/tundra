@@ -2969,6 +2969,7 @@ checksum = "7ae2f58a822f08abdaf668897e96a5656fe72f5a9ce66422423e8849384872e6"
 name = "tundra"
 version = "0.1.0"
 dependencies = [
+ "futures",
  "fuzzy-matcher",
  "iced",
  "iced_audio",
