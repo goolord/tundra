@@ -10,7 +10,7 @@ pub enum Message {
 }
 
 pub fn is_audio(x: &OsStr) -> bool {
-    let valid_extensions = ["flac", "wav", "mp3"];
+    let valid_extensions = ["flac", "wav", "mp3", "ogg"];
     valid_extensions.contains(&x.to_string_lossy().as_ref())
 }
 

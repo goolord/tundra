@@ -1,15 +1,15 @@
 pub use super::common::*;
 pub use super::style::*;
-use cauldron::audio::AudioSegment;
 use iced::canvas::*;
 use iced::{Color, Container, Element, Length, Point, Rectangle, Space};
 use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
 use std::thread;
+use rodio::Source;
 
 pub struct WaveForm {
-    samples: Vec<i32>,
+    samples: Vec<i16>,
     bits_per_sample: u32,
 }
 
@@ -65,21 +65,19 @@ impl Program<Message> for &WaveForm {
     }
 }
 
-impl From<AudioSegment> for WaveForm {
-    fn from(mut audio_segment: AudioSegment) -> WaveForm {
-        let number_channels = audio_segment.number_channels();
-        let mut samples: Vec<i32> = Vec::new();
-        let all_samples: Vec<i32> = audio_segment
-            .samples()
-            .unwrap()
-            .map(|r| r.unwrap())
+impl From<rodio::Decoder<std::io::BufReader<File>>> for WaveForm {
+    fn from(decoder: rodio::Decoder<std::io::BufReader<File>>) -> WaveForm {
+        let number_channels = decoder.channels();
+        let mut samples: Vec<i16> = Vec::new();
+        let all_samples: Vec<i16> = decoder
+            .into_iter()
             .collect();
-        for arr in all_samples.chunks_exact(number_channels) {
-            samples.push(arr.iter().sum::<i32>() / number_channels as i32);
+        for arr in all_samples.chunks_exact(number_channels as usize) {
+            samples.push(arr.iter().sum::<i16>() / number_channels as i16);
         }
         WaveForm {
             samples,
-            bits_per_sample: audio_segment.info().bits_per_sample,
+            bits_per_sample: 16,
         }
     }
 }
@@ -114,16 +112,17 @@ impl Player {
     }
 
     pub fn play_file(&mut self, file_path: PathBuf) {
-        let wave = AudioSegment::read(file_path.to_str().unwrap()).unwrap();
-        let file = File::open(file_path).unwrap();
-        let audio_buffer: WaveForm = wave.into();
+        let file = File::open(&file_path).unwrap();
+        let source = rodio::Decoder::new(BufReader::new(file)).unwrap();
+        let audio_buffer: WaveForm = source.into();
+        self.waveform = Some(audio_buffer);
         thread::spawn(move || {
+            let file = File::open(file_path).unwrap();
             let (_stream, stream_handle) = rodio::OutputStream::try_default().unwrap();
             let sink = rodio::Sink::try_new(&stream_handle).unwrap();
             let source = rodio::Decoder::new(BufReader::new(file)).unwrap();
             sink.append(source);
             sink.sleep_until_end()
         });
-        self.waveform = Some(audio_buffer);
     }
 }
