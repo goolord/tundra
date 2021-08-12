@@ -1,9 +1,9 @@
 use super::*;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
-use iced::{Application, Clipboard, Command, Container, Element, Length, Row, executor};
-use walkdir::WalkDir;
+use iced::{executor, Application, Clipboard, Command, Container, Element, Length, Row};
 use std::thread;
+use walkdir::WalkDir;
 
 pub struct App {
     pub file_selector: FileSelector,

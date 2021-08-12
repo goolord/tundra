@@ -37,17 +37,18 @@ pub struct DirUp {
 
 impl DirUp {
     pub fn view(&mut self, cwd: PathBuf) -> Button<Message> {
-        Button::new( &mut self.button
-                   , Row::new()
-                        .push(iced::Svg::from_path("resources/up_chevron.svg").height(Length::Units(16)))
-                        .push(Text::new("  Go up").size(24))
-                   )
-            .on_press(Message::ChangeDirectory(match cwd.parent() {
-                Some(x) => x.to_path_buf(),
-                None => cwd,
-            }))
-            .style(DirUpButton)
-            .width(Length::Fill)
+        Button::new(
+            &mut self.button,
+            Row::new()
+                .push(iced::Svg::from_path("resources/up_chevron.svg").height(Length::Units(16)))
+                .push(Text::new("  Go up").size(24)),
+        )
+        .on_press(Message::ChangeDirectory(match cwd.parent() {
+            Some(x) => x.to_path_buf(),
+            None => cwd,
+        }))
+        .style(DirUpButton)
+        .width(Length::Fill)
     }
 }
 
@@ -145,8 +146,7 @@ impl FileButton {
     pub fn view(&mut self) -> Button<Message> {
         Button::new(
             &mut self.file_button,
-            Text::new(self.file_path.to_str().unwrap())
-                .size(24),
+            Text::new(self.file_path.to_str().unwrap()).size(24),
         )
         .style(FileButton_)
         .on_press(Message::SelectedFile(Some(self.file_path.to_owned())))

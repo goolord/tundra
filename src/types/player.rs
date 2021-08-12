@@ -2,11 +2,11 @@ pub use super::common::*;
 pub use super::style::*;
 use iced::canvas::*;
 use iced::{Color, Container, Element, Length, Point, Rectangle, Space};
+use rodio::Source;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
 use std::thread;
-use rodio::Source;
 
 pub struct WaveForm {
     samples: Vec<i16>,
@@ -69,9 +69,7 @@ impl From<rodio::Decoder<std::io::BufReader<File>>> for WaveForm {
     fn from(decoder: rodio::Decoder<std::io::BufReader<File>>) -> WaveForm {
         let number_channels = decoder.channels();
         let mut samples: Vec<i16> = Vec::new();
-        let all_samples: Vec<i16> = decoder
-            .into_iter()
-            .collect();
+        let all_samples: Vec<i16> = decoder.into_iter().collect();
         for arr in all_samples.chunks_exact(number_channels as usize) {
             samples.push(arr.iter().sum::<i16>() / number_channels as i16);
         }
