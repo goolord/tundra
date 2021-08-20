@@ -54,7 +54,7 @@ impl DirUp {
 
 impl FileList {
     pub fn file_filter(x: &PathBuf) -> bool {
-        x.is_dir() || x.extension().map_or(false, is_audio)
+        (x.is_dir() && !is_hidden(x)) || x.extension().map_or(false, is_audio)
     }
     pub fn list_dir(
         dir: &PathBuf,
