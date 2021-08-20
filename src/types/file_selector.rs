@@ -6,6 +6,7 @@ use iced::{
 };
 use std::cmp::*;
 use std::fs;
+use std::path::Path;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
@@ -56,11 +57,11 @@ impl DirUp {
 }
 
 impl FileList {
-    pub fn file_filter(x: &PathBuf) -> bool {
-        (x.is_dir() && !is_hidden(x)) || x.extension().map_or(false, is_audio)
+    pub fn file_filter(x: PathBuf) -> bool {
+        (x.is_dir() && !is_hidden(&x)) || x.extension().map_or(false, is_audio)
     }
     pub fn list_dir(
-        dir: &PathBuf,
+        dir: &Path,
     ) -> std::iter::FilterMap<
         std::fs::ReadDir,
         fn(x: std::io::Result<std::fs::DirEntry>) -> Option<std::fs::DirEntry>,
@@ -68,7 +69,7 @@ impl FileList {
         fn the_filter(x: std::io::Result<std::fs::DirEntry>) -> Option<std::fs::DirEntry> {
             match x {
                 Ok(x) => {
-                    if FileList::file_filter(&x.path()) {
+                    if FileList::file_filter(x.path()) {
                         Some(x)
                     } else {
                         None
@@ -80,7 +81,7 @@ impl FileList {
         fs::read_dir(dir).unwrap().filter_map(the_filter)
     }
 
-    pub fn new(dir: &PathBuf) -> Vec<FileButton> {
+    pub fn new(dir: &Path) -> Vec<FileButton> {
         let mut buttons: Vec<FileButton> = FileList::list_dir(dir)
             .map(|x| FileButton::new(x.path()))
             .collect();
@@ -90,7 +91,7 @@ impl FileList {
 }
 
 impl FileSelector {
-    pub fn new(dir: &PathBuf) -> Self {
+    pub fn new(dir: &Path) -> Self {
         FileSelector {
             scroll_state: scrollable::State::new(),
             current_dir: dir.to_owned(),
@@ -147,7 +148,7 @@ impl FileButton {
         }
     }
 
-    pub fn view(&mut self, base_path: &PathBuf) -> Button<Message> {
+    pub fn view(&mut self, base_path: &Path) -> Button<Message> {
         let string = self.file_path.to_str().unwrap();
         Button::new(
             &mut self.file_button,

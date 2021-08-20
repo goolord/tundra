@@ -1,6 +1,6 @@
 use futures::future::Aborted;
 use std::ffi::OsStr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -15,7 +15,7 @@ pub fn is_audio(x: &OsStr) -> bool {
     valid_extensions.contains(&x.to_string_lossy().as_ref())
 }
 
-pub fn is_hidden(entry: &PathBuf) -> bool {
+pub fn is_hidden(entry: &Path) -> bool {
     match entry.file_name() {
         Some(s) => s.to_string_lossy().starts_with('.'),
         None => false,

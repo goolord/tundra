@@ -71,7 +71,7 @@ impl Application for App {
                                 .max_open(100)
                                 .follow_links(true)
                                 .into_iter()
-                                .filter_entry(|e| FileList::file_filter(&e.path().into()))
+                                .filter_entry(|e| FileList::file_filter(e.path().into()))
                                 .filter_map(|e| match e {
                                     Ok(e) => {
                                         let epath = e.path();
@@ -100,17 +100,11 @@ impl Application for App {
                 }
             }
             Message::SearchCompleted(file_list_res) => {
-                match file_list_res {
-                    Ok(file_list) => {
-                        self.file_selector.file_list = file_list
-                            .iter()
-                            .map(|x| FileButton::new(x.to_path_buf()))
-                            .collect();
-                    }
-                    Err(_) => {
-                        // aborted
-                        ()
-                    }
+                if let Ok(file_list) = file_list_res {
+                    self.file_selector.file_list = file_list
+                        .iter()
+                        .map(|x| FileButton::new(x.to_path_buf()))
+                        .collect();
                 }
                 Command::none()
             }
