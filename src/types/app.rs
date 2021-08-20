@@ -1,9 +1,8 @@
 use super::*;
-use futures::future::{AbortHandle, AbortRegistration, Abortable, Aborted};
+use futures::future::{AbortHandle, Abortable};
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use iced::{executor, Application, Clipboard, Command, Container, Element, Length, Row};
-use std::thread;
 use walkdir::WalkDir;
 
 pub struct App {

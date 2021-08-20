@@ -109,7 +109,7 @@ impl FileSelector {
         let fs_column = Column::new().push(dir_up);
         let new_col = self.file_list.iter_mut().fold(fs_column, |col, button| {
             let path = button.file_path.to_owned();
-            let element: Button<Message> = button.view();
+            let element: Button<Message> = button.view(&self.current_dir);
             let mut container = Container::new(element).padding(5).width(Length::Fill);
             if Some(path.canonicalize().unwrap())
                 == selected_file.map(|x| x.canonicalize().unwrap())
@@ -144,10 +144,15 @@ impl FileButton {
         }
     }
 
-    pub fn view(&mut self) -> Button<Message> {
+    pub fn view(&mut self, base_path: &PathBuf) -> Button<Message> {
+        let string = self.file_path.to_str().unwrap();
         Button::new(
             &mut self.file_button,
-            Text::new(self.file_path.to_str().unwrap()).size(24),
+            Text::new(remove_prefix(
+                string,
+                base_path.as_os_str().to_str().unwrap(),
+            ))
+            .size(24),
         )
         .style(FileButton_)
         .on_press(Message::SelectedFile(Some(self.file_path.to_owned())))
@@ -164,5 +169,12 @@ impl PartialOrd for FileButton {
 impl Ord for FileButton {
     fn cmp(&self, other: &Self) -> Ordering {
         self.file_path.cmp(&other.file_path)
+    }
+}
+
+fn remove_prefix<'a>(s: &'a str, prefix: &str) -> &'a str {
+    match s.strip_prefix(prefix) {
+        Some(s) => unsafe { s.get_unchecked(1..s.len()) },
+        None => s,
     }
 }
