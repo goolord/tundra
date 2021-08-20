@@ -37,11 +37,14 @@ pub struct DirUp {
 
 impl DirUp {
     pub fn view(&mut self, cwd: PathBuf) -> Button<Message> {
+        let mut text = String::new();
+        text.push_str("  ");
+        text.push_str(cwd.to_str().unwrap_or("Go up"));
         Button::new(
             &mut self.button,
             Row::new()
                 .push(iced::Svg::from_path("resources/up_chevron.svg").height(Length::Units(16)))
-                .push(Text::new("  Go up").size(24)),
+                .push(Text::new(text).size(24)),
         )
         .on_press(Message::ChangeDirectory(match cwd.parent() {
             Some(x) => x.to_path_buf(),
