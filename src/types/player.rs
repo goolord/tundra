@@ -68,8 +68,8 @@ impl Program<Message> for &WaveForm {
 impl From<rodio::Decoder<std::io::BufReader<File>>> for WaveForm {
     fn from(decoder: rodio::Decoder<std::io::BufReader<File>>) -> WaveForm {
         let number_channels = decoder.channels();
-        let mut samples: Vec<i16> = Vec::new();
         let all_samples: Vec<i16> = decoder.into_iter().collect();
+        let mut samples: Vec<i16> = Vec::with_capacity(all_samples.len());
         for arr in all_samples.chunks_exact(number_channels as usize) {
             samples.push(arr.iter().sum::<i16>() / number_channels as i16);
         }

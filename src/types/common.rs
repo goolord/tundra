@@ -12,7 +12,8 @@ pub enum Message {
 
 pub fn is_audio(x: &OsStr) -> bool {
     let valid_extensions = ["flac", "wav", "mp3", "ogg"];
-    valid_extensions.contains(&x.to_string_lossy().as_ref())
+    let x_str = x.to_string_lossy();
+    valid_extensions.iter().any(|&s| x_str.ends_with(s))
 }
 
 pub fn is_hidden(entry: &Path) -> bool {

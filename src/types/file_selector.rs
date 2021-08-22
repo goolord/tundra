@@ -149,18 +149,32 @@ impl FileButton {
     }
 
     pub fn view(&mut self, base_path: &Path) -> Button<Message> {
-        let string = self.file_path.to_str().unwrap();
-        Button::new(
-            &mut self.file_button,
-            Text::new(remove_prefix(
-                string,
-                base_path.as_os_str().to_str().unwrap(),
-            ))
-            .size(24),
-        )
-        .style(FileButton_)
-        .on_press(Message::SelectedFile(Some(self.file_path.to_owned())))
-        .width(Length::Fill)
+        let mut file_string = String::new();
+        file_string.push_str("  ");
+        file_string.push_str(self.file_path.to_str().unwrap());
+        let text = Text::new(remove_prefix(
+            &file_string,
+            base_path.as_os_str().to_str().unwrap(),
+        ))
+        .size(24);
+        let label = Row::new();
+        let label_2 = if self.file_path.is_dir() {
+            label
+                .push(iced::Svg::from_path("./resources/folder-solid.svg").width(Length::Units(24)))
+        } else {
+            label
+        };
+        let label_3 = if is_audio(self.file_path.as_os_str()) {
+            label_2
+                .push(iced::Svg::from_path("./resources/music-solid.svg").height(Length::Units(24)))
+        } else {
+            label_2
+        }
+        .push(text);
+        Button::new(&mut self.file_button, label_3)
+            .style(FileButton_)
+            .on_press(Message::SelectedFile(Some(self.file_path.to_owned())))
+            .width(Length::Fill)
     }
 }
 
