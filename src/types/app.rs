@@ -3,8 +3,8 @@ use futures::future::{AbortHandle, Abortable};
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use iced::{executor, Application, Clipboard, Command, Container, Element, Length, Row};
-use walkdir::WalkDir;
 use std::{collections::hash_map::HashMap, path::PathBuf};
+use walkdir::WalkDir;
 
 pub struct App {
     pub file_selector: FileSelector,
@@ -58,21 +58,23 @@ impl Application for App {
             }
             Message::ChangeDirectory(parent_dir) => {
                 self.file_selector = FileSelector::new(&parent_dir);
-                let children: Vec<PathBuf> = WalkDir::new(&parent_dir)
-                    .max_depth(100)
-                    .max_open(100)
-                    .follow_links(true)
-                    .into_iter()
-                    .filter_entry(|e| FileList::file_filter(e.path().into()))
-                    .filter_map(|e| match e {
-                        Ok(e) => {
-                            let epath = e.path();
-                            Some(epath.to_path_buf())
-                        }
-                        Err(_) => None,
-                    })
-                    .collect();
-                self.dir_cache.insert(parent_dir, children);
+                if !self.dir_cache.contains_key(&self.file_selector.current_dir) {
+                    let children: Vec<PathBuf> = WalkDir::new(&parent_dir)
+                        .max_depth(100)
+                        .max_open(100)
+                        .follow_links(true)
+                        .into_iter()
+                        .filter_entry(|e| FileList::file_filter(e.path().into()))
+                        .filter_map(|e| match e {
+                            Ok(e) => {
+                                let epath = e.path();
+                                Some(epath.to_path_buf())
+                            }
+                            Err(_) => None,
+                        })
+                        .collect();
+                    self.dir_cache.insert(parent_dir, children);
+                }
                 Command::none()
             }
             Message::Search(search_str) => {
@@ -84,27 +86,28 @@ impl Application for App {
                         if search_str.len() > 2 {
                             let matcher = SkimMatcherV2::default();
                             let file_list: Vec<PathBuf> = children
-                                    .iter()
-                                    .filter_map(|e| {
-                                        if matcher
-                                            .fuzzy_match(
-                                                e.to_string_lossy().as_ref(),
-                                                &search_str,
-                                            )
-                                            .is_some()
-                                        {
-                                            Some(e.to_owned())
-                                        } else {
-                                            None
-                                        }
-                                    })
-                                    .collect();
-                            Command::perform(std::future::ready(Ok(file_list)), Message::SearchCompleted)
+                                .iter()
+                                .filter_map(|e| {
+                                    if matcher
+                                        .fuzzy_match(e.to_string_lossy().as_ref(), &search_str)
+                                        .is_some()
+                                    {
+                                        Some(e.to_owned())
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect();
+                            Command::perform(
+                                std::future::ready(Ok(file_list)),
+                                Message::SearchCompleted,
+                            )
                         } else {
-                            self.file_selector.file_list = FileList::new(&self.file_selector.current_dir);
+                            self.file_selector.file_list =
+                                FileList::new(&self.file_selector.current_dir);
                             Command::none()
                         }
-                    },
+                    }
                     // dir not cached
                     None => {
                         let (abort_handle, abort_reg) = AbortHandle::new_pair();
@@ -144,7 +147,8 @@ impl Application for App {
                             );
                             Command::perform(file_list, Message::SearchCompleted)
                         } else {
-                            self.file_selector.file_list = FileList::new(&self.file_selector.current_dir);
+                            self.file_selector.file_list =
+                                FileList::new(&self.file_selector.current_dir);
                             Command::none()
                         }
                     }
