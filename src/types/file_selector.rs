@@ -112,7 +112,7 @@ impl FileSelector {
             .width(Length::Fill);
         let mut new_col: Vec<iced::Element<Message>> = Vec::with_capacity(self.file_list.len() + 1);
         new_col.push(dir_up.into());
-        new_col.extend( self.file_list.iter_mut().map(|button| {
+        new_col.extend(self.file_list.iter_mut().map(|button| {
             let path = button.file_path.to_owned();
             let element: Button<Message> = button.view(&self.current_dir);
             let mut container = Container::new(element).padding(5).width(Length::Fill);
@@ -151,14 +151,15 @@ impl FileButton {
     }
 
     pub fn view(&mut self, base_path: &Path) -> Button<Message> {
-        let mut file_string = String::new();
+        let fp = remove_prefix(
+            self.file_path.to_str().unwrap(),
+            base_path.as_os_str().to_str().unwrap()
+        );
+        let mut file_string = String::with_capacity(2 + fp.len());
         file_string.push_str("  ");
-        file_string.push_str(self.file_path.to_str().unwrap());
-        let text = Text::new(remove_prefix(
-            &file_string,
-            base_path.as_os_str().to_str().unwrap(),
-        ))
-        .size(24);
+        file_string.push_str(fp);
+        let text = Text::new(file_string)
+            .size(24);
         let label = Row::new();
         let label_2 = if self.file_path.is_dir() {
             label

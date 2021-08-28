@@ -118,6 +118,7 @@ impl Application for App {
                             let matcher = SkimMatcherV2::default();
                             let file_list = Abortable::new(
                                 async move {
+                                    async_std::task::sleep(std::time::Duration::from_secs(1)).await;
                                     WalkDir::new(&current_dir)
                                         .max_depth(100)
                                         .max_open(100)
