@@ -164,6 +164,10 @@ impl Application for App {
                 }
                 Command::none()
             }
+            Message::TogglePlaying => {
+                self.player.controls.is_playing = !self.player.controls.is_playing;
+                Command::none()
+            }
         }
     }
 

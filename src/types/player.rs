@@ -1,7 +1,7 @@
 pub use super::common::*;
 pub use super::style::*;
 use iced::canvas::*;
-use iced::{Color, Container, Element, Length, Point, Rectangle, Space};
+use iced::{button, Button, Color, Container, Element, Length, Point, Rectangle, Space, Text, Row, Column};
 use rodio::Source;
 use std::fs::File;
 use std::io::BufReader;
@@ -84,32 +84,62 @@ impl From<rodio::Decoder<std::io::BufReader<File>>> for WaveForm {
 // ref: https://github.com/tindleaj/miso/blob/master/src/player.rs
 pub struct Player {
     pub waveform: Option<WaveForm>,
+    pub controls: Controls,
+}
+
+pub struct Controls {
+    pub is_playing: bool,
+    pub volume: f32,
+    // ugh
+    pub play_pause: button::State,
+}
+
+impl Controls {
+    pub fn new() -> Self {
+        Controls {
+            play_pause: button::State::new(),
+            is_playing: false,
+            volume: f32::MAX,
+        }
+    }
+
+    pub fn view(&mut self) -> Column<Message> {
+        let label = format!("playing: {}", self.is_playing);
+        let play_pause = Button::new(&mut self.play_pause, Text::new(label).size(24))
+            .on_press(Message::TogglePlaying);
+        Column::new().push(play_pause)
+    }
 }
 
 impl Player {
     pub fn new() -> Self {
-        Player { waveform: None }
+        Player {
+            waveform: None,
+            controls: Controls::new(),
+        }
     }
 
-    pub fn view(&self) -> Container<'_, Message> {
-        let svg: Element<Message> =
-            self.waveform
-                .as_ref()
-                .map_or(Space::new(Length::Fill, Length::Fill).into(), |wf| {
-                    let canvas = Canvas::new(wf).width(Length::Fill).height(Length::Fill);
-                    canvas.into()
-                });
-        let svg_container = Container::new(svg)
+    pub fn view(&mut self) -> Container<Message> {
+        let svg: Element<Message> = match &self.waveform {
+            Some(wf) => {
+                let canvas = Canvas::new(wf).width(Length::Fill).height(Length::Fill);
+                canvas.into()
+            }
+            None => Space::new(Length::Fill, Length::Fill).into(),
+        };
+        let controls = Controls::view(&mut self.controls);
+        let player = Column::new().push(svg).push(controls);
+        Container::new(player)
             .width(Length::Fill)
             .height(Length::FillPortion(1))
             .style(PlayerContainer)
             .padding(1)
             .center_x()
-            .center_y();
-        svg_container
+            .center_y()
     }
 
     pub fn play_file(&mut self, file_path: PathBuf) {
+        self.controls.is_playing = true;
         let file = File::open(&file_path).unwrap();
         let source = rodio::Decoder::new(BufReader::new(file)).unwrap();
         let audio_buffer: WaveForm = source.into();

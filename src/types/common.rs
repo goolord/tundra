@@ -8,6 +8,7 @@ pub enum Message {
     ChangeDirectory(PathBuf),
     Search(String),
     SearchCompleted(Result<Vec<PathBuf>, Aborted>),
+    TogglePlaying,
 }
 
 pub fn is_audio(x: &OsStr) -> bool {
