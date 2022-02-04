@@ -8,6 +8,7 @@ pub enum Message {
     ChangeDirectory(PathBuf),
     Search(String),
     SearchCompleted(Result<Vec<PathBuf>, Aborted>),
+    InsertDircache((PathBuf, Vec<PathBuf>)),
     TogglePlaying,
 }
 

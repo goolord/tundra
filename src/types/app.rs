@@ -59,23 +59,27 @@ impl Application for App {
             Message::ChangeDirectory(parent_dir) => {
                 self.file_selector = FileSelector::new(&parent_dir);
                 if !self.dir_cache.contains_key(&self.file_selector.current_dir) {
-                    let children: Vec<PathBuf> = WalkDir::new(&parent_dir)
-                        .max_depth(100)
-                        .max_open(100)
-                        .follow_links(true)
-                        .into_iter()
-                        .filter_entry(|e| FileList::file_filter(e.path().into()))
-                        .filter_map(|e| match e {
-                            Ok(e) => {
-                                let epath = e.path();
-                                Some(epath.to_path_buf())
-                            }
-                            Err(_) => None,
-                        })
-                        .collect();
-                    self.dir_cache.insert(parent_dir, children);
+                    let foo = futures::future::lazy(|_| {
+                        let children: Vec<PathBuf> = WalkDir::new(&parent_dir)
+                            .max_depth(100)
+                            .max_open(100)
+                            .follow_links(true)
+                            .into_iter()
+                            .filter_entry(|e| FileList::file_filter(e.path().into()))
+                            .filter_map(|e| match e {
+                                Ok(e) => Some(e.path().to_path_buf()),
+                                Err(_) => None,
+                            })
+                            .collect();
+                        (parent_dir, children)
+                    });
+                    Command::perform(
+                        foo,
+                        Message::InsertDircache,
+                    )
+                } else {
+                    Command::none()
                 }
-                Command::none()
             }
             Message::Search(search_str) => {
                 self.search_thread.abort();
@@ -168,6 +172,10 @@ impl Application for App {
                 self.player.controls.is_playing = !self.player.controls.is_playing;
                 Command::none()
             }
+            Message::InsertDircache((parent_dir, children)) => {
+                self.dir_cache.insert(parent_dir, children);
+                Command::none()
+            },
         }
     }
 
