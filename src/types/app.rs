@@ -1,5 +1,6 @@
 use super::*;
 use futures::future::{AbortHandle, Abortable};
+use futures::*;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use iced::{executor, Application, Clipboard, Command, Container, Element, Length, Row};
@@ -45,8 +46,17 @@ impl Application for App {
                         if file_path.is_dir() {
                             self.file_selector = FileSelector::new(file_path);
                         } else {
-                            self.player.play_file(file_path.to_owned());
+                            let player_thread: std::thread::JoinHandle<()> = self.player.play_file(file_path.to_owned());
                             self.file_selector.selected_file = selected_file;
+                            return Command::perform(
+                                future::lazy(|_| -> Result<(), ()> {
+                                    match player_thread.join() {
+                                        Ok(_) => Ok(()),
+                                        Err(_) => Err(()),
+                                    }
+                                }),
+                                Message::PlayerDone
+                            );
                         }
                     }
                     None => {
@@ -59,7 +69,7 @@ impl Application for App {
             Message::ChangeDirectory(parent_dir) => {
                 self.file_selector = FileSelector::new(&parent_dir);
                 if !self.dir_cache.contains_key(&self.file_selector.current_dir) {
-                    let foo = futures::future::lazy(|_| {
+                    let foo = future::lazy(|_| {
                         let children: Vec<PathBuf> = WalkDir::new(&parent_dir)
                             .max_depth(100)
                             .max_open(100)
@@ -73,10 +83,7 @@ impl Application for App {
                             .collect();
                         (parent_dir, children)
                     });
-                    Command::perform(
-                        foo,
-                        Message::InsertDircache,
-                    )
+                    Command::perform(foo, Message::InsertDircache)
                 } else {
                     Command::none()
                 }
@@ -169,13 +176,19 @@ impl Application for App {
                 Command::none()
             }
             Message::TogglePlaying => {
-                self.player.controls.is_playing = !self.player.controls.is_playing;
+                self.player
+                    .controls
+                    .is_playing
+                    .fetch_nand(true, std::sync::atomic::Ordering::Relaxed);
                 Command::none()
             }
             Message::InsertDircache((parent_dir, children)) => {
                 self.dir_cache.insert(parent_dir, children);
                 Command::none()
-            },
+            }
+            Message::PlayerDone(_) => {
+                Command::none()
+            }
         }
     }
 

@@ -6,6 +6,7 @@ use rodio::Source;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
+use std::sync;
 use std::thread;
 
 pub struct WaveForm {
@@ -88,7 +89,7 @@ pub struct Player {
 }
 
 pub struct Controls {
-    pub is_playing: bool,
+    pub is_playing: sync::Arc<sync::atomic::AtomicBool>,
     pub volume: f32,
     // ugh
     pub play_pause: button::State,
@@ -98,13 +99,13 @@ impl Controls {
     pub fn new() -> Self {
         Controls {
             play_pause: button::State::new(),
-            is_playing: false,
+            is_playing: sync::Arc::new(false.into()),
             volume: f32::MAX,
         }
     }
 
     pub fn view(&mut self) -> Column<Message> {
-        let label = format!("playing: {}", self.is_playing);
+        let label = format!("playing: {}", self.is_playing.load(sync::atomic::Ordering::Relaxed));
         let play_pause = Button::new(&mut self.play_pause, Text::new(label).size(24))
             .on_press(Message::TogglePlaying);
         Column::new().push(play_pause)
@@ -138,19 +139,21 @@ impl Player {
             .center_y()
     }
 
-    pub fn play_file(&mut self, file_path: PathBuf) {
-        self.controls.is_playing = true;
+    pub fn play_file(&mut self, file_path: PathBuf) -> std::thread::JoinHandle<()> {
+        self.controls.is_playing.store(true.into(), sync::atomic::Ordering::Relaxed);
         let file = File::open(&file_path).unwrap();
         let source = rodio::Decoder::new(BufReader::new(file)).unwrap();
         let audio_buffer: WaveForm = source.into();
         self.waveform = Some(audio_buffer);
+        let is_playing = sync::Arc::clone(&self.controls.is_playing);
         thread::spawn(move || {
             let file = File::open(file_path).unwrap();
             let (_stream, stream_handle) = rodio::OutputStream::try_default().unwrap();
             let sink = rodio::Sink::try_new(&stream_handle).unwrap();
             let source = rodio::Decoder::new(BufReader::new(file)).unwrap();
             sink.append(source);
-            sink.sleep_until_end()
-        });
+            sink.sleep_until_end();
+            is_playing.store(false.into(), sync::atomic::Ordering::Relaxed);
+        })
     }
 }
