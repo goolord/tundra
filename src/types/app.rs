@@ -104,7 +104,7 @@ impl Application for App {
                             let children_clone = children.clone();
                             let file_list = Abortable::new(
                                 async move {
-                                    async_std::task::sleep(std::time::Duration::from_millis(250)).await;
+                                    async_std::task::sleep(std::time::Duration::from_millis(200)).await;
                                     children_clone
                                         .iter()
                                         .filter_map(|e| {
@@ -141,7 +141,7 @@ impl Application for App {
                             let matcher = SkimMatcherV2::default();
                             let file_list = Abortable::new(
                                 async move {
-                                    async_std::task::sleep(std::time::Duration::from_secs(1)).await;
+                                    async_std::task::sleep(std::time::Duration::from_millis(300)).await;
                                     WalkDir::new(&current_dir)
                                         .max_depth(100)
                                         .max_open(100)
