@@ -15,7 +15,7 @@ pub struct WaveForm {
 }
 
 impl WaveForm {
-    pub fn audio_to_path(&self, frame: &Frame) -> Path {
+    pub fn to_path(&self, frame: &Frame) -> Path {
         // let truncate = 100; // (samples.len() as u64).div(100 as u64);
         let max = 2_i32.pow(self.bits_per_sample);
         let translate_y = (max / 2) as f32;
@@ -54,7 +54,7 @@ impl Program<Message> for &WaveForm {
         //     x: 0.0,
         //     y: (max / 2) as f32
         // });
-        let path = self.audio_to_path(&frame);
+        let path = self.to_path(&frame);
         let stroke = Stroke {
             color: Color::from_rgb8(0x50, 0x7a, 0xe0),
             width: 1.0,
@@ -141,19 +141,21 @@ impl Player {
 
     pub fn play_file(&mut self, file_path: PathBuf) -> std::thread::JoinHandle<()> {
         self.controls.is_playing.store(true.into(), sync::atomic::Ordering::Relaxed);
-        let file = File::open(&file_path).unwrap();
-        let source = rodio::Decoder::new(BufReader::new(file)).unwrap();
-        let audio_buffer: WaveForm = source.into();
+        let audio_buffer: WaveForm = load_source(&file_path).into();
         self.waveform = Some(audio_buffer);
         let is_playing = sync::Arc::clone(&self.controls.is_playing);
         thread::spawn(move || {
-            let file = File::open(file_path).unwrap();
             let (_stream, stream_handle) = rodio::OutputStream::try_default().unwrap();
             let sink = rodio::Sink::try_new(&stream_handle).unwrap();
-            let source = rodio::Decoder::new(BufReader::new(file)).unwrap();
+            let source = load_source(&file_path);
             sink.append(source);
             sink.sleep_until_end();
             is_playing.store(false.into(), sync::atomic::Ordering::Relaxed);
         })
     }
+}
+
+pub fn load_source(file_path: &PathBuf) -> rodio::Decoder<BufReader<File>> {
+    let file = File::open(file_path).unwrap();
+    rodio::Decoder::new(BufReader::new(file)).unwrap()
 }

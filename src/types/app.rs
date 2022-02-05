@@ -46,7 +46,8 @@ impl Application for App {
                         if file_path.is_dir() {
                             self.file_selector = FileSelector::new(file_path);
                         } else {
-                            let player_thread: std::thread::JoinHandle<()> = self.player.play_file(file_path.to_owned());
+                            let player_thread: std::thread::JoinHandle<()> =
+                                self.player.play_file(file_path.to_owned());
                             self.file_selector.selected_file = selected_file;
                             return Command::perform(
                                 future::lazy(|_| -> Result<(), ()> {
@@ -55,7 +56,7 @@ impl Application for App {
                                         Err(_) => Err(()),
                                     }
                                 }),
-                                Message::PlayerDone
+                                Message::PlayerDone,
                             );
                         }
                     }
@@ -66,6 +67,7 @@ impl Application for App {
 
                 Command::none()
             }
+
             Message::ChangeDirectory(parent_dir) => {
                 self.file_selector = FileSelector::new(&parent_dir);
                 if !self.dir_cache.contains_key(&self.file_selector.current_dir) {
@@ -88,31 +90,41 @@ impl Application for App {
                     Command::none()
                 }
             }
+
             Message::Search(search_str) => {
                 self.search_thread.abort();
                 match self.dir_cache.get(&self.file_selector.current_dir) {
                     // dir is cached
                     Some(children) => {
+                        let (abort_handle, abort_reg) = AbortHandle::new_pair();
+                        self.search_thread = abort_handle;
                         self.file_selector.search_value = search_str.clone();
                         if search_str.len() > 2 {
                             let matcher = SkimMatcherV2::default();
-                            let file_list: Vec<PathBuf> = children
-                                .iter()
-                                .filter_map(|e| {
-                                    if matcher
-                                        .fuzzy_match(e.to_string_lossy().as_ref(), &search_str)
-                                        .is_some()
-                                    {
-                                        Some(e.to_owned())
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .collect();
-                            Command::perform(
-                                std::future::ready(Ok(file_list)),
-                                Message::SearchCompleted,
-                            )
+                            let children_clone = children.clone();
+                            let file_list = Abortable::new(
+                                async move {
+                                    async_std::task::sleep(std::time::Duration::from_millis(250)).await;
+                                    children_clone
+                                        .iter()
+                                        .filter_map(|e| {
+                                            if matcher
+                                                .fuzzy_match(
+                                                    e.to_string_lossy().as_ref(),
+                                                    &search_str,
+                                                )
+                                                .is_some()
+                                            {
+                                                Some(e.to_owned())
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                        .collect()
+                                },
+                                abort_reg
+                            );
+                            Command::perform(file_list, Message::SearchCompleted)
                         } else {
                             self.file_selector.file_list =
                                 FileList::new(&self.file_selector.current_dir);
@@ -166,6 +178,7 @@ impl Application for App {
                     }
                 }
             }
+
             Message::SearchCompleted(file_list_res) => {
                 if let Ok(file_list) = file_list_res {
                     self.file_selector.file_list = file_list
@@ -175,6 +188,7 @@ impl Application for App {
                 }
                 Command::none()
             }
+
             Message::TogglePlaying => {
                 self.player
                     .controls
@@ -182,13 +196,13 @@ impl Application for App {
                     .fetch_nand(true, std::sync::atomic::Ordering::Relaxed);
                 Command::none()
             }
+
             Message::InsertDircache((parent_dir, children)) => {
                 self.dir_cache.insert(parent_dir, children);
                 Command::none()
             }
-            Message::PlayerDone(_) => {
-                Command::none()
-            }
+
+            Message::PlayerDone(_) => Command::none(),
         }
     }
 
