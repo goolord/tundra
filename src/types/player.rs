@@ -1,7 +1,9 @@
 pub use super::common::*;
 pub use super::style::*;
 use iced::canvas::*;
-use iced::{button, Button, Color, Container, Element, Length, Point, Rectangle, Space, Text, Row, Column};
+use iced::{
+    button, Button, Color, Column, Container, Element, Length, Point, Rectangle, Row, Space, Text,
+};
 use rodio::Source;
 use std::fs::File;
 use std::io::BufReader;
@@ -105,9 +107,18 @@ impl Controls {
     }
 
     pub fn view(&mut self) -> Column<Message> {
-        let label = format!("playing: {}", self.is_playing.load(sync::atomic::Ordering::Relaxed));
-        let play_pause = Button::new(&mut self.play_pause, Text::new(label).size(24))
-            .on_press(Message::TogglePlaying);
+        let playing = self.is_playing.load(sync::atomic::Ordering::Relaxed);
+        let label = if playing {
+            iced::Svg::from_path("./resources/play.svg")
+        } else {
+            iced::Svg::from_path("./resources/pause.svg")
+        }
+        .width(Length::Units(24))
+        .height(Length::Units(24));
+        let play_pause = Button::new(&mut self.play_pause, label).on_press(Message::TogglePlaying)
+            .style(ControlButton_)
+            .width(Length::Units(48))
+            .height(Length::Units(48));
         Column::new().push(play_pause)
     }
 }
@@ -140,7 +151,9 @@ impl Player {
     }
 
     pub fn play_file(&mut self, file_path: PathBuf) -> std::thread::JoinHandle<()> {
-        self.controls.is_playing.store(true.into(), sync::atomic::Ordering::Relaxed);
+        self.controls
+            .is_playing
+            .store(true.into(), sync::atomic::Ordering::Relaxed);
         let audio_buffer: WaveForm = load_source(&file_path).into();
         self.waveform = Some(audio_buffer);
         let is_playing = sync::Arc::clone(&self.controls.is_playing);

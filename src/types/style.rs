@@ -65,6 +65,35 @@ impl button::StyleSheet for FileButton_ {
 
 ///////////////////////////////////////////////////////////////////////////
 
+pub struct ControlButton_;
+
+impl ControlButton_ {
+    fn default_style() -> button::Style {
+        button::Style {
+            text_color: Color::from_rgb8(0xff, 0xff, 0xff),
+            ..button::Style::default()
+        }
+    }
+}
+
+impl button::StyleSheet for ControlButton_ {
+    fn active(&self) -> button::Style {
+        button::Style {
+            background: Some(Background::Color(Color::from_rgb8(0x31, 0x34, 0x38))),
+            ..ControlButton_::default_style()
+        }
+    }
+
+    fn hovered(&self) -> button::Style {
+        button::Style {
+            background: Some(Background::Color(Color::from_rgb8(0x37, 0x3a, 0x3e))),
+            ..ControlButton_::default_style()
+        }
+    }
+}
+
+///////////////////////////////////////////////////////////////////////////
+
 pub struct Container_;
 
 impl container::StyleSheet for Container_ {

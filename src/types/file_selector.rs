@@ -153,12 +153,13 @@ impl FileButton {
     pub fn view(&mut self, base_path: &Path) -> Button<Message> {
         let fp = remove_prefix(
             self.file_path.to_str().unwrap(),
-            base_path.as_os_str().to_str().unwrap(),
+            base_path.as_os_str().to_str().unwrap()
         );
         let mut file_string = String::with_capacity(2 + fp.len());
         file_string.push_str("  ");
         file_string.push_str(fp);
-        let text = Text::new(file_string).size(24);
+        let text = Text::new(file_string)
+            .size(24);
         let label = Row::new();
         let label_2 = if self.file_path.is_dir() {
             label
