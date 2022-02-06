@@ -88,6 +88,7 @@ impl From<rodio::Decoder<std::io::BufReader<File>>> for WaveForm {
 pub struct Player {
     pub waveform: Option<WaveForm>,
     pub controls: Controls,
+    // pub player_thread: sync::Arc<Option<std::thread::JoinHandle<()>>>
 }
 
 pub struct Controls {
@@ -106,19 +107,23 @@ impl Controls {
         }
     }
 
-    pub fn view(&mut self) -> Column<Message> {
-        let playing = self.is_playing.load(sync::atomic::Ordering::Relaxed);
+    pub fn play_button(&mut self) -> Button<Message> {
+        let playing = self.is_playing.load(sync::atomic::Ordering::SeqCst);
         let label = if playing {
-            iced::Svg::from_path("./resources/play.svg")
-        } else {
             iced::Svg::from_path("./resources/pause.svg")
+        } else {
+            iced::Svg::from_path("./resources/play.svg")
         }
         .width(Length::Units(24))
         .height(Length::Units(24));
-        let play_pause = Button::new(&mut self.play_pause, label).on_press(Message::TogglePlaying)
+        Button::new(&mut self.play_pause, label).on_press(Message::TogglePlaying)
             .style(ControlButton_)
             .width(Length::Units(48))
-            .height(Length::Units(48));
+            .height(Length::Units(48))
+    }
+
+    pub fn view(&mut self) -> Column<Message> {
+        let play_pause = self.play_button();
         Column::new().push(play_pause)
     }
 }
@@ -128,6 +133,7 @@ impl Player {
         Player {
             waveform: None,
             controls: Controls::new(),
+            // player_thread: sync::Arc::new(None),
         }
     }
 
@@ -150,10 +156,10 @@ impl Player {
             .center_y()
     }
 
-    pub fn play_file(&mut self, file_path: PathBuf) -> std::thread::JoinHandle<()> {
+    pub fn play_file(&mut self, file_path: PathBuf) -> thread::JoinHandle<()> {
         self.controls
             .is_playing
-            .store(true.into(), sync::atomic::Ordering::Relaxed);
+            .store(true.into(), sync::atomic::Ordering::SeqCst);
         let audio_buffer: WaveForm = load_source(&file_path).into();
         self.waveform = Some(audio_buffer);
         let is_playing = sync::Arc::clone(&self.controls.is_playing);
@@ -163,7 +169,7 @@ impl Player {
             let source = load_source(&file_path);
             sink.append(source);
             sink.sleep_until_end();
-            is_playing.store(false.into(), sync::atomic::Ordering::Relaxed);
+            is_playing.store(false.into(), sync::atomic::Ordering::SeqCst);
         })
     }
 }

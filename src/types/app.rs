@@ -46,8 +46,7 @@ impl Application for App {
                         if file_path.is_dir() {
                             self.file_selector = FileSelector::new(file_path);
                         } else {
-                            let player_thread: std::thread::JoinHandle<()> =
-                                self.player.play_file(file_path.to_owned());
+                            let player_thread = self.player.play_file(file_path.to_owned());
                             self.file_selector.selected_file = selected_file;
                             return Command::perform(
                                 future::lazy(|_| -> Result<(), ()> {
@@ -195,7 +194,7 @@ impl Application for App {
                 self.player
                     .controls
                     .is_playing
-                    .fetch_nand(true, std::sync::atomic::Ordering::Relaxed);
+                    .fetch_nand(true, std::sync::atomic::Ordering::SeqCst);
                 Command::none()
             }
 
