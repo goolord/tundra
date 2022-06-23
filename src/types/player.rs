@@ -50,7 +50,7 @@ impl WaveForm {
     }
 }
 
-impl Program<Message> for &WaveForm {
+impl Program<Message> for WaveForm {
     type State = ();
     fn draw(&self, _state: &(), bounds: Rectangle, _cursor: Cursor) -> Vec<Geometry> {
         let mut frame = Frame::new(bounds.size());
