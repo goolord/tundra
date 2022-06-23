@@ -62,6 +62,7 @@ impl Program<Message> for &WaveForm {
             width: 1.0,
             line_cap: Default::default(),
             line_join: Default::default(),
+            line_dash: Default::default(),
         };
         frame.stroke(&path, stroke);
         vec![frame.into_geometry()]

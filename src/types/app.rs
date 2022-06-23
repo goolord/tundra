@@ -3,7 +3,7 @@ use futures::future::{AbortHandle, Abortable};
 use futures::*;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
-use iced::{executor, Application, Clipboard, Command, Container, Element, Length, Row};
+use iced::{executor, Application, Command, Container, Element, Length, Row};
 use std::{collections::hash_map::HashMap, path::PathBuf};
 use walkdir::WalkDir;
 
@@ -38,7 +38,7 @@ impl Application for App {
         String::from("Tundra Sample Browser")
     }
 
-    fn update(&mut self, message: Message, _clipboard: &mut Clipboard) -> Command<Message> {
+    fn update(&mut self, message: Message) -> Command<Message> {
         match message {
             Message::SelectedFile(selected_file) => {
                 match &selected_file {
