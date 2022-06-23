@@ -2,7 +2,7 @@ pub use super::common::*;
 pub use super::style::*;
 use iced::pure::widget::canvas::*;
 use iced::pure::widget::{
-    Button, Column, Container, Space,
+    Button, Column, Container, Space, Svg,
 };
 use iced::pure::Element;
 use iced::{Color, Length, Point, Rectangle};
@@ -111,9 +111,9 @@ impl Controls {
     pub fn play_button(&self) -> Button<Message> {
         let playing = self.is_playing.load(sync::atomic::Ordering::SeqCst);
         let label = if playing {
-            iced::Svg::from_path("./resources/pause.svg")
+            Svg::from_path("./resources/pause.svg")
         } else {
-            iced::Svg::from_path("./resources/play.svg")
+            Svg::from_path("./resources/play.svg")
         }
         .width(Length::Units(24))
         .height(Length::Units(24));
