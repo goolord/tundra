@@ -1,8 +1,9 @@
 pub use super::common::*;
 pub use super::style::*;
-use iced::Row;
-use iced::{
-    button, scrollable, text_input, Button, Column, Container, Length, Scrollable, Text, TextInput,
+use iced::Length;
+use iced::pure::scrollable;
+use::iced::pure::widget::{
+  Column, Container, Text, TextInput, Row, Button
 };
 use std::cmp::*;
 use std::fs;
@@ -11,12 +12,9 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
 pub struct FileSelector {
-    pub scroll_state: scrollable::State,
     pub current_dir: PathBuf,
-    pub dir_up: DirUp,
     pub file_list: Vec<FileButton>,
     pub selected_file: Option<PathBuf>,
-    pub search: text_input::State,
     pub search_value: String,
 }
 
@@ -27,22 +25,17 @@ pub struct FileList {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileButton {
-    pub file_button: button::State,
     pub file_path: PathBuf,
 }
 
-#[derive(Debug, Clone)]
-pub struct DirUp {
-    pub button: button::State,
-}
+pub struct DirUp;
 
 impl DirUp {
-    pub fn view(&mut self, cwd: PathBuf) -> Button<Message> {
+    pub fn view(&self, cwd: PathBuf) -> Button<Message> {
         let mut text = String::new();
         text.push_str("  ");
         text.push_str(cwd.to_str().unwrap_or("Go up"));
         Button::new(
-            &mut self.button,
             Row::new()
                 .push(iced::Svg::from_path("resources/up_chevron.svg").height(Length::Units(16)))
                 .push(Text::new(text).size(24)),
@@ -93,26 +86,21 @@ impl FileList {
 impl FileSelector {
     pub fn new(dir: &Path) -> Self {
         FileSelector {
-            scroll_state: scrollable::State::new(),
             current_dir: dir.to_owned(),
-            dir_up: DirUp {
-                button: button::State::new(),
-            },
             file_list: FileList::new(dir),
             selected_file: None,
-            search: text_input::State::new(),
             search_value: String::new(),
         }
     }
 
-    pub fn view(&mut self) -> Column<Message> {
+    pub fn view(&self) -> Column<Message> {
         let selected_file = self.selected_file.as_ref();
-        let dir_up = Container::new(self.dir_up.view(self.current_dir.to_owned()))
+        let dir_up = Container::new(DirUp.view(self.current_dir.to_owned()))
             .padding(5)
             .width(Length::Fill);
-        let mut new_col: Vec<iced::Element<Message>> = Vec::with_capacity(self.file_list.len() + 1);
+        let mut new_col: Vec<iced::pure::Element<Message>> = Vec::with_capacity(self.file_list.len() + 1);
         new_col.push(dir_up.into());
-        new_col.extend(self.file_list.iter_mut().map(|button| {
+        new_col.extend(self.file_list.iter().map(|button| {
             let path = button.file_path.to_owned();
             let element: Button<Message> = button.view(&self.current_dir);
             let mut container = Container::new(element).padding(5).width(Length::Fill);
@@ -124,12 +112,9 @@ impl FileSelector {
             container.into()
         }));
         let fs_column = Column::with_children(new_col);
-        let fs = Scrollable::new(&mut self.scroll_state)
-            .push(fs_column)
-            .width(Length::Fill)
-            .height(Length::Fill);
+        let fs = scrollable(fs_column)
+                .height(Length::Fill);
         let search = TextInput::new(
-            &mut self.search,
             "Search",
             &self.search_value,
             Message::Search,
@@ -145,12 +130,11 @@ impl FileSelector {
 impl FileButton {
     pub fn new(x: PathBuf) -> Self {
         FileButton {
-            file_button: button::State::new(),
             file_path: x,
         }
     }
 
-    pub fn view(&mut self, base_path: &Path) -> Button<Message> {
+    pub fn view(&self, base_path: &Path) -> Button<Message> {
         let fp = remove_prefix(
             self.file_path.to_str().unwrap(),
             base_path.as_os_str().to_str().unwrap()
@@ -174,7 +158,7 @@ impl FileButton {
             label_2
         }
         .push(text);
-        Button::new(&mut self.file_button, label_3)
+        Button::new(label_3)
             .style(FileButton_)
             .on_press(Message::SelectedFile(Some(self.file_path.to_owned())))
             .width(Length::Fill)

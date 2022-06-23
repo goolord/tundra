@@ -3,7 +3,9 @@ use futures::future::{AbortHandle, Abortable};
 use futures::*;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
-use iced::{executor, Application, Command, Container, Element, Length, Row};
+use iced::{executor, Command, Length};
+use iced::pure::widget::{Container, Row};
+use iced::pure::{Application, Element};
 use std::{collections::hash_map::HashMap, path::PathBuf};
 use walkdir::WalkDir;
 
@@ -207,7 +209,7 @@ impl Application for App {
         }
     }
 
-    fn view(&mut self) -> Element<Message> {
+    fn view(&self) -> Element<Message> {
         let player = self.player.view();
         let file_selector_container = Container::new(self.file_selector.view())
             .width(Length::Fill)

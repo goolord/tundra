@@ -1,6 +1,7 @@
 mod types;
 
-use iced::{Application, Settings};
+use iced::Settings;
+use iced::pure::Application;
 use types::*;
 
 pub fn main() {
