@@ -11,7 +11,10 @@ use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
 use std::sync;
+use std::sync::mpsc::Receiver;
+use std::sync::mpsc::Sender;
 use std::thread;
+use std::sync::mpsc::channel;
 
 pub struct WaveForm {
     samples: Vec<i16>,
@@ -92,7 +95,13 @@ impl From<rodio::Decoder<std::io::BufReader<File>>> for WaveForm {
 pub struct Player {
     pub waveform: Option<WaveForm>,
     pub controls: Controls,
-    // pub player_thread: sync::Arc<Option<std::thread::JoinHandle<()>>>
+    pub sender: Sender<PlayerCommand>,
+    pub receiver: Receiver<PlayerCommand>,
+}
+
+pub enum PlayerCommand {
+    Play,
+    Pause,
 }
 
 pub struct Controls {
@@ -131,10 +140,12 @@ impl Controls {
 
 impl Player {
     pub fn new() -> Self {
+        let (sender, receiver) = channel();
         Player {
             waveform: None,
             controls: Controls::new(),
-            // player_thread: sync::Arc::new(None),
+            sender,
+            receiver,
         }
     }
 
@@ -157,25 +168,57 @@ impl Player {
             .center_y()
     }
 
-    pub fn play_file(&mut self, file_path: PathBuf) -> thread::JoinHandle<()> {
+    pub fn play_file(&mut self, file_path: PathBuf) {
         self.controls
             .is_playing
-            .store(true.into(), sync::atomic::Ordering::SeqCst);
+            .store(true, sync::atomic::Ordering::SeqCst);
         let audio_buffer: WaveForm = load_source(&file_path).into();
         self.waveform = Some(audio_buffer);
         let is_playing = sync::Arc::clone(&self.controls.is_playing);
+        let (sender, receiver) = channel();
+        self.sender = sender;
+        self.resume();
         thread::spawn(move || {
             let (_stream, stream_handle) = rodio::OutputStream::try_default().unwrap();
             let sink = rodio::Sink::try_new(&stream_handle).unwrap();
-            let source = load_source(&file_path);
-            sink.append(source);
-            sink.sleep_until_end();
-            is_playing.store(false.into(), sync::atomic::Ordering::SeqCst);
-        })
+            // now we have to re-figure out how to tell the parent thread
+            // when the file is done playing. smh my head.
+            // probably can't use a channel, probably need to use something
+            // bidirectional like a socket
+            for msg in receiver.iter() {
+                match msg {
+                    PlayerCommand::Play => {
+                        is_playing.store(true, sync::atomic::Ordering::SeqCst);
+                        if sink.empty() {
+                            sink.append(load_source(&file_path));
+                        }
+                        sink.play();
+                    },
+                    PlayerCommand::Pause => {
+                        is_playing.store(false, sync::atomic::Ordering::SeqCst);
+                        sink.pause();
+                    }
+                }
+            }
+        });
+    }
+
+    pub fn pause(&mut self) {
+        self.controls
+            .is_playing
+            .store(false, sync::atomic::Ordering::SeqCst);
+        self.sender.send(PlayerCommand::Pause).unwrap();
+    }
+
+    pub fn resume(&mut self) {
+        self.controls
+            .is_playing
+            .store(true, sync::atomic::Ordering::SeqCst);
+        self.sender.send(PlayerCommand::Play).unwrap();
     }
 }
 
-pub fn load_source(file_path: &PathBuf) -> rodio::Decoder<BufReader<File>> {
+pub fn load_source<T: std::convert::AsRef<std::path::Path>>(file_path: T) -> rodio::Decoder<BufReader<File>> {
     let file = File::open(file_path).unwrap();
     rodio::Decoder::new(BufReader::new(file)).unwrap()
 }

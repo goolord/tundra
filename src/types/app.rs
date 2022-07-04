@@ -48,17 +48,8 @@ impl Application for App {
                         if file_path.is_dir() {
                             self.file_selector = FileSelector::new(file_path);
                         } else {
-                            let player_thread = self.player.play_file(file_path.to_owned());
+                            self.player.play_file(file_path.to_owned());
                             self.file_selector.selected_file = selected_file;
-                            return Command::perform(
-                                future::lazy(|_| -> Result<(), ()> {
-                                    match player_thread.join() {
-                                        Ok(_) => Ok(()),
-                                        Err(_) => Err(()),
-                                    }
-                                }),
-                                Message::PlayerDone,
-                            );
                         }
                     }
                     None => {
@@ -72,7 +63,7 @@ impl Application for App {
             Message::ChangeDirectory(parent_dir) => {
                 self.file_selector = FileSelector::new(&parent_dir);
                 if !self.dir_cache.contains_key(&self.file_selector.current_dir) {
-                    let foo = future::lazy(|_| {
+                    let walker = future::lazy(|_| {
                         let children: Vec<PathBuf> = WalkDir::new(&parent_dir)
                             .max_depth(100)
                             .max_open(100)
@@ -86,7 +77,7 @@ impl Application for App {
                             .collect();
                         (parent_dir, children)
                     });
-                    Command::perform(foo, Message::InsertDircache)
+                    Command::perform(walker, Message::InsertDircache)
                 } else {
                     Command::none()
                 }
@@ -193,10 +184,11 @@ impl Application for App {
             }
 
             Message::TogglePlaying => {
-                self.player
-                    .controls
-                    .is_playing
-                    .fetch_nand(true, std::sync::atomic::Ordering::SeqCst);
+                if self.player.controls.is_playing.load(std::sync::atomic::Ordering::SeqCst) {
+                    self.player.pause()
+                } else {
+                    self.player.resume()
+                }
                 Command::none()
             }
 
