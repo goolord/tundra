@@ -1,3 +1,5 @@
+use crate::source::callback::Callback;
+
 pub use super::common::*;
 pub use super::style::*;
 use iced::pure::widget::canvas::*;
@@ -11,10 +13,10 @@ use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
 use std::sync;
-use std::sync::mpsc::Receiver;
-use std::sync::mpsc::Sender;
+use futures::channel::mpsc::UnboundedReceiver;
+use futures::channel::mpsc::UnboundedSender;
+use futures::channel::mpsc::unbounded;
 use std::thread;
-use std::sync::mpsc::channel;
 
 pub struct WaveForm {
     samples: Vec<i16>,
@@ -95,13 +97,17 @@ impl From<rodio::Decoder<std::io::BufReader<File>>> for WaveForm {
 pub struct Player {
     pub waveform: Option<WaveForm>,
     pub controls: Controls,
-    pub sender: Sender<PlayerCommand>,
-    pub receiver: Receiver<PlayerCommand>,
+    pub sender: UnboundedSender<PlayerCommand>,
 }
 
 pub enum PlayerCommand {
     Play,
     Pause,
+}
+
+#[derive(Debug, Clone)]
+pub enum PlayerMsg {
+    SinkEmpty,
 }
 
 pub struct Controls {
@@ -140,12 +146,11 @@ impl Controls {
 
 impl Player {
     pub fn new() -> Self {
-        let (sender, receiver) = channel();
+        let (sender, _) = unbounded();
         Player {
             waveform: None,
             controls: Controls::new(),
             sender,
-            receiver,
         }
     }
 
@@ -168,53 +173,58 @@ impl Player {
             .center_y()
     }
 
-    pub fn play_file(&mut self, file_path: PathBuf) {
+    pub fn play_file(&mut self, file_path: PathBuf) -> UnboundedReceiver<PlayerMsg> {
         self.controls
             .is_playing
             .store(true, sync::atomic::Ordering::SeqCst);
         let audio_buffer: WaveForm = load_source(&file_path).into();
         self.waveform = Some(audio_buffer);
         let is_playing = sync::Arc::clone(&self.controls.is_playing);
-        let (sender, receiver) = channel();
+        let (sender, mut receiver) = unbounded();
         self.sender = sender;
-        self.resume();
+        let (player_sender, player_receiver) = unbounded();
         thread::spawn(move || {
             let (_stream, stream_handle) = rodio::OutputStream::try_default().unwrap();
             let sink = rodio::Sink::try_new(&stream_handle).unwrap();
+            let sink_empty = Box::new(move || {
+                    player_sender.unbounded_send(PlayerMsg::SinkEmpty).unwrap_or(());
+                });
             // now we have to re-figure out how to tell the parent thread
             // when the file is done playing. smh my head.
             // probably can't use a channel, probably need to use something
             // bidirectional like a socket
-            for msg in receiver.iter() {
+            //
+            loop {
+                let msg = receiver.try_next();
                 match msg {
-                    PlayerCommand::Play => {
+                    Ok(Some(PlayerCommand::Play)) => {
                         is_playing.store(true, sync::atomic::Ordering::SeqCst);
                         if sink.empty() {
                             sink.append(load_source(&file_path));
+                            sink.append::<Callback<f32>>(Callback::new(sink_empty.clone()));
                         }
                         sink.play();
                     },
-                    PlayerCommand::Pause => {
+                    Ok(Some(PlayerCommand::Pause)) => {
                         is_playing.store(false, sync::atomic::Ordering::SeqCst);
                         sink.pause();
                     }
+                    Ok(None) => break,
+                    Err(_) => (),
                 }
+                continue
             }
         });
+        self.resume();
+        player_receiver
     }
 
     pub fn pause(&mut self) {
-        self.controls
-            .is_playing
-            .store(false, sync::atomic::Ordering::SeqCst);
-        self.sender.send(PlayerCommand::Pause).unwrap();
+        self.sender.unbounded_send(PlayerCommand::Pause).unwrap();
     }
 
     pub fn resume(&mut self) {
-        self.controls
-            .is_playing
-            .store(true, sync::atomic::Ordering::SeqCst);
-        self.sender.send(PlayerCommand::Play).unwrap();
+        self.sender.unbounded_send(PlayerCommand::Play).unwrap();
     }
 }
 

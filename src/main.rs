@@ -1,4 +1,6 @@
+#![feature(async_closure)]
 mod types;
+mod source;
 
 use iced::Settings;
 use iced::pure::Application;

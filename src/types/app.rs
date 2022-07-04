@@ -48,8 +48,9 @@ impl Application for App {
                         if file_path.is_dir() {
                             self.file_selector = FileSelector::new(file_path);
                         } else {
-                            self.player.play_file(file_path.to_owned());
+                            let receiver = self.player.play_file(file_path.to_owned());
                             self.file_selector.selected_file = selected_file;
+                            return Command::perform(receiver.into_future(), |x| Message::PlayerDone(x.0))
                         }
                     }
                     None => {
@@ -197,7 +198,13 @@ impl Application for App {
                 Command::none()
             }
 
-            Message::PlayerDone(_) => Command::none(),
+            Message::PlayerDone(msg) => {
+                match msg {
+                    Some(PlayerMsg::SinkEmpty) => self.player.pause(),
+                    _ => (),
+                }
+                Command::none()
+            },
         }
     }
 
