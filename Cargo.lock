@@ -2620,6 +2620,8 @@ dependencies = [
  "fuzzy-matcher",
  "iced",
  "iced_audio",
+ "iced_futures",
+ "iced_native",
  "rodio",
  "svg",
  "walkdir",

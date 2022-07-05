@@ -8,6 +8,8 @@ edition = "2021"
 
 [dependencies]
 iced = { version = "0.4.2", features = ["svg", "canvas", "pure"] }
+iced_futures = "0.4.1"
+iced_native = "0.5.1"
 iced_audio = "0.8.0"
 rodio = "0.15.0"
 svg = "0.10.0"

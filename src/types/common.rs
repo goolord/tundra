@@ -1,3 +1,4 @@
+use futures::channel::mpsc::UnboundedReceiver;
 use futures::future::Aborted;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -9,8 +10,20 @@ pub enum Message {
     Search(String),
     SearchCompleted(Result<Vec<PathBuf>, Aborted>),
     InsertDircache((PathBuf, Vec<PathBuf>)),
-    PlayerDone(Option<super::PlayerMsg>),
+    PlayerMsg((Option<super::PlayerMsg>, ClonableUnboundedReceiver<super::PlayerMsg>)),
     TogglePlaying,
+}
+
+#[derive(Debug)]
+pub struct ClonableUnboundedReceiver<T>(pub UnboundedReceiver<T>);
+
+// this probably leaks memory bc an `Arc` underlies the UnboundedReceiver
+// but it's the only way i can figure out how to stream commands from
+// an UnboundedReceiver ATM so ヽ(゜～゜o)ノ
+impl<T> Clone for ClonableUnboundedReceiver<T> {
+    fn clone(&self) -> Self {
+        unsafe { std::mem::transmute(self) }
+    }
 }
 
 pub fn is_audio(x: &OsStr) -> bool {

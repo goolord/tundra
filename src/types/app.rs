@@ -50,7 +50,10 @@ impl Application for App {
                         } else {
                             let receiver = self.player.play_file(file_path.to_owned());
                             self.file_selector.selected_file = selected_file;
-                            return Command::perform(receiver.into_future(), |x| Message::PlayerDone(x.0))
+                            return Command::perform
+                                (receiver.into_future(),
+                                 |x| Message::PlayerMsg((x.0, ClonableUnboundedReceiver(x.1)))
+                                )
                         }
                     }
                     None => {
@@ -198,12 +201,15 @@ impl Application for App {
                 Command::none()
             }
 
-            Message::PlayerDone(msg) => {
+            Message::PlayerMsg((msg, recv)) => {
                 match msg {
-                    Some(PlayerMsg::SinkEmpty) => self.player.pause(),
-                    _ => (),
+                    Some (PlayerMsg::SinkEmpty) => self.player.pause(),
+                    None => return Command::none()
                 }
-                Command::none()
+                return Command::perform
+                    (recv.0.into_future(),
+                     |x| Message::PlayerMsg((x.0, ClonableUnboundedReceiver(x.1)))
+                    )
             },
         }
     }
@@ -219,3 +225,4 @@ impl Application for App {
         Row::new().push(file_selector_container).push(player).into()
     }
 }
+
