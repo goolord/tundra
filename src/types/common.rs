@@ -13,6 +13,7 @@ pub enum Message {
     InsertDircache((PathBuf, Vec<PathBuf>)),
     PlayerMsg((Option<super::PlayerMsg>, ClonableUnboundedReceiver<super::PlayerMsg>)),
     TogglePlaying,
+    StopPlayback,
 }
 
 #[derive(Debug)]

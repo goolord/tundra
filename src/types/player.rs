@@ -4,7 +4,7 @@ pub use super::common::*;
 pub use super::style::*;
 use iced::pure::widget::canvas::*;
 use iced::pure::widget::{
-    Button, Column, Container, Space, Svg,
+    Button, Row, Column, Container, Space, Svg,
 };
 use iced::pure::Element;
 use iced::{Color, Length, Point, Rectangle};
@@ -103,6 +103,7 @@ pub struct Player {
 pub enum PlayerCommand {
     Play,
     Pause,
+    Stop,
 }
 
 #[derive(Debug, Clone)]
@@ -134,13 +135,31 @@ impl Controls {
         .height(Length::Units(24));
         Button::new(label).on_press(Message::TogglePlaying)
             .style(ControlButton_)
-            .width(Length::Units(48))
+            .width(Length::Units(50))
             .height(Length::Units(48))
     }
 
-    pub fn view(&self) -> Column<Message> {
-        let play_pause = self.play_button();
-        Column::new().push(play_pause)
+    pub fn stop_button(&self) -> Button<Message> {
+        let label = Svg::from_path("./resources/stop.svg")
+            .width(Length::Units(24))
+            .height(Length::Units(24));
+        Button::new(label).on_press(Message::StopPlayback)
+            .style(ControlButton_)
+            .width(Length::Units(50))
+            .height(Length::Units(48))
+    }
+
+    pub fn view(&self) -> Container<Message> {
+        let row = Row::new()
+            .push(self.play_button())
+            .push(self.stop_button())
+            .spacing(6)
+            .padding(2);
+        Container::new(row)
+            .style(Controls_)
+            .align_x(iced::alignment::Horizontal::Center)
+            .align_y(iced::alignment::Vertical::Center)
+            .width(Length::Fill)
     }
 }
 
@@ -209,6 +228,10 @@ impl Player {
                         is_playing.store(false, sync::atomic::Ordering::SeqCst);
                         sink.pause();
                     }
+                    Ok(Some(PlayerCommand::Stop)) => {
+                        is_playing.store(false, sync::atomic::Ordering::SeqCst);
+                        sink.stop();
+                    }
                     Ok(None) => break,
                     Err(_) => (),
                 }
@@ -225,6 +248,10 @@ impl Player {
 
     pub fn resume(&mut self) {
         self.sender.unbounded_send(PlayerCommand::Play).unwrap();
+    }
+
+    pub fn stop(&mut self) {
+        self.sender.unbounded_send(PlayerCommand::Stop).unwrap();
     }
 }
 

@@ -95,15 +95,14 @@ impl FileSelector {
 
     pub fn view(&self) -> Column<Message> {
         let selected_file = self.selected_file.as_ref();
-        let dir_up = Container::new(DirUp.view(self.current_dir.to_owned()))
-            .padding(5)
+        let dir_up = Container::new(DirUp.view(self.current_dir.to_owned()).padding(5))
             .width(Length::Fill);
         let mut new_col: Vec<iced::pure::Element<Message>> = Vec::with_capacity(self.file_list.len() + 1);
         new_col.push(dir_up.into());
         new_col.extend(self.file_list.iter().map(|button| {
             let path = button.file_path.to_owned();
             let element: Button<Message> = button.view(&self.current_dir);
-            let mut container = Container::new(element).padding(5).width(Length::Fill);
+            let mut container = Container::new(element.padding(10)).width(Length::Fill);
             if Some(path.canonicalize().unwrap())
                 == selected_file.map(|x| x.canonicalize().unwrap())
             {
@@ -111,7 +110,9 @@ impl FileSelector {
             }
             container.into()
         }));
-        let fs_column = Column::with_children(new_col);
+        let fs_column = Column::with_children(new_col)
+            .spacing(0)
+            .padding(0);
         let fs = scrollable(fs_column)
                 .height(Length::Fill);
         let search = TextInput::new(

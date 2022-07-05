@@ -196,6 +196,11 @@ impl Application for App {
                 Command::none()
             }
 
+            Message::StopPlayback => {
+                self.player.stop();
+                Command::none()
+            }
+
             Message::InsertDircache((parent_dir, children)) => {
                 self.dir_cache.insert(parent_dir, children);
                 Command::none()

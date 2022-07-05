@@ -71,6 +71,8 @@ impl ControlButton_ {
     fn default_style() -> button::Style {
         button::Style {
             text_color: Color::from_rgb8(0xff, 0xff, 0xff),
+            border_width: 2.0,
+            border_color: Color::from_rgb8(0x19, 0x1d, 0x20),
             ..button::Style::default()
         }
     }
@@ -104,6 +106,21 @@ impl container::StyleSheet for Container_ {
         }
     }
 }
+
+///////////////////////////////////////////////////////////////////////////
+
+pub struct Controls_;
+
+impl container::StyleSheet for Controls_ {
+    fn style(&self) -> container::Style {
+        container::Style {
+            background: Some(Background::Color(Color::from_rgb8(0x37, 0x3a, 0x3e))),
+            ..container::Style::default()
+        }
+    }
+}
+
+///////////////////////////////////////////////////////////////////////////
 
 ///////////////////////////////////////////////////////////////////////////
 
