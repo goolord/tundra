@@ -2,6 +2,7 @@ use futures::channel::mpsc::UnboundedReceiver;
 use futures::future::Aborted;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -17,12 +18,23 @@ pub enum Message {
 #[derive(Debug)]
 pub struct ClonableUnboundedReceiver<T>(pub UnboundedReceiver<T>);
 
-// this probably leaks memory bc an `Arc` underlies the UnboundedReceiver
-// but it's the only way i can figure out how to stream commands from
-// an UnboundedReceiver ATM so ヽ(゜～゜o)ノ
+// this is horribly jank
+// we are doing this pattern matching on the transmute
+// so that we don't memory leak the Arc
 impl<T> Clone for ClonableUnboundedReceiver<T> {
     fn clone(&self) -> Self {
-        unsafe { std::mem::transmute(self) }
+        unsafe {
+            match std::mem::transmute(self) {
+                Some(x) => {
+                    let foo: Arc<()> = std::sync::Arc::clone(x);
+                    ClonableUnboundedReceiver(std::mem::transmute(Some(foo)))
+                },
+                None => {
+                    let foo: Option<Arc<()>> = None;
+                    ClonableUnboundedReceiver(std::mem::transmute(foo))
+                }
+            }
+        }
     }
 }
 
