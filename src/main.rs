@@ -1,9 +1,9 @@
 #![feature(async_closure)]
-mod types;
 mod source;
+mod types;
 
-use iced::Settings;
 use iced::pure::Application;
+use iced::Settings;
 use types::*;
 
 pub fn main() {

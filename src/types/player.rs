@@ -2,10 +2,11 @@ use crate::source::callback::Callback;
 
 pub use super::common::*;
 pub use super::style::*;
+use futures::channel::mpsc::unbounded;
+use futures::channel::mpsc::UnboundedReceiver;
+use futures::channel::mpsc::UnboundedSender;
 use iced::pure::widget::canvas::*;
-use iced::pure::widget::{
-    Button, Row, Column, Container, Space, Svg,
-};
+use iced::pure::widget::{Button, Column, Container, Row, Space, Svg};
 use iced::pure::Element;
 use iced::{Color, Length, Point, Rectangle};
 use rodio::Source;
@@ -13,9 +14,6 @@ use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
 use std::sync;
-use futures::channel::mpsc::UnboundedReceiver;
-use futures::channel::mpsc::UnboundedSender;
-use futures::channel::mpsc::unbounded;
 use std::thread;
 
 pub struct WaveForm {
@@ -133,7 +131,8 @@ impl Controls {
         }
         .width(Length::Units(24))
         .height(Length::Units(24));
-        Button::new(label).on_press(Message::TogglePlaying)
+        Button::new(label)
+            .on_press(Message::TogglePlaying)
             .style(ControlButton_)
             .width(Length::Units(50))
             .height(Length::Units(48))
@@ -143,7 +142,8 @@ impl Controls {
         let label = Svg::from_path("./resources/stop.svg")
             .width(Length::Units(24))
             .height(Length::Units(24));
-        Button::new(label).on_press(Message::StopPlayback)
+        Button::new(label)
+            .on_press(Message::StopPlayback)
             .style(ControlButton_)
             .width(Length::Units(50))
             .height(Length::Units(48))
@@ -206,8 +206,10 @@ impl Player {
             let (_stream, stream_handle) = rodio::OutputStream::try_default().unwrap();
             let sink = rodio::Sink::try_new(&stream_handle).unwrap();
             let sink_empty = Box::new(move || {
-                    player_sender.unbounded_send(PlayerMsg::SinkEmpty).unwrap_or(());
-                });
+                player_sender
+                    .unbounded_send(PlayerMsg::SinkEmpty)
+                    .unwrap_or(());
+            });
             // now we have to re-figure out how to tell the parent thread
             // when the file is done playing. smh my head.
             // probably can't use a channel, probably need to use something
@@ -223,7 +225,7 @@ impl Player {
                             sink.append::<Callback<f32>>(Callback::new(sink_empty.clone()));
                         }
                         sink.play();
-                    },
+                    }
                     Ok(Some(PlayerCommand::Pause)) => {
                         is_playing.store(false, sync::atomic::Ordering::SeqCst);
                         sink.pause();
@@ -235,7 +237,7 @@ impl Player {
                     Ok(None) => break,
                     Err(_) => (),
                 }
-                continue
+                continue;
             }
         });
         self.resume();
@@ -255,7 +257,9 @@ impl Player {
     }
 }
 
-pub fn load_source<T: std::convert::AsRef<std::path::Path>>(file_path: T) -> rodio::Decoder<BufReader<File>> {
+pub fn load_source<T: std::convert::AsRef<std::path::Path>>(
+    file_path: T,
+) -> rodio::Decoder<BufReader<File>> {
     let file = File::open(file_path).unwrap();
     rodio::Decoder::new(BufReader::new(file)).unwrap()
 }

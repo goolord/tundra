@@ -11,7 +11,12 @@ pub enum Message {
     Search(String),
     SearchCompleted(Result<Vec<PathBuf>, Aborted>),
     InsertDircache((PathBuf, Vec<PathBuf>)),
-    PlayerMsg((Option<super::PlayerMsg>, ClonableUnboundedReceiver<super::PlayerMsg>)),
+    PlayerMsg(
+        (
+            Option<super::PlayerMsg>,
+            ClonableUnboundedReceiver<super::PlayerMsg>,
+        ),
+    ),
     TogglePlaying,
     StopPlayback,
 }
@@ -29,7 +34,7 @@ impl<T> Clone for ClonableUnboundedReceiver<T> {
                 Some(x) => {
                     let foo: Arc<()> = std::sync::Arc::clone(x);
                     ClonableUnboundedReceiver(std::mem::transmute(Some(foo)))
-                },
+                }
                 None => {
                     let foo: Option<Arc<()>> = None;
                     ClonableUnboundedReceiver(std::mem::transmute(foo))

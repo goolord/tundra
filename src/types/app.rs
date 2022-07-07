@@ -3,9 +3,9 @@ use futures::future::{AbortHandle, Abortable};
 use futures::*;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
-use iced::{executor, Command, Length};
 use iced::pure::widget::{Container, Row};
 use iced::pure::{Application, Element};
+use iced::{executor, Command, Length};
 use std::{collections::hash_map::HashMap, path::PathBuf};
 use walkdir::WalkDir;
 
@@ -50,10 +50,9 @@ impl Application for App {
                         } else {
                             let receiver = self.player.play_file(file_path.to_owned());
                             self.file_selector.selected_file = selected_file;
-                            return Command::perform
-                                (receiver.into_future(),
-                                 |x| Message::PlayerMsg((x.0, ClonableUnboundedReceiver(x.1)))
-                                )
+                            return Command::perform(receiver.into_future(), |x| {
+                                Message::PlayerMsg((x.0, ClonableUnboundedReceiver(x.1)))
+                            });
                         }
                     }
                     None => {
@@ -188,7 +187,12 @@ impl Application for App {
             }
 
             Message::TogglePlaying => {
-                if self.player.controls.is_playing.load(std::sync::atomic::Ordering::SeqCst) {
+                if self
+                    .player
+                    .controls
+                    .is_playing
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                {
                     self.player.pause()
                 } else {
                     self.player.resume()
@@ -208,14 +212,13 @@ impl Application for App {
 
             Message::PlayerMsg((msg, recv)) => {
                 match msg {
-                    Some (PlayerMsg::SinkEmpty) => self.player.pause(),
-                    None => return Command::none()
+                    Some(PlayerMsg::SinkEmpty) => self.player.pause(),
+                    None => return Command::none(),
                 }
-                return Command::perform
-                    (recv.0.into_future(),
-                     |x| Message::PlayerMsg((x.0, ClonableUnboundedReceiver(x.1)))
-                    )
-            },
+                return Command::perform(recv.0.into_future(), |x| {
+                    Message::PlayerMsg((x.0, ClonableUnboundedReceiver(x.1)))
+                });
+            }
         }
     }
 
@@ -230,4 +233,3 @@ impl Application for App {
         Row::new().push(file_selector_container).push(player).into()
     }
 }
-
