@@ -145,6 +145,7 @@ impl FileButton {
             vec![
                 Svg::from_path("./resources/music-solid.svg")
                     .height(Length::Units(24))
+                    .width(Length::Shrink)
                     .into(),
                 text.into(),
             ]
