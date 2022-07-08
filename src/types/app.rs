@@ -219,6 +219,9 @@ impl Application for App {
                     Message::PlayerMsg((x.0, ClonableUnboundedReceiver(x.1)))
                 });
             }
+            Message::Seek(_) => {
+                Command::none()
+            }
         }
     }
 

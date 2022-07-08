@@ -6,7 +6,7 @@ use futures::channel::mpsc::unbounded;
 use futures::channel::mpsc::UnboundedReceiver;
 use futures::channel::mpsc::UnboundedSender;
 use iced::pure::widget::canvas::*;
-use iced::pure::widget::{Button, Column, Container, Row, Space, Svg};
+use iced::pure::widget::{Button, Column, Container, Row, Space, Svg, Slider};
 use iced::pure::Element;
 use iced::{Color, Length, Point, Rectangle};
 use rodio::Source;
@@ -112,6 +112,18 @@ pub enum PlayerMsg {
 pub struct Controls {
     pub is_playing: sync::Arc<sync::atomic::AtomicBool>,
     pub volume: f32,
+    pub seekbar: Option<Seekbar>
+}
+
+pub struct Seekbar {
+    pub total: u64,
+    pub remaining: u64,
+}
+
+impl Seekbar {
+    pub fn view(&self) -> Slider<f64, Message> {
+        Slider::new(0.0..=100.0, self.remaining as f64 / self.total as f64, Message::Seek)
+    }
 }
 
 impl Controls {
@@ -119,6 +131,7 @@ impl Controls {
         Controls {
             is_playing: sync::Arc::new(false.into()),
             volume: f32::MAX,
+            seekbar: None,
         }
     }
 
@@ -148,11 +161,20 @@ impl Controls {
             .width(Length::Units(50))
             .height(Length::Units(48))
     }
+    
+    pub fn seek_bar(&self) -> Slider<f64, Message> {
+        match &self.seekbar {
+            None => Slider::new(0.0..=0.0, 0.0, Message::Seek),
+            Some(seekbar) => seekbar.view()
+        }
+        // Slider::new(0.., self.)
+    }
 
     pub fn view(&self) -> Container<Message> {
         let row = Row::new()
             .push(self.play_button())
             .push(self.stop_button())
+            .push(self.seek_bar())
             .spacing(6)
             .padding(2);
         Container::new(row)
