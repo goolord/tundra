@@ -6,7 +6,7 @@ use futures::channel::mpsc::unbounded;
 use futures::channel::mpsc::UnboundedReceiver;
 use futures::channel::mpsc::UnboundedSender;
 use iced::pure::widget::canvas::*;
-use iced::pure::widget::{Button, Column, Container, Row, Space, Svg, Slider};
+use iced::pure::widget::{Button, Column, Container, Row, Slider, Space, Svg};
 use iced::pure::Element;
 use iced::{Color, Length, Point, Rectangle};
 use rodio::Source;
@@ -112,7 +112,7 @@ pub enum PlayerMsg {
 pub struct Controls {
     pub is_playing: sync::Arc<sync::atomic::AtomicBool>,
     pub volume: f32,
-    pub seekbar: Option<Seekbar>
+    pub seekbar: Option<Seekbar>,
 }
 
 pub struct Seekbar {
@@ -122,7 +122,11 @@ pub struct Seekbar {
 
 impl Seekbar {
     pub fn view(&self) -> Slider<f64, Message> {
-        Slider::new(0.0..=100.0, self.remaining as f64 / self.total as f64, Message::Seek)
+        Slider::new(
+            0.0..=100.0,
+            self.remaining as f64 / self.total as f64,
+            Message::Seek,
+        )
     }
 }
 
@@ -161,23 +165,27 @@ impl Controls {
             .width(Length::Units(50))
             .height(Length::Units(48))
     }
-    
+
     pub fn seek_bar(&self) -> Slider<f64, Message> {
         match &self.seekbar {
             None => Slider::new(0.0..=0.0, 0.0, Message::Seek),
-            Some(seekbar) => seekbar.view()
+            Some(seekbar) => seekbar.view(),
         }
         // Slider::new(0.., self.)
     }
 
     pub fn view(&self) -> Container<Message> {
-        let row = Row::new()
+        let c_row = Row::new()
             .push(self.play_button())
             .push(self.stop_button())
-            .push(self.seek_bar())
             .spacing(6)
             .padding(2);
-        Container::new(row)
+        let column = Column::new()
+            .push(self.seek_bar())
+            .push(c_row)
+            .width(Length::Fill)
+            .align_items(iced::Alignment::Center);
+        Container::new(column)
             .style(Controls_)
             .align_x(iced::alignment::Horizontal::Center)
             .align_y(iced::alignment::Vertical::Center)
