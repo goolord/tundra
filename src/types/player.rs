@@ -2,6 +2,7 @@ use crate::source::callback::Callback;
 
 pub use super::common::*;
 pub use super::style::*;
+use futures::channel::mpsc::TrySendError;
 use futures::channel::mpsc::unbounded;
 use futures::channel::mpsc::UnboundedReceiver;
 use futures::channel::mpsc::UnboundedSender;
@@ -275,16 +276,21 @@ impl Player {
     }
 
     pub fn pause(&mut self) {
-        self.sender.unbounded_send(PlayerCommand::Pause).unwrap();
+        handle_player_command_err(self.sender.unbounded_send(PlayerCommand::Pause))
     }
 
     pub fn resume(&mut self) {
-        self.sender.unbounded_send(PlayerCommand::Play).unwrap();
+        handle_player_command_err(self.sender.unbounded_send(PlayerCommand::Play))
     }
 
     pub fn stop(&mut self) {
-        self.sender.unbounded_send(PlayerCommand::Stop).unwrap();
+        handle_player_command_err(self.sender.unbounded_send(PlayerCommand::Stop))
     }
+}
+
+// TODO: handle that
+fn handle_player_command_err<T>(_res: Result<(), TrySendError<T>>) {
+    return ()
 }
 
 pub fn load_source<T: std::convert::AsRef<std::path::Path>>(
