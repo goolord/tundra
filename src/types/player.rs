@@ -20,6 +20,7 @@ use std::thread;
 pub struct WaveForm {
     samples: Vec<i16>,
     bits_per_sample: u32,
+    cache: Cache,
 }
 
 impl WaveForm {
@@ -57,22 +58,23 @@ impl WaveForm {
 impl Program<Message> for WaveForm {
     type State = ();
     fn draw(&self, _state: &(), bounds: Rectangle, _cursor: Cursor) -> Vec<Geometry> {
-        let mut frame = Frame::new(bounds.size());
-        // frame.scale(0.01);
-        // frame.translate(Vector {
-        //     x: 0.0,
-        //     y: (max / 2) as f32
-        // });
-        let path = self.to_path(&frame);
-        let stroke = Stroke {
-            color: Color::from_rgb8(0x50, 0x7a, 0xe0),
-            width: 1.0,
-            line_cap: Default::default(),
-            line_join: Default::default(),
-            line_dash: Default::default(),
-        };
-        frame.stroke(&path, stroke);
-        vec![frame.into_geometry()]
+        let geometry = self.cache.draw(bounds.size(), |frame| {
+            // frame.scale(0.01);
+            // frame.translate(Vector {
+            //     x: 0.0,
+            //     y: (max / 2) as f32
+            // });
+            let path = self.to_path(&frame);
+            let stroke = Stroke {
+                color: Color::from_rgb8(0x50, 0x7a, 0xe0),
+                width: 1.0,
+                line_cap: Default::default(),
+                line_join: Default::default(),
+                line_dash: Default::default(),
+            };
+            frame.stroke(&path, stroke);
+        });
+        vec![geometry]
     }
 }
 
@@ -87,6 +89,7 @@ impl From<rodio::Decoder<std::io::BufReader<File>>> for WaveForm {
         WaveForm {
             samples,
             bits_per_sample: 16,
+            cache: Cache::new(),
         }
     }
 }
