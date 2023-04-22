@@ -13,6 +13,8 @@ use iced::{Color, Length, Point, Rectangle};
 use rodio::Source;
 use std::fs::File;
 use std::io::BufReader;
+use std::ops::Div;
+use std::ops::Rem;
 use std::path::PathBuf;
 use std::sync;
 use std::thread;
@@ -23,31 +25,44 @@ pub struct WaveForm {
     cache: Cache,
 }
 
+
+fn mean(list: &[i16]) -> f64 {
+    let sum: i16 = Iterator::sum(list.iter());
+    f64::from(sum) / (list.len() as f64)
+}
+
 impl WaveForm {
     pub fn to_path(&self, frame: &Frame) -> Path {
-        // let truncate = 100; // (samples.len() as u64).div(100 as u64);
         let max = 2_i32.pow(self.bits_per_sample);
         let translate_y = (max / 2) as f32;
         let height = frame.height();
         let width = frame.width();
+        let truncate = 1; // (self.samples.len() as usize).div(width as usize);
         let scale_height = height / max as f32;
-        let scale_width = width / self.samples.len() as f32;
+        let scale_width = (width / self.samples.len() as f32) * (truncate as f32);
         let mut builder = path::Builder::new();
+        let mut old_y: f32 = translate_y * scale_height;
         self.samples
-            .iter()
+            .chunks(truncate)
+            .map(|x| x.into_iter().max_by_key(|y| y.abs() ).unwrap_or(&0))
             .enumerate()
-            // .filter(|&(i, _)| (i as u64).div(truncate) == 0)
             .for_each(|(i, s)| {
                 let sample = s.to_owned() as f32;
-                let point = Point {
-                    x: i as f32 * scale_width,
-                    y: (sample + translate_y) * scale_height,
+                let x = i as f32 * scale_width;
+                let h_point = Point {
+                    x,
+                    y: old_y.clone(),
                 };
-                if i & 1 == 0 {
-                    builder.move_to(point)
-                } else {
-                    builder.line_to(point)
-                }
+                let y = (sample + translate_y) * scale_height;
+                old_y = y;
+                let v_point = Point {
+                    x,
+                    y,
+                };
+                builder.line_to(h_point);
+                builder.move_to(h_point);
+                builder.line_to(v_point);
+                builder.move_to(v_point);
             });
 
         builder.close();
