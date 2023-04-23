@@ -3,10 +3,12 @@ use crate::source::callback::Callback;
 pub use super::common::*;
 pub use super::style::*;
 pub use super::waveform::*;
-use futures::channel::mpsc::TrySendError;
+use async_std::task;
 use futures::channel::mpsc::unbounded;
+use futures::channel::mpsc::TrySendError;
 use futures::channel::mpsc::UnboundedReceiver;
 use futures::channel::mpsc::UnboundedSender;
+use futures::StreamExt;
 use iced::pure::widget::canvas::*;
 use iced::pure::widget::{Button, Column, Container, Row, Slider, Space, Svg};
 use iced::pure::Element;
@@ -33,6 +35,7 @@ pub enum PlayerCommand {
 
 #[derive(Debug, Clone)]
 pub enum PlayerMsg {
+    PlayingStored,
     SinkEmpty,
 }
 
@@ -162,40 +165,51 @@ impl Player {
         thread::spawn(move || {
             let (_stream, stream_handle) = rodio::OutputStream::try_default().unwrap();
             let sink = rodio::Sink::try_new(&stream_handle).unwrap();
+            let player_sender_clonable =
+                 ClonableUnboundedSender(player_sender);
+            let ps_a =
+                 player_sender_clonable.clone().0;
+            let ps_b =
+                 player_sender_clonable.clone().0;
+            let playing_stored = Box::new(move || {
+                 ps_a
+                    .unbounded_send(PlayerMsg::PlayingStored)
+                    .unwrap_or(());
+            });
             let sink_empty = Box::new(move || {
-                player_sender
+                 ps_b
                     .unbounded_send(PlayerMsg::SinkEmpty)
                     .unwrap_or(());
             });
-            // now we have to re-figure out how to tell the parent thread
-            // when the file is done playing. smh my head.
-            // probably can't use a channel, probably need to use something
-            // bidirectional like a socket
-            //
-            loop {
-                let msg = receiver.try_next();
-                match msg {
-                    Ok(Some(PlayerCommand::Play)) => {
-                        is_playing.store(true, sync::atomic::Ordering::SeqCst);
-                        if sink.empty() {
-                            sink.append(load_source(&file_path));
-                            sink.append::<Callback<f32>>(Callback::new(sink_empty.clone()));
+            task::block_on(async move {
+                loop {
+                    if let Some(msg) = receiver.next().await {
+                        match msg {
+                            PlayerCommand::Play => {
+                                is_playing.store(true, sync::atomic::Ordering::SeqCst);
+                                playing_stored();
+                                if sink.empty() {
+                                    sink.append(load_source(&file_path));
+                                    sink.append::<Callback<f32>>(Callback::new(sink_empty.clone()));
+                                }
+                                sink.play();
+                            }
+                            PlayerCommand::Pause => {
+                                is_playing.store(false, sync::atomic::Ordering::SeqCst);
+                                playing_stored();
+                                sink.pause();
+                            }
+                            PlayerCommand::Stop => {
+                                is_playing.store(false, sync::atomic::Ordering::SeqCst);
+                                playing_stored();
+                                sink.stop();
+                            }
                         }
-                        sink.play();
+                    } else {
+                        break;
                     }
-                    Ok(Some(PlayerCommand::Pause)) => {
-                        is_playing.store(false, sync::atomic::Ordering::SeqCst);
-                        sink.pause();
-                    }
-                    Ok(Some(PlayerCommand::Stop)) => {
-                        is_playing.store(false, sync::atomic::Ordering::SeqCst);
-                        sink.stop();
-                    }
-                    Ok(None) => break,
-                    Err(_) => (),
                 }
-                continue;
-            }
+            });
         });
         self.resume();
         player_receiver
@@ -215,7 +229,9 @@ impl Player {
 }
 
 fn handle_player_command_err<T>(res: Result<(), TrySendError<T>>) {
-    eprintln!("{:?}", res);
+    if res.is_err() {
+        eprintln!("{:?}", res);
+    };
 }
 
 pub fn load_source<T: std::convert::AsRef<std::path::Path>>(

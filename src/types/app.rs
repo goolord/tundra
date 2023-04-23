@@ -215,6 +215,7 @@ impl Application for App {
 
             Message::PlayerMsg((msg, recv)) => {
                 match msg {
+                    Some(PlayerMsg::PlayingStored) => (),
                     Some(PlayerMsg::SinkEmpty) => self.player.pause(),
                     None => return Command::none(),
                 }

@@ -1,4 +1,5 @@
 use futures::channel::mpsc::UnboundedReceiver;
+use futures::channel::mpsc::UnboundedSender;
 use futures::future::Aborted;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -39,6 +40,29 @@ impl<T> Clone for ClonableUnboundedReceiver<T> {
                 None => {
                     let foo: Option<Arc<()>> = None;
                     ClonableUnboundedReceiver(std::mem::transmute(foo))
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct ClonableUnboundedSender<T>(pub UnboundedSender<T>);
+
+// this is horribly jank
+// we are doing this pattern matching on the transmute
+// so that we don't memory leak the Arc
+impl<T> Clone for ClonableUnboundedSender<T> {
+    fn clone(&self) -> Self {
+        unsafe {
+            match std::mem::transmute(self) {
+                Some(x) => {
+                    let foo: Arc<()> = std::sync::Arc::clone(x);
+                    ClonableUnboundedSender(std::mem::transmute(Some(foo)))
+                }
+                None => {
+                    let foo: Option<Arc<()>> = None;
+                    ClonableUnboundedSender(std::mem::transmute(foo))
                 }
             }
         }
