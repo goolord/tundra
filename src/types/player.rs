@@ -214,9 +214,8 @@ impl Player {
     }
 }
 
-// TODO: handle that
-fn handle_player_command_err<T>(_res: Result<(), TrySendError<T>>) {
-    return ()
+fn handle_player_command_err<T>(res: Result<(), TrySendError<T>>) {
+    eprintln!("{:?}", res);
 }
 
 pub fn load_source<T: std::convert::AsRef<std::path::Path>>(
