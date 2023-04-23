@@ -202,6 +202,8 @@ impl Player {
                             PlayerCommand::Stop => {
                                 is_playing.store(false, sync::atomic::Ordering::SeqCst);
                                 playing_stored();
+                                // TODO: this is broken now, somehow.
+                                // seems like rodio's fault
                                 sink.stop();
                             }
                         }
