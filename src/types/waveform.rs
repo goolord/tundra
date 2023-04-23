@@ -98,7 +98,7 @@ impl Program<Message> for WaveForm {
             _cursor: Cursor,
         ) -> (event::Status, Option<Message>) {
         match event {
-            Event::Keyboard(iced::keyboard::Event::KeyPressed { key_code: KeyCode::Plus, modifiers: _ }) => {
+            Event::Keyboard(iced::keyboard::Event::KeyPressed { key_code: KeyCode::Plus | KeyCode::Equals, modifiers: _ }) => {
                 state.zoom = state.zoom + 1.0;
                 state.cache.clear();
                 (event::Status::Captured, None)
