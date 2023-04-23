@@ -12,7 +12,7 @@ use std::path::PathBuf;
 pub struct FileSelector {
     pub current_dir: PathBuf,
     pub file_list: Vec<FileButton>,
-    pub selected_file: Option<PathBuf>,
+    pub selected_file: Option<usize>,
     pub search_value: String,
 }
 
@@ -98,12 +98,11 @@ impl FileSelector {
         let mut new_col: Vec<iced::pure::Element<Message>> =
             Vec::with_capacity(self.file_list.len() + 1);
         new_col.push(dir_up.into());
-        new_col.extend(self.file_list.iter().map(|button| {
+        new_col.extend(self.file_list.iter().enumerate().map(|(i, button)| {
             let path = button.file_path.to_owned();
             let element: Button<Message> = button.view(&self.current_dir);
             let mut container = Container::new(element.padding(10)).width(Length::Fill);
-            if Some(path.canonicalize().unwrap())
-                == selected_file.map(|x| x.canonicalize().unwrap())
+            if Some(&i) == selected_file
             {
                 container = container.style(SelectedContainer);
             }

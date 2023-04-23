@@ -49,7 +49,10 @@ impl Application for App {
                             self.file_selector = FileSelector::new(file_path);
                         } else {
                             let receiver = self.player.play_file(file_path.to_owned());
-                            self.file_selector.selected_file = selected_file;
+                            self.file_selector.selected_file = self.file_selector.file_list
+                                .iter().position(|x| {
+                                    selected_file.as_ref().map_or(false, |y| y == &x.file_path)
+                                });
                             return Command::perform(receiver.into_future(), |x| {
                                 Message::PlayerMsg((x.0, ClonableUnboundedReceiver(x.1)))
                             });
