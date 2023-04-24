@@ -35,7 +35,11 @@ impl DirUp {
         text.push_str(cwd.to_str().unwrap_or("Go up"));
         Button::new(
             Row::new()
-                .push(Svg::from_path("resources/up_chevron.svg").height(Length::Units(16)))
+                .push(
+                    Svg::from_path("resources/up_chevron.svg")
+                        .height(Length::Units(16))
+                        .width(Length::Shrink),
+                )
                 .push(Text::new(text).size(24)),
         )
         .on_press(Message::ChangeDirectory(match cwd.parent() {
@@ -102,8 +106,7 @@ impl FileSelector {
             let path = button.file_path.to_owned();
             let element: Button<Message> = button.view(&self.current_dir);
             let mut container = Container::new(element.padding(10)).width(Length::Fill);
-            if Some(&i) == selected_file
-            {
+            if Some(&i) == selected_file {
                 container = container.style(SelectedContainer);
             }
             container.into()
