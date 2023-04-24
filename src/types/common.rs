@@ -46,29 +46,6 @@ impl<T> Clone for ClonableUnboundedReceiver<T> {
     }
 }
 
-#[derive(Debug)]
-pub struct ClonableUnboundedSender<T>(pub UnboundedSender<T>);
-
-// this is horribly jank
-// we are doing this pattern matching on the transmute
-// so that we don't memory leak the Arc
-impl<T> Clone for ClonableUnboundedSender<T> {
-    fn clone(&self) -> Self {
-        unsafe {
-            match std::mem::transmute(self) {
-                Some(x) => {
-                    let foo: Arc<()> = std::sync::Arc::clone(x);
-                    ClonableUnboundedSender(std::mem::transmute(Some(foo)))
-                }
-                None => {
-                    let foo: Option<Arc<()>> = None;
-                    ClonableUnboundedSender(std::mem::transmute(foo))
-                }
-            }
-        }
-    }
-}
-
 pub fn is_audio(x: &OsStr) -> bool {
     let valid_extensions = ["flac", "wav", "mp3", "ogg"];
     let x_str = x.to_string_lossy();

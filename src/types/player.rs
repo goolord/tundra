@@ -33,7 +33,7 @@ pub enum PlayerCommand {
     Stop,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum PlayerMsg {
     PlayingStored,
     SinkEmpty,
@@ -165,20 +165,9 @@ impl Player {
         thread::spawn(move || {
             let (_stream, stream_handle) = rodio::OutputStream::try_default().unwrap();
             let sink = rodio::Sink::try_new(&stream_handle).unwrap();
-            let player_sender_clonable =
-                 ClonableUnboundedSender(player_sender);
-            let ps_a =
-                 player_sender_clonable.clone().0;
-            let ps_b =
-                 player_sender_clonable.clone().0;
-            let playing_stored = Box::new(move || {
-                 ps_a
-                    .unbounded_send(PlayerMsg::PlayingStored)
-                    .unwrap_or(());
-            });
-            let sink_empty = Box::new(move || {
-                 ps_b
-                    .unbounded_send(PlayerMsg::SinkEmpty)
+            let send_msg = Box::new(move |msg| {
+                 player_sender
+                    .unbounded_send(msg)
                     .unwrap_or(());
             });
             task::block_on(async move {
@@ -187,21 +176,21 @@ impl Player {
                         match msg {
                             PlayerCommand::Play => {
                                 is_playing.store(true, sync::atomic::Ordering::SeqCst);
-                                playing_stored();
+                                send_msg(PlayerMsg::PlayingStored);
                                 if sink.empty() {
                                     sink.append(load_source(&file_path));
-                                    sink.append::<Callback<f32>>(Callback::new(sink_empty.clone()));
+                                    sink.append::<Callback<PlayerMsg, f32>>(Callback::new(send_msg.clone(), PlayerMsg::SinkEmpty));
                                 }
                                 sink.play();
                             }
                             PlayerCommand::Pause => {
                                 is_playing.store(false, sync::atomic::Ordering::SeqCst);
-                                playing_stored();
+                                send_msg(PlayerMsg::PlayingStored);
                                 sink.pause();
                             }
                             PlayerCommand::Stop => {
                                 is_playing.store(false, sync::atomic::Ordering::SeqCst);
-                                playing_stored();
+                                send_msg(PlayerMsg::PlayingStored);
                                 // TODO: this is broken now, somehow.
                                 // seems like rodio's fault
                                 sink.stop();
