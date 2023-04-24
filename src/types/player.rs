@@ -9,9 +9,9 @@ use futures::channel::mpsc::TrySendError;
 use futures::channel::mpsc::UnboundedReceiver;
 use futures::channel::mpsc::UnboundedSender;
 use futures::StreamExt;
-use iced::pure::widget::canvas::*;
-use iced::pure::widget::{Button, Column, Container, Row, Slider, Space, Svg};
-use iced::pure::Element;
+use iced::widget::canvas::*;
+use iced::widget::{Button, Column, Container, Row, Slider, Space, Svg};
+use iced::Element;
 use iced::Length;
 use std::fs::File;
 use std::io::BufReader;
@@ -51,12 +51,12 @@ pub struct Seekbar {
 }
 
 impl Seekbar {
-    pub fn view(&self) -> Slider<f64, Message> {
+    pub fn view(&self) -> Element<Message> {
         Slider::new(
             0.0..=100.0,
             self.remaining as f64 / self.total as f64,
             Message::Seek,
-        )
+        ).into()
     }
 }
 
@@ -76,29 +76,29 @@ impl Controls {
         } else {
             Svg::from_path("./resources/play.svg")
         }
-        .width(Length::Units(24))
-        .height(Length::Units(24));
+        .width(Length::Fixed(24.0))
+        .height(Length::Fixed(24.0));
         Button::new(label)
             .on_press(Message::TogglePlaying)
-            .style(ControlButton_)
-            .width(Length::Units(50))
-            .height(Length::Units(48))
+            .style(ControlButton_.into())
+            .width(Length::Fixed(50.0))
+            .height(Length::Fixed(48.0))
     }
 
     pub fn stop_button(&self) -> Button<Message> {
         let label = Svg::from_path("./resources/stop.svg")
-            .width(Length::Units(24))
-            .height(Length::Units(24));
+            .width(Length::Fixed(24.0))
+            .height(Length::Fixed(24.0));
         Button::new(label)
             .on_press(Message::StopPlayback)
-            .style(ControlButton_)
-            .width(Length::Units(50))
-            .height(Length::Units(48))
+            .style(ControlButton_.into())
+            .width(Length::Fixed(50.0))
+            .height(Length::Fixed(48.0))
     }
 
-    pub fn seek_bar(&self) -> Slider<f64, Message> {
+    pub fn seek_bar(&self) -> Element<Message> {
         match &self.seekbar {
-            None => Slider::new(0.0..=0.0, 0.0, Message::Seek),
+            None => Slider::new(0.0..=0.0, 0.0, Message::Seek).into(),
             Some(seekbar) => seekbar.view(),
         }
         // Slider::new(0.., self.)

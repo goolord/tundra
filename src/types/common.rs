@@ -1,5 +1,4 @@
 use futures::channel::mpsc::UnboundedReceiver;
-use futures::channel::mpsc::UnboundedSender;
 use futures::future::Aborted;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};

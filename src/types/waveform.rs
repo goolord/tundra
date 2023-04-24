@@ -2,7 +2,7 @@ pub use super::common::*;
 pub use super::style::*;
 
 use iced::keyboard::KeyCode;
-use iced::pure::widget::canvas::*;
+use iced::widget::canvas::*;
 use iced::{Color, Point, Rectangle};
 use rodio::Source;
 use std::fs::File;
@@ -32,7 +32,7 @@ impl WaveForm {
     pub fn to_path(&self, state: &WaveFormState, frame: &Frame) -> Path {
         let max = 2_i32.pow(self.bits_per_sample);
         let translate_y = (max / 2) as f32;
-        let translate_x = state.scroll;
+        let _translate_x = state.scroll;
         let height = frame.height();
         let width = frame.width();
         let truncate = 1; // (self.samples.len() as usize).div(width as usize);
@@ -42,14 +42,14 @@ impl WaveForm {
         let mut old_y: f32 = translate_y * scale_height;
         self.samples
             .chunks(truncate)
-            .map(|x| x.into_iter().max_by_key(|y| y.abs() ).unwrap_or(&0))
+            .map(|x| x.iter().max_by_key(|y| y.abs() ).unwrap_or(&0))
             .enumerate()
             .for_each(|(i, s)| {
                 let sample = s.to_owned() as f32;
                 let x = i as f32 * scale_width;
                 let h_point = Point {
                     x,
-                    y: old_y.clone(),
+                    y: old_y,
                 };
                 let y = (sample + translate_y) * scale_height;
                 old_y = y;
@@ -68,22 +68,22 @@ impl WaveForm {
     }
 }
 
-impl Program<Message> for WaveForm {
+impl Program<Message, iced::Theme> for WaveForm {
     type State = WaveFormState;
-    fn draw(&self, state: &WaveFormState, bounds: Rectangle, _cursor: Cursor) -> Vec<Geometry> {
+    fn draw(&self, state: &WaveFormState, _theme: &iced::Theme, bounds: Rectangle, _cursor: Cursor) -> Vec<Geometry> {
         let geometry = state.cache.draw(bounds.size(), |frame| {
             // frame.scale(0.01);
             // frame.translate(Vector {
             //     x: 0.0,
             //     y: (max / 2) as f32
             // });
-            let path = self.to_path(state, &frame);
+            let path = self.to_path(state, frame);
             let stroke = Stroke {
-                color: Color::from_rgb8(0x50, 0x7a, 0xe0),
                 width: 2.0,
                 line_cap: Default::default(),
                 line_join: Default::default(),
                 line_dash: Default::default(),
+                style: Style::Solid(Color::from_rgb8(0x50, 0x7a, 0xe0)),
             };
             frame.stroke(&path, stroke);
         });
@@ -99,12 +99,12 @@ impl Program<Message> for WaveForm {
         ) -> (event::Status, Option<Message>) {
         match event {
             Event::Keyboard(iced::keyboard::Event::KeyPressed { key_code: KeyCode::Plus | KeyCode::Equals, modifiers: _ }) => {
-                state.zoom = state.zoom + 1.0;
+                state.zoom += 1.0;
                 state.cache.clear();
                 (event::Status::Captured, None)
             }
             Event::Keyboard(iced::keyboard::Event::KeyPressed { key_code: KeyCode::Minus, modifiers: _ }) => {
-                state.zoom = state.zoom - 1.0;
+                state.zoom -= 1.0;
                 state.cache.clear();
                 (event::Status::Captured, None)
             }

@@ -4,7 +4,7 @@
 mod source;
 mod types;
 
-use iced::pure::Application;
+use iced::Application;
 use iced::Settings;
 use types::*;
 

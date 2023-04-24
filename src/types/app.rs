@@ -3,8 +3,8 @@ use futures::future::{AbortHandle, Abortable};
 use futures::*;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
-use iced::pure::widget::{Container, Row};
-use iced::pure::{Application, Element};
+use iced::widget::{Container, Row};
+use iced::{Application, Element};
 use iced::{executor, Command, Length};
 use std::{collections::hash_map::HashMap, path::PathBuf};
 use walkdir::WalkDir;
@@ -20,6 +20,7 @@ impl Application for App {
     type Message = Message;
     type Executor = executor::Default;
     type Flags = ();
+    type Theme = iced::theme::Theme;
 
     fn new(_flags: ()) -> (Self, Command<Message>) {
         let current_dir = std::env::current_dir().unwrap();
@@ -219,9 +220,9 @@ impl Application for App {
                     Some(PlayerMsg::SinkEmpty) => self.player.pause(),
                     None => return Command::none(),
                 }
-                return Command::perform(recv.0.into_future(), |x| {
+                Command::perform(recv.0.into_future(), |x| {
                     Message::PlayerMsg((x.0, ClonableUnboundedReceiver(x.1)))
-                });
+                })
             }
             Message::Seek(_) => Command::none(),
         }

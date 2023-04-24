@@ -1,7 +1,7 @@
 pub use super::common::*;
 pub use super::style::*;
-use ::iced::pure::widget::{Button, Column, Container, Row, Svg, Text, TextInput};
-use iced::pure::scrollable;
+use ::iced::widget::{Button, Column, Container, Row, Svg, Text, TextInput};
+use iced::widget::scrollable;
 use iced::Length;
 use std::cmp::*;
 use std::fs;
@@ -37,7 +37,7 @@ impl DirUp {
             Row::new()
                 .push(
                     Svg::from_path("resources/up_chevron.svg")
-                        .height(Length::Units(16))
+                        .height(Length::Fixed(16.0))
                         .width(Length::Shrink),
                 )
                 .push(Text::new(text).size(24)),
@@ -46,7 +46,7 @@ impl DirUp {
             Some(x) => x.to_path_buf(),
             None => cwd,
         }))
-        .style(DirUpButton)
+        .style(DirUpButton.into())
         .width(Length::Fill)
     }
 }
@@ -99,11 +99,10 @@ impl FileSelector {
         let selected_file = self.selected_file.as_ref();
         let dir_up =
             Container::new(DirUp.view(self.current_dir.to_owned()).padding(5)).width(Length::Fill);
-        let mut new_col: Vec<iced::pure::Element<Message>> =
+        let mut new_col: Vec<iced::Element<Message>> =
             Vec::with_capacity(self.file_list.len() + 1);
         new_col.push(dir_up.into());
         new_col.extend(self.file_list.iter().enumerate().map(|(i, button)| {
-            let path = button.file_path.to_owned();
             let element: Button<Message> = button.view(&self.current_dir);
             let mut container = Container::new(element.padding(10)).width(Length::Fill);
             if Some(&i) == selected_file {
@@ -113,7 +112,8 @@ impl FileSelector {
         }));
         let fs_column = Column::with_children(new_col).spacing(0).padding(0);
         let fs = scrollable(fs_column).height(Length::Fill);
-        let search = TextInput::new("Search", &self.search_value, Message::Search)
+        let search = TextInput::new("Search", &self.search_value)
+            .on_input(Message::Search)
             .style(FileSearch)
             .size(32)
             .padding(10);
@@ -139,14 +139,14 @@ impl FileButton {
         let label = Row::with_children(if self.file_path.is_dir() {
             vec![
                 Svg::from_path("./resources/folder-solid.svg")
-                    .width(Length::Units(24))
+                    .width(Length::Fixed(24.0))
                     .into(),
                 text.into(),
             ]
         } else if is_audio(self.file_path.as_os_str()) {
             vec![
                 Svg::from_path("./resources/music-solid.svg")
-                    .height(Length::Units(24))
+                    .height(Length::Fixed(24.0))
                     .width(Length::Shrink)
                     .into(),
                 text.into(),
@@ -155,7 +155,7 @@ impl FileButton {
             vec![text.into()]
         });
         Button::new(label)
-            .style(FileButton_)
+            .style(FileButton_.into())
             .on_press(Message::SelectedFile(Some(self.file_path.to_owned())))
             .width(Length::Fill)
     }

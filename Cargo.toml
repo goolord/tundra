@@ -7,15 +7,15 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-iced = { version = "0.4.2", features = ["svg", "canvas", "pure"] }
-iced_futures = "0.4.1"
-iced_native = "0.5.1"
-iced_audio = "0.8.0"
-rodio = "0.15.0"
-svg = "0.10.0"
-walkdir = "2.3.2"
+iced = { version = "0.9", features = ["svg", "canvas"] }
+iced_futures = "0.6.0"
+iced_native = "0.10.3"
+iced_audio = "0.11.0"
+rodio = "0.17.1"
+svg = "0.13.1"
+walkdir = "2.3.3"
 fuzzy-matcher = "0.3.7"
-futures = "0.3.21"
+futures = "0.3.28"
 async-std = "1.12.0"
 
 [profile.dev]
