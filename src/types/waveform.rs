@@ -24,8 +24,9 @@ impl Default for WaveFormState {
 }
 
 pub struct WaveForm {
-    samples: Vec<i16>,
-    bits_per_sample: u32,
+    pub samples: Vec<i16>,
+    pub bits_per_sample: u32,
+    pub sample_rate: u32
 }
 
 impl WaveForm {
@@ -125,6 +126,7 @@ impl Program<Message, iced::Theme> for WaveForm {
 impl From<rodio::Decoder<std::io::BufReader<File>>> for WaveForm {
     fn from(decoder: rodio::Decoder<std::io::BufReader<File>>) -> WaveForm {
         let number_channels = decoder.channels();
+        let sample_rate = decoder.sample_rate();
         let all_samples: Vec<i16> = decoder.into_iter().collect();
         let mut samples: Vec<i16> = Vec::with_capacity(all_samples.len());
         for arr in all_samples.chunks_exact(number_channels as usize) {
@@ -133,6 +135,7 @@ impl From<rodio::Decoder<std::io::BufReader<File>>> for WaveForm {
         WaveForm {
             samples,
             bits_per_sample: 16,
+            sample_rate
         }
     }
 }

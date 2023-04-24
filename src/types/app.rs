@@ -224,7 +224,17 @@ impl Application for App {
                     Message::PlayerMsg((x.0, ClonableUnboundedReceiver(x.1)))
                 })
             }
-            Message::Seek(_) => Command::none(),
+            Message::Seek(p) => {
+                self.player.controls.seeking(p);
+                Command::none()
+            },
+            Message::SeekCommit => {
+                match &self.player.controls.seekbar {
+                    None => (),
+                    Some(seekbar) => self.player.seek(seekbar.seeking),
+                }
+                Command::none()
+            }
         }
     }
 

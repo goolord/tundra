@@ -13,11 +13,13 @@ use iced::widget::canvas::*;
 use iced::widget::{Button, Column, Container, Row, Slider, Space, Svg};
 use iced::Element;
 use iced::Length;
+use rodio::Source;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
 use std::sync;
 use std::thread;
+use std::time::Duration;
 
 // todo: abstract this into a player type
 // ref: https://github.com/tindleaj/miso/blob/master/src/player.rs
@@ -31,6 +33,7 @@ pub enum PlayerCommand {
     Play,
     Pause,
     Stop,
+    Seek(f64),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -48,15 +51,19 @@ pub struct Controls {
 pub struct Seekbar {
     pub total: u64,
     pub remaining: u64,
+    pub seeking: f64,
 }
 
 impl Seekbar {
     pub fn view(&self) -> Element<Message> {
         Slider::new(
-            0.0..=100.0,
-            self.remaining as f64 / self.total as f64,
+            0.0..=1.0,
+            self.total as f64 / self.remaining as f64,
             Message::Seek,
-        ).into()
+        )
+        .step(0.01)
+        .on_release(Message::SeekCommit)
+        .into()
     }
 }
 
@@ -66,6 +73,15 @@ impl Controls {
             is_playing: sync::Arc::new(false.into()),
             volume: f32::MAX,
             seekbar: None,
+        }
+    }
+
+    pub fn seeking(&mut self, p: f64) {
+        match &mut self.seekbar {
+            None => (),
+            Some(seekbar) => {
+                seekbar.seeking = p
+            }
         }
     }
 
@@ -157,6 +173,13 @@ impl Player {
             .is_playing
             .store(true, sync::atomic::Ordering::SeqCst);
         let audio_buffer: WaveForm = load_source(&file_path).into();
+        let samples_len = audio_buffer.samples.len();
+        self.controls.seekbar = Some(Seekbar {
+            total: samples_len as u64,
+            remaining: samples_len as u64,
+            seeking: 0.0,
+        });
+        let audio_length_s: f64 = samples_len as f64 / audio_buffer.sample_rate as f64;
         self.waveform = Some(audio_buffer);
         let is_playing = sync::Arc::clone(&self.controls.is_playing);
         let (sender, mut receiver) = unbounded();
@@ -166,9 +189,7 @@ impl Player {
             let (_stream, stream_handle) = rodio::OutputStream::try_default().unwrap();
             let sink = rodio::Sink::try_new(&stream_handle).unwrap();
             let send_msg = Box::new(move |msg| {
-                 player_sender
-                    .unbounded_send(msg)
-                    .unwrap_or(());
+                player_sender.unbounded_send(msg).unwrap_or(());
             });
             task::block_on(async move {
                 loop {
@@ -179,7 +200,10 @@ impl Player {
                                 send_msg(PlayerMsg::PlayingStored);
                                 if sink.empty() {
                                     sink.append(load_source(&file_path));
-                                    sink.append::<Callback<PlayerMsg, f32>>(Callback::new(send_msg.clone(), PlayerMsg::SinkEmpty));
+                                    sink.append::<Callback<PlayerMsg, f32>>(Callback::new(
+                                        send_msg.clone(),
+                                        PlayerMsg::SinkEmpty,
+                                    ));
                                 }
                                 sink.play();
                             }
@@ -192,6 +216,21 @@ impl Player {
                                 is_playing.store(false, sync::atomic::Ordering::SeqCst);
                                 send_msg(PlayerMsg::PlayingStored);
                                 sink.clear();
+                            }
+                            PlayerCommand::Seek(p) => {
+                                sink.clear();
+                                is_playing.store(true, sync::atomic::Ordering::SeqCst);
+                                send_msg(PlayerMsg::PlayingStored);
+                                let secs_to_skip = audio_length_s * p;
+                                sink.append(
+                                    load_source(&file_path)
+                                        .skip_duration(Duration::from_secs_f64(secs_to_skip)),
+                                );
+                                sink.append::<Callback<PlayerMsg, f32>>(Callback::new(
+                                    send_msg.clone(),
+                                    PlayerMsg::SinkEmpty,
+                                ));
+                                sink.play();
                             }
                         }
                     } else {
@@ -214,6 +253,10 @@ impl Player {
 
     pub fn stop(&mut self) {
         handle_player_command_err(self.sender.unbounded_send(PlayerCommand::Stop))
+    }
+
+    pub fn seek(&mut self, p: f64) {
+        handle_player_command_err(self.sender.unbounded_send(PlayerCommand::Seek(p)))
     }
 }
 

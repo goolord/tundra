@@ -12,6 +12,7 @@ pub enum Message {
     SearchCompleted(Result<Vec<PathBuf>, Aborted>),
     InsertDircache((PathBuf, Vec<PathBuf>)),
     Seek(f64),
+    SeekCommit,
     PlayerMsg(
         (
             Option<super::PlayerMsg>,
