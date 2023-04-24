@@ -245,15 +245,6 @@ impl From<FileSearch> for iced::theme::TextInput {
 
 pub struct DirUpButton;
 
-impl DirUpButton {
-    fn default_style() -> button::Appearance {
-        button::Appearance {
-            text_color: Color::from_rgb8(0xff, 0xff, 0xff),
-            ..button::Appearance::default()
-        }
-    }
-}
-
 impl button::StyleSheet for DirUpButton {
     type Style = iced::Theme;
     fn active(&self, _style: &Self::Style) -> button::Appearance {
