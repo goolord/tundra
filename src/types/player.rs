@@ -191,9 +191,7 @@ impl Player {
                             PlayerCommand::Stop => {
                                 is_playing.store(false, sync::atomic::Ordering::SeqCst);
                                 send_msg(PlayerMsg::PlayingStored);
-                                // TODO: this is broken now, somehow.
-                                // seems like rodio's fault
-                                sink.stop();
+                                sink.clear();
                             }
                         }
                     } else {
