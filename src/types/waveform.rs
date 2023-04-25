@@ -9,7 +9,6 @@ use rodio::Source;
 use std::fs::File;
 
 pub struct WaveFormState {
-    cache: Cache,
     zoom: f32,
     scroll: f32,
 }
@@ -17,7 +16,6 @@ pub struct WaveFormState {
 impl Default for WaveFormState {
     fn default() -> WaveFormState {
         WaveFormState {
-            cache: Cache::new(),
             zoom: 1.0,
             scroll: 0.0,
         }
@@ -28,6 +26,7 @@ pub struct WaveForm {
     pub samples: Vec<i16>,
     pub bits_per_sample: u32,
     pub sample_rate: u32,
+    cache: Cache,
 }
 
 impl WaveForm {
@@ -73,7 +72,8 @@ impl Program<Message, Theme> for WaveForm {
         bounds: Rectangle,
         _cursor: Cursor,
     ) -> Vec<Geometry> {
-        let geometry = state.cache.draw(bounds.size(), |frame| {
+        self.cache.clear();
+        let geometry = self.cache.draw(bounds.size(), |frame| {
             // frame.scale(0.01);
             // frame.translate(Vector {
             //     x: 0.0,
@@ -105,7 +105,7 @@ impl Program<Message, Theme> for WaveForm {
                 modifiers: _,
             }) => {
                 state.zoom += 1.0;
-                state.cache.clear();
+                self.cache.clear();
                 (event::Status::Captured, None)
             }
             Event::Keyboard(iced::keyboard::Event::KeyPressed {
@@ -113,7 +113,7 @@ impl Program<Message, Theme> for WaveForm {
                 modifiers: _,
             }) => {
                 state.zoom -= 1.0;
-                state.cache.clear();
+                self.cache.clear();
                 (event::Status::Captured, None)
             }
             _ => (event::Status::Ignored, None),
@@ -143,6 +143,7 @@ impl From<rodio::Decoder<std::io::BufReader<File>>> for WaveForm {
             samples,
             bits_per_sample: 16,
             sample_rate,
+            cache: Cache::new(),
         }
     }
 }
