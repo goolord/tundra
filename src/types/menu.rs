@@ -25,9 +25,7 @@ impl MainMenu {
 fn menu_1<'a>() -> MenuTree<'a, Message> {
     let root = MenuTree::with_children(
         labeled_button("Menu"),
-        vec![
-            item("Invalidate cache", Message::InvalidateDircache()),
-        ],
+        vec![item("Invalidate cache", Message::InvalidateDircache())],
     )
     .width(110);
 
@@ -50,7 +48,12 @@ fn labeled_button(label: &str) -> Button<'_, Message> {
 }
 
 fn item(label: &str, msg: Message) -> MenuTree<'_, Message> {
-    MenuTree::new(labeled_button(label).on_press(msg).width(Length::Fill).height(Length::Fill))
+    MenuTree::new(
+        labeled_button(label)
+            .on_press(msg)
+            .width(Length::Fill)
+            .height(Length::Fill),
+    )
 }
 
 // fn sub_menu<'a>(

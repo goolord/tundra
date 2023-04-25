@@ -18,36 +18,12 @@ pub enum Message {
     PlayerMsg(
         (
             Option<super::PlayerMsg>,
-            ClonableUnboundedReceiver<super::PlayerMsg>,
+            Arc<UnboundedReceiver<super::PlayerMsg>>,
         ),
     ),
     TogglePlaying,
     StopPlayback,
     VResizeFileSelector(u16),
-    Debug(String),
-}
-
-#[derive(Debug)]
-pub struct ClonableUnboundedReceiver<T>(pub UnboundedReceiver<T>);
-
-// this is horribly jank
-// we are doing this pattern matching on the transmute
-// so that we don't memory leak the Arc
-impl<T> Clone for ClonableUnboundedReceiver<T> {
-    fn clone(&self) -> Self {
-        unsafe {
-            match std::mem::transmute(self) {
-                Some(x) => {
-                    let foo: Arc<()> = std::sync::Arc::clone(x);
-                    ClonableUnboundedReceiver(std::mem::transmute(Some(foo)))
-                }
-                None => {
-                    let foo: Option<Arc<()>> = None;
-                    ClonableUnboundedReceiver(std::mem::transmute(foo))
-                }
-            }
-        }
-    }
 }
 
 pub fn is_audio(x: &OsStr) -> bool {

@@ -7,6 +7,7 @@ use fuzzy_matcher::FuzzyMatcher;
 
 use iced::Application;
 use iced::{executor, Command, Length};
+use std::sync::Arc;
 use std::{collections::hash_map::HashMap, path::PathBuf};
 use walkdir::WalkDir;
 
@@ -80,7 +81,7 @@ impl Application for App {
                                     selected_file.as_ref().map_or(false, |y| y == &x.file_path)
                                 });
                             return Command::perform(receiver.into_future(), |x| {
-                                Message::PlayerMsg((x.0, ClonableUnboundedReceiver(x.1)))
+                                Message::PlayerMsg((x.0, Arc::new(x.1)))
                             });
                         }
                     }
@@ -256,7 +257,7 @@ impl Application for App {
                     None => (),
                 };
                 Command::none()
-            },
+            }
 
             Message::PlayerMsg((msg, recv)) => {
                 match msg {
@@ -264,9 +265,15 @@ impl Application for App {
                     Some(PlayerMsg::SinkEmpty) => self.player.pause(),
                     None => return Command::none(),
                 }
-                Command::perform(recv.0.into_future(), |x| {
-                    Message::PlayerMsg((x.0, ClonableUnboundedReceiver(x.1)))
-                })
+                match Arc::into_inner(recv) {
+                    None => {
+                        eprintln!("Message::PlayerMsg Arc::into_inner failed");
+                        Command::none()
+                    }
+                    Some(recv) => Command::perform(recv.into_future(), |x| {
+                        Message::PlayerMsg((x.0, Arc::new(x.1)))
+                    }),
+                }
             }
             Message::Seek(p) => {
                 self.player.controls.seeking(p);
@@ -281,10 +288,6 @@ impl Application for App {
             }
             Message::VResizeFileSelector(position) => {
                 self.file_selector_divider_vpos = Some(position);
-                Command::none()
-            }
-            Message::Debug(s) => {
-                println!("{}", s);
                 Command::none()
             }
         }
