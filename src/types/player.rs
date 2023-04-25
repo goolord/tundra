@@ -1,17 +1,14 @@
 use crate::source::callback::Callback;
 
 pub use super::common::*;
-pub use super::style::*;
 pub use super::waveform::*;
+use super::theme;
 use async_std::task;
 use futures::channel::mpsc::unbounded;
 use futures::channel::mpsc::TrySendError;
 use futures::channel::mpsc::UnboundedReceiver;
 use futures::channel::mpsc::UnboundedSender;
 use futures::StreamExt;
-use iced::widget::canvas::*;
-use iced::widget::{Button, Column, Container, Row, Slider, Space, Svg};
-use iced::Element;
 use iced::Length;
 use rodio::Source;
 use std::fs::File;
@@ -58,7 +55,7 @@ impl Seekbar {
     pub fn view(&self) -> Element<Message> {
         Slider::new(
             0.0..=1.0,
-            self.total as f64 / self.remaining as f64,
+            1.0 - (self.remaining as f64 / self.total as f64),
             Message::Seek,
         )
         .step(0.01)
@@ -96,7 +93,7 @@ impl Controls {
         .height(Length::Fixed(24.0));
         Button::new(label)
             .on_press(Message::TogglePlaying)
-            .style(ControlButton_.into())
+            .style(theme::Button::ControlButton)
             .width(Length::Fixed(50.0))
             .height(Length::Fixed(48.0))
     }
@@ -107,7 +104,7 @@ impl Controls {
             .height(Length::Fixed(24.0));
         Button::new(label)
             .on_press(Message::StopPlayback)
-            .style(ControlButton_.into())
+            .style(theme::Button::ControlButton)
             .width(Length::Fixed(50.0))
             .height(Length::Fixed(48.0))
     }
@@ -132,7 +129,7 @@ impl Controls {
             .width(Length::Fill)
             .align_items(iced::Alignment::Center);
         Container::new(column)
-            .style(Controls_)
+            .style(theme::Container::Controls)
             .align_x(iced::alignment::Horizontal::Center)
             .align_y(iced::alignment::Vertical::Center)
             .width(Length::Fill)
@@ -162,7 +159,7 @@ impl Player {
         Container::new(player)
             .width(Length::Fill)
             .height(Length::FillPortion(1))
-            .style(PlayerContainer)
+            .style(theme::Container::PlayerContainer)
             .padding(1)
             .center_x()
             .center_y()
@@ -239,16 +236,16 @@ impl Player {
                 }
             });
         });
-        self.resume();
+        self.play();
         player_receiver
+    }
+
+    pub fn play(&mut self) {
+        handle_player_command_err(self.sender.unbounded_send(PlayerCommand::Play))
     }
 
     pub fn pause(&mut self) {
         handle_player_command_err(self.sender.unbounded_send(PlayerCommand::Pause))
-    }
-
-    pub fn resume(&mut self) {
-        handle_player_command_err(self.sender.unbounded_send(PlayerCommand::Play))
     }
 
     pub fn stop(&mut self) {

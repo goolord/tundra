@@ -1,16 +1,18 @@
 use super::*;
+use super::theme;
 use futures::future::{AbortHandle, Abortable};
 use futures::*;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
-use iced::widget::{Container, Row};
-use iced::{Application, Element};
+
+use iced::Application;
 use iced::{executor, Command, Length};
 use std::{collections::hash_map::HashMap, path::PathBuf};
 use walkdir::WalkDir;
 
 pub struct App {
     pub file_selector: FileSelector,
+    pub file_selector_divider_vpos: Option<u16>,
     pub player: Player,
     pub search_thread: AbortHandle,
     pub dir_cache: HashMap<PathBuf, Vec<PathBuf>>,
@@ -20,7 +22,7 @@ impl Application for App {
     type Message = Message;
     type Executor = executor::Default;
     type Flags = ();
-    type Theme = iced::theme::Theme;
+    type Theme = Theme;
 
     fn new(_flags: ()) -> (Self, Command<Message>) {
         let current_dir = std::env::current_dir().unwrap();
@@ -30,6 +32,7 @@ impl Application for App {
         let dir_cache = HashMap::new();
         let app = App {
             file_selector,
+            file_selector_divider_vpos: None,
             player,
             search_thread,
             dir_cache,
@@ -199,7 +202,7 @@ impl Application for App {
                 {
                     self.player.pause()
                 } else {
-                    self.player.resume()
+                    self.player.play()
                 }
                 Command::none()
             }
@@ -235,17 +238,27 @@ impl Application for App {
                 }
                 Command::none()
             }
+            Message::VResizeFileSelector(position) => {
+                self.file_selector_divider_vpos = Some(position);
+                Command::none()
+            },
         }
     }
 
     fn view(&self) -> Element<Message> {
         let player = self.player.view();
-        let file_selector_container = Container::new(self.file_selector.view())
+        let file_selector_container = iced::widget::container(self.file_selector.view())
             .width(Length::Fill)
             .height(Length::Fill)
-            .style(Container_)
+            .style(theme::Container::Container)
             .center_x();
-
-        Row::new().push(file_selector_container).push(player).into()
+        
+        iced_aw::Split::new(
+            file_selector_container,
+            player,
+            self.file_selector_divider_vpos,
+            iced_aw::split::Axis::Vertical,
+            Message::VResizeFileSelector,
+        ).style(theme::Split::Split).into()
     }
 }

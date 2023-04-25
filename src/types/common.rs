@@ -21,6 +21,7 @@ pub enum Message {
     ),
     TogglePlaying,
     StopPlayback,
+    VResizeFileSelector(u16),
 }
 
 #[derive(Debug)]

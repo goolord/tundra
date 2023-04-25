@@ -1,6 +1,6 @@
 pub use super::common::*;
-pub use super::style::*;
-use ::iced::widget::{Button, Column, Container, Row, Svg, Text, TextInput};
+use super::theme;
+use super::widget::*;
 use iced::widget::scrollable;
 use iced::Length;
 use std::cmp::*;
@@ -46,7 +46,7 @@ impl DirUp {
             Some(x) => x.to_path_buf(),
             None => cwd,
         }))
-        .style(DirUpButton.into())
+        .style(theme::Button::DirUpButton)
         .width(Length::Fill)
     }
 }
@@ -99,14 +99,14 @@ impl FileSelector {
         let selected_file = self.selected_file.as_ref();
         let dir_up =
             Container::new(DirUp.view(self.current_dir.to_owned()).padding(5)).width(Length::Fill);
-        let mut new_col: Vec<iced::Element<Message>> =
+        let mut new_col: Vec<Element<Message>> =
             Vec::with_capacity(self.file_list.len() + 1);
         new_col.push(dir_up.into());
         new_col.extend(self.file_list.iter().enumerate().map(|(i, button)| {
             let element: Button<Message> = button.view(&self.current_dir);
             let mut container = Container::new(element.padding(10)).width(Length::Fill);
             if Some(&i) == selected_file {
-                container = container.style(SelectedContainer);
+                container = container.style(super::theme::Container::SelectedContainer);
             }
             container.into()
         }));
@@ -114,7 +114,7 @@ impl FileSelector {
         let fs = scrollable(fs_column).height(Length::Fill);
         let search = TextInput::new("Search", &self.search_value)
             .on_input(Message::Search)
-            .style(FileSearch)
+            .style(super::theme::TextInput::FileSearch)
             .size(32)
             .padding(10);
 
@@ -155,7 +155,7 @@ impl FileButton {
             vec![text.into()]
         });
         Button::new(label)
-            .style(FileButton_.into())
+            .style(super::theme::Button::FileButton)
             .on_press(Message::SelectedFile(Some(self.file_path.to_owned())))
             .width(Length::Fill)
     }

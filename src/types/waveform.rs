@@ -1,5 +1,6 @@
 pub use super::common::*;
-pub use super::style::*;
+pub use super::theme::*;
+pub use super::widget::*;
 
 use iced::keyboard::KeyCode;
 use iced::widget::canvas::*;
@@ -69,9 +70,9 @@ impl WaveForm {
     }
 }
 
-impl Program<Message, iced::Theme> for WaveForm {
+impl Program<Message, Theme> for WaveForm {
     type State = WaveFormState;
-    fn draw(&self, state: &WaveFormState, _theme: &iced::Theme, bounds: Rectangle, _cursor: Cursor) -> Vec<Geometry> {
+    fn draw(&self, state: &WaveFormState, _theme: &Theme, bounds: Rectangle, _cursor: Cursor) -> Vec<Geometry> {
         let geometry = state.cache.draw(bounds.size(), |frame| {
             // frame.scale(0.01);
             // frame.translate(Vector {
