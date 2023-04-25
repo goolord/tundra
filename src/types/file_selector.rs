@@ -99,16 +99,14 @@ impl FileSelector {
         let selected_file = self.selected_file.as_ref();
         let dir_up =
             Container::new(DirUp.view(self.current_dir.to_owned()).padding(5)).width(Length::Fill);
-        let mut new_col: Vec<Element<Message>> = Vec::with_capacity(self.file_list.len() + 1);
-        new_col.push(dir_up.into());
-        new_col.extend(self.file_list.iter().enumerate().map(|(i, button)| {
+        let new_col: Vec<Element<Message>> = self.file_list.iter().enumerate().map(|(i, button)| {
             let element: Button<Message> = button.view(&self.current_dir);
             let mut container = Container::new(element.padding(10)).width(Length::Fill);
             if Some(&i) == selected_file {
                 container = container.style(super::theme::Container::SelectedContainer);
             }
             container.into()
-        }));
+        }).collect();
         let fs_column = Column::with_children(new_col).spacing(0).padding(0);
         let fs = scrollable(fs_column).height(Length::Fill);
         let search = TextInput::new("Search", &self.search_value)
@@ -117,7 +115,7 @@ impl FileSelector {
             .size(32)
             .padding(10);
 
-        Column::new().push(fs).push(search)
+        Column::new().push(dir_up).push(fs).push(search)
     }
 }
 
