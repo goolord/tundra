@@ -12,3 +12,5 @@ pub type Svg = iced::widget::Svg<Renderer>;
 pub type Slider<'a, T, Message> = iced::widget::Slider<'a, T, Message, Renderer>;
 pub type Space = iced::widget::Space;
 pub type Text<'a> = iced::widget::Text<'a, Renderer>;
+pub type MenuBar<'a, Message> = iced_aw::menu::MenuBar<'a, Message, Renderer>;
+pub type MenuTree<'a, Message> = iced_aw::menu::MenuTree<'a, Message, Renderer>;

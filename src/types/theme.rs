@@ -268,6 +268,14 @@ impl text_input::StyleSheet for Theme {
     }
 }
 
+impl iced_aw::menu::StyleSheet for Theme {
+    type Style = ();
+
+    fn appearance(&self, _style: &Self::Style) -> iced_aw::menu::Appearance {
+        iced::Theme::Dark.appearance(&iced_aw::style::MenuBarStyle::Default)
+    }
+}
+
 fn default_filebutton_style() -> button::Appearance {
     button::Appearance {
         text_color: Color::from_rgb8(0xff, 0xff, 0xff),

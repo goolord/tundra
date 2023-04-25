@@ -1,6 +1,7 @@
 use futures::channel::mpsc::UnboundedReceiver;
 use futures::future::Aborted;
 use std::ffi::OsStr;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -22,6 +23,7 @@ pub enum Message {
     TogglePlaying,
     StopPlayback,
     VResizeFileSelector(u16),
+    Debug(String),
 }
 
 #[derive(Debug)]

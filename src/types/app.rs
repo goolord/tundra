@@ -12,10 +12,24 @@ use walkdir::WalkDir;
 
 pub struct App {
     pub file_selector: FileSelector,
+    pub menu: MainMenu,
     pub file_selector_divider_vpos: Option<u16>,
     pub player: Player,
     pub search_thread: AbortHandle,
     pub dir_cache: HashMap<PathBuf, Vec<PathBuf>>,
+}
+
+fn get_dir_cache() -> std::option::Option<std::path::PathBuf> {
+    match dirs::cache_dir() {
+        Some(mut cache_dir) => {
+            cache_dir.push("tundra");
+            let _ = std::fs::create_dir(cache_dir.clone());
+            cache_dir.push("dir_cache");
+            cache_dir.set_extension("bin");
+            Some(cache_dir)
+        }
+        None => None,
+    }
 }
 
 impl Application for App {
@@ -27,11 +41,19 @@ impl Application for App {
     fn new(_flags: ()) -> (Self, Command<Message>) {
         let current_dir = std::env::current_dir().unwrap();
         let file_selector = FileSelector::new(&current_dir);
+        let menu = MainMenu::new();
         let player = Player::new();
         let search_thread = AbortHandle::new_pair().0;
-        let dir_cache = HashMap::new();
+        let dir_cache = match get_dir_cache() {
+            Some(dir_cache) => match std::fs::read(dir_cache) {
+                Ok(s) => bincode::deserialize(&s).unwrap_or(HashMap::new()),
+                Err(_) => HashMap::new(),
+            },
+            None => HashMap::new(),
+        };
         let app = App {
             file_selector,
+            menu,
             file_selector_divider_vpos: Some(300),
             player,
             search_thread,
@@ -214,6 +236,13 @@ impl Application for App {
 
             Message::InsertDircache((parent_dir, children)) => {
                 self.dir_cache.insert(parent_dir, children);
+                match get_dir_cache() {
+                    Some(dir_cache) => {
+                        std::fs::write(dir_cache, bincode::serialize(&self.dir_cache).unwrap())
+                            .unwrap();
+                    }
+                    None => (),
+                };
                 Command::none()
             }
 
@@ -242,25 +271,33 @@ impl Application for App {
                 self.file_selector_divider_vpos = Some(position);
                 Command::none()
             }
+            Message::Debug(s) => {
+                println!("{}", s);
+                Command::none()
+            }
         }
     }
 
     fn view(&self) -> Element<Message> {
         let player = self.player.view();
+        let menu = self.menu.view();
         let file_selector_container = iced::widget::container(self.file_selector.view())
             .width(Length::Fill)
             .height(Length::Fill)
             .style(theme::Container::Container)
             .center_x();
 
-        iced_aw::Split::new(
-            file_selector_container,
-            player,
-            self.file_selector_divider_vpos,
-            iced_aw::split::Axis::Vertical,
-            Message::VResizeFileSelector,
-        )
-        .style(theme::Split::Split)
+        iced::widget::column![
+            menu,
+            iced_aw::Split::new(
+                file_selector_container,
+                player,
+                self.file_selector_divider_vpos,
+                iced_aw::split::Axis::Vertical,
+                Message::VResizeFileSelector,
+            )
+            .style(theme::Split::Split)
+        ]
         .into()
     }
 }
