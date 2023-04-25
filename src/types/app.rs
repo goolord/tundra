@@ -311,7 +311,6 @@ impl Application for App {
                 iced_aw::split::Axis::Vertical,
                 Message::VResizeFileSelector,
             )
-            .style(theme::Split::Split)
         ]
         .into()
     }

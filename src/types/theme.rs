@@ -26,12 +26,6 @@ pub enum Button {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Split {
-    #[default]
-    Split,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TextInput {
     #[default]
     Default,
@@ -150,7 +144,7 @@ impl button::StyleSheet for Theme {
 }
 
 impl split::StyleSheet for Theme {
-    type Style = Split;
+    type Style = ();
 
     fn active(&self, _style: Self::Style) -> iced_aw::split::Appearance {
         default_split_styles()
@@ -227,12 +221,13 @@ impl iced::widget::slider::StyleSheet for Theme {
 
 fn default_split_styles() -> iced_aw::split::Appearance {
     iced_aw::split::Appearance {
-        background: Some(Background::Color(Color::from_rgb8(0x23, 0x27, 0x2a))),
+        background: None,
         first_background: None,
         second_background: None,
-        border_width: 2.0,
+        border_width: 3.0,
         border_color: Color::from_rgb8(0x23, 0x27, 0x2a),
         divider_border_color: Color::from_rgb8(0x23, 0x27, 0x2a),
+        divider_background: Background::Color(Color::from_rgb8(0x23, 0x27, 0x2a)),
         ..Default::default()
     }
 }
