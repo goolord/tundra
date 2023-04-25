@@ -246,6 +246,18 @@ impl Application for App {
                 Command::none()
             }
 
+            Message::InvalidateDircache() => {
+                self.dir_cache = HashMap::new();
+                match get_dir_cache() {
+                    Some(dir_cache) => {
+                        std::fs::write(dir_cache, bincode::serialize(&self.dir_cache).unwrap())
+                            .unwrap();
+                    }
+                    None => (),
+                };
+                Command::none()
+            },
+
             Message::PlayerMsg((msg, recv)) => {
                 match msg {
                     Some(PlayerMsg::PlayingStored) => (),

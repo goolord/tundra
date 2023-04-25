@@ -19,6 +19,7 @@ pub enum Container {
 pub enum Button {
     #[default]
     Default,
+    MenuButton,
     FileButton,
     ControlButton,
     DirUpButton,
@@ -106,7 +107,16 @@ impl button::StyleSheet for Theme {
                 background: Some(Background::Color(Color::from_rgb8(0x2d, 0x31, 0x35))),
                 ..iced::Theme::Dark.active(&iced::theme::Button::default())
             },
-            Button::Default => Default::default(),
+
+            Button::Default => button::Appearance {
+                background: Some(Background::Color(Color::from_rgb8(0x2d, 0x31, 0x35))),
+                ..iced::Theme::Dark.active(&iced::theme::Button::default())
+            },
+
+            Button::MenuButton => button::Appearance {
+                background: None,
+                ..iced::Theme::Dark.active(&iced::theme::Button::default())
+            },
         }
     }
 
@@ -125,7 +135,16 @@ impl button::StyleSheet for Theme {
                 background: Some(Background::Color(Color::from_rgb8(0x37, 0x3c, 0x41))),
                 ..iced::Theme::Dark.hovered(&iced::theme::Button::default())
             },
-            Button::Default => Default::default(),
+
+            Button::Default => button::Appearance {
+                background: Some(Background::Color(Color::from_rgb8(0x37, 0x3c, 0x41))),
+                ..iced::Theme::Dark.hovered(&iced::theme::Button::default())
+            },
+
+            Button::MenuButton => button::Appearance {
+                background: Some(Background::Color(Color::from_rgb8(0x37, 0x3c, 0x41))),
+                ..iced::Theme::Dark.hovered(&iced::theme::Button::default())
+            },
         }
     }
 }
@@ -158,7 +177,9 @@ impl iced::widget::text::StyleSheet for Theme {
     type Style = ();
 
     fn appearance(&self, _style: Self::Style) -> iced::widget::text::Appearance {
-        Default::default()
+        iced::widget::text::Appearance {
+            color: Some(Color::from_rgb8(0xff, 0xff, 0xff)),
+        }
     }
 }
 
@@ -272,7 +293,15 @@ impl iced_aw::menu::StyleSheet for Theme {
     type Style = ();
 
     fn appearance(&self, _style: &Self::Style) -> iced_aw::menu::Appearance {
-        iced::Theme::Dark.appearance(&iced_aw::style::MenuBarStyle::Default)
+        iced_aw::menu::Appearance {
+            // background: todo!(),
+            // border_width: todo!(),
+            // border_radius: todo!(),
+            // border_color: todo!(),
+            // background_expand: todo!(),
+            // path: Color::from_rgb8(0x00, 0x00, 0xff),
+            ..iced::Theme::Dark.appearance(&iced_aw::style::MenuBarStyle::Default)
+        }
     }
 }
 
