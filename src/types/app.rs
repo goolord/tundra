@@ -1,5 +1,5 @@
-use super::*;
 use super::theme;
+use super::*;
 use futures::future::{AbortHandle, Abortable};
 use futures::*;
 use fuzzy_matcher::skim::SkimMatcherV2;
@@ -32,7 +32,7 @@ impl Application for App {
         let dir_cache = HashMap::new();
         let app = App {
             file_selector,
-            file_selector_divider_vpos: None,
+            file_selector_divider_vpos: Some(300),
             player,
             search_thread,
             dir_cache,
@@ -53,8 +53,8 @@ impl Application for App {
                             self.file_selector = FileSelector::new(file_path);
                         } else {
                             let receiver = self.player.play_file(file_path.to_owned());
-                            self.file_selector.selected_file = self.file_selector.file_list
-                                .iter().position(|x| {
+                            self.file_selector.selected_file =
+                                self.file_selector.file_list.iter().position(|x| {
                                     selected_file.as_ref().map_or(false, |y| y == &x.file_path)
                                 });
                             return Command::perform(receiver.into_future(), |x| {
@@ -230,7 +230,7 @@ impl Application for App {
             Message::Seek(p) => {
                 self.player.controls.seeking(p);
                 Command::none()
-            },
+            }
             Message::SeekCommit => {
                 match &self.player.controls.seekbar {
                     None => (),
@@ -241,7 +241,7 @@ impl Application for App {
             Message::VResizeFileSelector(position) => {
                 self.file_selector_divider_vpos = Some(position);
                 Command::none()
-            },
+            }
         }
     }
 
@@ -252,13 +252,15 @@ impl Application for App {
             .height(Length::Fill)
             .style(theme::Container::Container)
             .center_x();
-        
+
         iced_aw::Split::new(
             file_selector_container,
             player,
             self.file_selector_divider_vpos,
             iced_aw::split::Axis::Vertical,
             Message::VResizeFileSelector,
-        ).style(theme::Split::Split).into()
+        )
+        .style(theme::Split::Split)
+        .into()
     }
 }

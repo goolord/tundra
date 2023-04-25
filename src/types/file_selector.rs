@@ -99,8 +99,7 @@ impl FileSelector {
         let selected_file = self.selected_file.as_ref();
         let dir_up =
             Container::new(DirUp.view(self.current_dir.to_owned()).padding(5)).width(Length::Fill);
-        let mut new_col: Vec<Element<Message>> =
-            Vec::with_capacity(self.file_list.len() + 1);
+        let mut new_col: Vec<Element<Message>> = Vec::with_capacity(self.file_list.len() + 1);
         new_col.push(dir_up.into());
         new_col.extend(self.file_list.iter().enumerate().map(|(i, button)| {
             let element: Button<Message> = button.view(&self.current_dir);

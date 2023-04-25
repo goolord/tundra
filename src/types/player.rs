@@ -1,8 +1,8 @@
 use crate::source::callback::Callback;
 
 pub use super::common::*;
-pub use super::waveform::*;
 use super::theme;
+pub use super::waveform::*;
 use async_std::task;
 use futures::channel::mpsc::unbounded;
 use futures::channel::mpsc::TrySendError;
@@ -76,9 +76,7 @@ impl Controls {
     pub fn seeking(&mut self, p: f64) {
         match &mut self.seekbar {
             None => (),
-            Some(seekbar) => {
-                seekbar.seeking = p
-            }
+            Some(seekbar) => seekbar.seeking = p,
         }
     }
 

@@ -11,7 +11,7 @@ use std::fs::File;
 pub struct WaveFormState {
     cache: Cache,
     zoom: f32,
-    scroll : f32,
+    scroll: f32,
 }
 
 impl Default for WaveFormState {
@@ -27,7 +27,7 @@ impl Default for WaveFormState {
 pub struct WaveForm {
     pub samples: Vec<i16>,
     pub bits_per_sample: u32,
-    pub sample_rate: u32
+    pub sample_rate: u32,
 }
 
 impl WaveForm {
@@ -44,21 +44,15 @@ impl WaveForm {
         let mut old_y: f32 = translate_y * scale_height;
         self.samples
             .chunks(truncate)
-            .map(|x| x.iter().max_by_key(|y| y.abs() ).unwrap_or(&0))
+            .map(|x| x.iter().max_by_key(|y| y.abs()).unwrap_or(&0))
             .enumerate()
             .for_each(|(i, s)| {
                 let sample = s.to_owned() as f32;
                 let x = i as f32 * scale_width;
-                let h_point = Point {
-                    x,
-                    y: old_y,
-                };
+                let h_point = Point { x, y: old_y };
                 let y = (sample + translate_y) * scale_height;
                 old_y = y;
-                let v_point = Point {
-                    x,
-                    y,
-                };
+                let v_point = Point { x, y };
                 builder.line_to(h_point);
                 builder.move_to(h_point);
                 builder.line_to(v_point);
@@ -72,7 +66,13 @@ impl WaveForm {
 
 impl Program<Message, Theme> for WaveForm {
     type State = WaveFormState;
-    fn draw(&self, state: &WaveFormState, _theme: &Theme, bounds: Rectangle, _cursor: Cursor) -> Vec<Geometry> {
+    fn draw(
+        &self,
+        state: &WaveFormState,
+        _theme: &Theme,
+        bounds: Rectangle,
+        _cursor: Cursor,
+    ) -> Vec<Geometry> {
         let geometry = state.cache.draw(bounds.size(), |frame| {
             // frame.scale(0.01);
             // frame.translate(Vector {
@@ -93,24 +93,30 @@ impl Program<Message, Theme> for WaveForm {
     }
 
     fn update(
-            &self,
-            state: &mut Self::State,
-            event: Event,
-            _bounds: Rectangle,
-            _cursor: Cursor,
-        ) -> (event::Status, Option<Message>) {
+        &self,
+        state: &mut Self::State,
+        event: Event,
+        _bounds: Rectangle,
+        _cursor: Cursor,
+    ) -> (event::Status, Option<Message>) {
         match event {
-            Event::Keyboard(iced::keyboard::Event::KeyPressed { key_code: KeyCode::Plus | KeyCode::Equals, modifiers: _ }) => {
+            Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                key_code: KeyCode::Plus | KeyCode::Equals,
+                modifiers: _,
+            }) => {
                 state.zoom += 1.0;
                 state.cache.clear();
                 (event::Status::Captured, None)
             }
-            Event::Keyboard(iced::keyboard::Event::KeyPressed { key_code: KeyCode::Minus, modifiers: _ }) => {
+            Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                key_code: KeyCode::Minus,
+                modifiers: _,
+            }) => {
                 state.zoom -= 1.0;
                 state.cache.clear();
                 (event::Status::Captured, None)
             }
-            _ => (event::Status::Ignored, None)
+            _ => (event::Status::Ignored, None),
         }
     }
 
@@ -136,14 +142,12 @@ impl From<rodio::Decoder<std::io::BufReader<File>>> for WaveForm {
         WaveForm {
             samples,
             bits_per_sample: 16,
-            sample_rate
+            sample_rate,
         }
     }
 }
-
 
 fn mean(list: &[i16]) -> f64 {
     let sum: i16 = Iterator::sum(list.iter());
     f64::from(sum) / (list.len() as f64)
 }
-
