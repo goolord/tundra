@@ -17,19 +17,61 @@ pub struct App {
     pub file_selector_divider_vpos: Option<u16>,
     pub player: Player,
     pub search_thread: AbortHandle,
-    pub dir_cache: HashMap<PathBuf, Vec<PathBuf>>,
+    pub dir_cache: DirCache,
 }
 
-fn get_dir_cache() -> std::option::Option<std::path::PathBuf> {
-    match dirs::cache_dir() {
-        Some(mut cache_dir) => {
-            cache_dir.push("tundra");
-            let _ = std::fs::create_dir(cache_dir.clone());
-            cache_dir.push("dir_cache");
-            cache_dir.set_extension("bin");
-            Some(cache_dir)
+pub struct DirCache(HashMap<PathBuf, Vec<PathBuf>>);
+
+impl DirCache {
+    fn new() -> DirCache {
+        DirCache(HashMap::new())
+    }
+
+    fn insert(&mut self, k: PathBuf, v: Vec<PathBuf>) -> Option<Vec<PathBuf>> {
+        self.0.insert(k, v)
+    }
+
+    fn get(&self, k: &PathBuf ) -> Option<&Vec<PathBuf>>  {
+        self.0.get(k)
+    }
+
+    fn contains_key(&self, k: &PathBuf ) -> bool {
+        self.0.contains_key(k)
+    }
+
+    fn get_path() -> std::option::Option<std::path::PathBuf> {
+        match dirs::cache_dir() {
+            Some(mut cache_dir) => {
+                cache_dir.push("tundra");
+                let _ = std::fs::create_dir(cache_dir.clone());
+                cache_dir.push("dir_cache");
+                cache_dir.set_extension("bin");
+                Some(cache_dir)
+            }
+            None => None,
         }
-        None => None,
+    }
+
+    fn get_dir_cache(&self) -> DirCache {
+        match DirCache::get_path() {
+            Some(dir_cache) => match std::fs::read(dir_cache) {
+                Ok(s) => bincode::deserialize(&s).map_or(DirCache::new(), DirCache),
+                Err(_) => DirCache::new(),
+            },
+            None => {
+                DirCache::new()
+            },
+        }
+    }
+
+    fn persist(&self) {
+        match DirCache::get_path() {
+            Some(dir_cache) => {
+                std::fs::write(dir_cache, bincode::serialize(&self.0).unwrap())
+                    .unwrap();
+            }
+            None => (),
+        };
     }
 }
 
@@ -45,13 +87,7 @@ impl Application for App {
         let menu = MainMenu::new();
         let player = Player::new();
         let search_thread = AbortHandle::new_pair().0;
-        let dir_cache = match get_dir_cache() {
-            Some(dir_cache) => match std::fs::read(dir_cache) {
-                Ok(s) => bincode::deserialize(&s).unwrap_or(HashMap::new()),
-                Err(_) => HashMap::new(),
-            },
-            None => HashMap::new(),
-        };
+        let dir_cache = DirCache::new();
         let app = App {
             file_selector,
             menu,
@@ -237,25 +273,13 @@ impl Application for App {
 
             Message::InsertDircache((parent_dir, children)) => {
                 self.dir_cache.insert(parent_dir, children);
-                match get_dir_cache() {
-                    Some(dir_cache) => {
-                        std::fs::write(dir_cache, bincode::serialize(&self.dir_cache).unwrap())
-                            .unwrap();
-                    }
-                    None => (),
-                };
+                self.dir_cache.persist();
                 Command::none()
             }
 
             Message::InvalidateDircache() => {
-                self.dir_cache = HashMap::new();
-                match get_dir_cache() {
-                    Some(dir_cache) => {
-                        std::fs::write(dir_cache, bincode::serialize(&self.dir_cache).unwrap())
-                            .unwrap();
-                    }
-                    None => (),
-                };
+                self.dir_cache = DirCache::new();
+                self.dir_cache.persist();
                 Command::none()
             }
 
