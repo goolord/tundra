@@ -52,7 +52,7 @@ impl DirCache {
         }
     }
 
-    fn get_dir_cache(&self) -> DirCache {
+    fn get_dir_cache() -> DirCache {
         match DirCache::get_path() {
             Some(dir_cache) => match std::fs::read(dir_cache) {
                 Ok(s) => bincode::deserialize(&s).map_or(DirCache::new(), DirCache),
@@ -87,7 +87,7 @@ impl Application for App {
         let menu = MainMenu::new();
         let player = Player::new();
         let search_thread = AbortHandle::new_pair().0;
-        let dir_cache = DirCache::new();
+        let dir_cache = DirCache::get_dir_cache();
         let app = App {
             file_selector,
             menu,
