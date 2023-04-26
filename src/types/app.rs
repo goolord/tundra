@@ -246,7 +246,7 @@ impl Application for App {
                 if let Ok(file_list) = file_list_res {
                     self.file_selector.file_list = file_list
                         .iter()
-                        .map(|x| FileButton::new(x.to_path_buf()))
+                        .map(|x| FileButton::new(x.to_path_buf(), &self.file_selector.current_dir))
                         .collect();
                 }
                 Command::none()

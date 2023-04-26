@@ -24,6 +24,7 @@ pub struct FileList {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileButton {
     pub file_path: PathBuf,
+    pub label: String,
 }
 
 pub struct DirUp;
@@ -78,7 +79,7 @@ impl FileList {
 
     pub fn new(dir: &Path) -> Vec<FileButton> {
         let mut buttons: Vec<FileButton> = FileList::list_dir(dir)
-            .map(|x| FileButton::new(x.path()))
+            .map(|x| FileButton::new(x.path(), dir))
             .collect();
         buttons.sort();
         buttons
@@ -99,14 +100,19 @@ impl FileSelector {
         let selected_file = self.selected_file.as_ref();
         let dir_up =
             Container::new(DirUp.view(self.current_dir.to_owned()).padding(5)).width(Length::Fill);
-        let new_col: Vec<Element<Message>> = self.file_list.iter().enumerate().map(|(i, button)| {
-            let element: Button<Message> = button.view(&self.current_dir);
-            let mut container = Container::new(element.padding(10)).width(Length::Fill);
-            if Some(&i) == selected_file {
-                container = container.style(super::theme::Container::SelectedContainer);
-            }
-            container.into()
-        }).collect();
+        let new_col: Vec<Element<Message>> = self
+            .file_list
+            .iter()
+            .enumerate()
+            .map(|(i, button)| {
+                let element: Button<Message> = button.view();
+                let mut container = Container::new(element.padding(10)).width(Length::Fill);
+                if Some(&i) == selected_file {
+                    container = container.style(super::theme::Container::SelectedContainer);
+                }
+                container.into()
+            })
+            .collect();
         let fs_column = Column::with_children(new_col).spacing(0).padding(0);
         let fs = scrollable(fs_column).height(Length::Fill);
         let search = TextInput::new("Search", &self.search_value)
@@ -120,19 +126,19 @@ impl FileSelector {
 }
 
 impl FileButton {
-    pub fn new(x: PathBuf) -> Self {
-        FileButton { file_path: x }
+    pub fn new(x: PathBuf, base_path: &Path) -> Self {
+        let fp = remove_prefix(x.to_str().unwrap(), base_path.as_os_str().to_str().unwrap());
+        let mut label = String::with_capacity(2 + fp.len());
+        label.push_str("  ");
+        label.push_str(fp);
+        FileButton {
+            file_path: x,
+            label,
+        }
     }
 
-    pub fn view(&self, base_path: &Path) -> Button<Message> {
-        let fp = remove_prefix(
-            self.file_path.to_str().unwrap(),
-            base_path.as_os_str().to_str().unwrap(),
-        );
-        let mut file_string = String::with_capacity(2 + fp.len());
-        file_string.push_str("  ");
-        file_string.push_str(fp);
-        let text = Text::new(file_string).size(24);
+    pub fn view(&self) -> Button<Message> {
+        let text = Text::new(&self.label).size(24);
         let label = Row::with_children(if self.file_path.is_dir() {
             vec![
                 Svg::from_path("./resources/folder-solid.svg")
