@@ -1,9 +1,9 @@
-use iced::widget::{row, svg, text};
-use iced::{alignment, Length};
-use iced_aw::menu::{ItemHeight, ItemWidth};
+use iced::widget::{button, text};
+use iced::{Element, Length, alignment};
+use iced_aw::menu::{Item, Menu};
+use iced_aw::{menu_bar, menu_items};
 
 pub use super::common::*;
-use super::widget::*;
 
 #[derive(Clone)]
 enum MenuMessage {}
@@ -15,59 +15,64 @@ impl MainMenu {
         MainMenu {}
     }
 
-    pub fn view(&self) -> MenuBar<Message> {
-        MenuBar::new(vec![menu_1()])
-            .item_width(ItemWidth::Uniform(180))
-            .item_height(ItemHeight::Uniform(25))
+    pub fn view(&self) -> Element<'_, Message> {
+        menu_1()
     }
 }
 
-fn menu_1<'a>() -> MenuTree<'a, Message> {
-    let root = MenuTree::with_children(
-        labeled_button("Menu"),
-        vec![item("Invalidate cache", Message::InvalidateDircache())],
-    )
+fn menu_1<'a>() -> Element<'a, Message> {
+    let menu_tpl_1 = |items| Menu::new(items).max_width(180.0).offset(15.0).spacing(5.0);
+    let root = menu_bar!((
+        debug_button_s("Menu"),
+        menu_tpl_1(menu_items!(
+            (debug_button_s("Invalidate cache").on_press(Message::InvalidateDircache()))
+        ))
+    ))
     .width(110);
 
-    root
+    root.into()
 }
 
-fn base_button<'a>(content: impl Into<Element<'a, Message>>) -> Button<'a, Message> {
-    Button::new(content)
+fn base_button<'a>(
+    content: impl Into<Element<'a, Message>>,
+    msg: Option<Message>,
+) -> button::Button<'a, Message> {
+    let button = button(content)
         .padding([4, 8])
-        .style(super::theme::Button::MenuButton)
+        .style(iced::widget::button::primary);
+    match msg {
+        None => button,
+        Some(m) => button.on_press(m),
+    }
 }
 
-fn labeled_button(label: &str) -> Button<'_, Message> {
-    base_button(
-        Text::new(label)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .vertical_alignment(alignment::Vertical::Center),
-    )
+fn labeled_button(
+    label: &str,
+    msg: Option<Message>,
+) -> button::Button<Message, iced::Theme, iced::Renderer> {
+    base_button(text(label).align_y(alignment::Vertical::Center), msg)
 }
 
-fn item(label: &str, msg: Message) -> MenuTree<'_, Message> {
-    MenuTree::new(
-        labeled_button(label)
-            .on_press(msg)
-            .width(Length::Fill)
-            .height(Length::Fill),
-    )
+fn debug_button(label: &str) -> button::Button<Message, iced::Theme, iced::Renderer> {
+    labeled_button(label, None).width(Length::Fill)
+}
+
+fn debug_button_s(label: &str) -> button::Button<Message, iced::Theme, iced::Renderer> {
+    labeled_button(label, None).width(Length::Shrink)
 }
 
 // fn sub_menu<'a>(
 //     label: &str,
 //     msg: Message,
-//     children: Vec<MenuTree<'a, Message>>,
-// ) -> MenuTree<'a, Message> {
+//     children: Vec<Menu<'a, Message>>,
+// ) -> Menu<'a, Message> {
 //     let handle = svg::Handle::from_path(format!(
 //         "{}/caret-right-fill.svg",
 //         env!("CARGO_MANIFEST_DIR")
 //     ));
 //     let arrow = svg(handle).width(Length::Shrink);
 //
-//     MenuTree::with_children(
+//     Menu::with_children(
 //         base_button(
 //             row![
 //                 text(label)

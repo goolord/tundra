@@ -1,10 +1,9 @@
 pub use super::common::*;
-pub use super::theme::*;
-pub use super::widget::*;
 
-use iced::keyboard::KeyCode;
+use iced::keyboard::Key;
+use iced::mouse::Cursor;
 use iced::widget::canvas::*;
-use iced::{Color, Point, Rectangle};
+use iced::{Color, Point, Rectangle, Renderer, Theme};
 use rodio::Source;
 use std::fs::File;
 
@@ -63,17 +62,18 @@ impl WaveForm {
     }
 }
 
-impl Program<Message, Theme> for WaveForm {
+impl Program<Message> for WaveForm {
     type State = WaveFormState;
     fn draw(
         &self,
         state: &WaveFormState,
+        renderer: &Renderer,
         _theme: &Theme,
         bounds: Rectangle,
         _cursor: Cursor,
     ) -> Vec<Geometry> {
         self.cache.clear();
-        let geometry = self.cache.draw(bounds.size(), |frame| {
+        let geometry = self.cache.draw(renderer, bounds.size(), |frame| {
             // frame.scale(0.01);
             // frame.translate(Vector {
             //     x: 0.0,
@@ -100,21 +100,21 @@ impl Program<Message, Theme> for WaveForm {
         _cursor: Cursor,
     ) -> (event::Status, Option<Message>) {
         match event {
-            Event::Keyboard(iced::keyboard::Event::KeyPressed {
-                key_code: KeyCode::Plus | KeyCode::Equals,
-                modifiers: _,
-            }) => {
-                state.zoom += 1.0;
-                self.cache.clear();
-                (event::Status::Captured, None)
-            }
-            Event::Keyboard(iced::keyboard::Event::KeyPressed {
-                key_code: KeyCode::Minus,
-                modifiers: _,
-            }) => {
-                state.zoom -= 1.0;
-                self.cache.clear();
-                (event::Status::Captured, None)
+            Event::Keyboard(iced::keyboard::Event::KeyPressed{key, ..}) => {
+                match key.as_ref() {
+                    Key::Character("+") | Key::Character("=") => {
+                        state.zoom += 1.0;
+                        self.cache.clear();
+                        (event::Status::Captured, None)
+                    },
+                    Key::Character("-") => {
+                        state.zoom -= 1.0;
+                        self.cache.clear();
+                        (event::Status::Captured, None)
+                    },
+                    _ => (event::Status::Ignored, None),
+
+                }
             }
             _ => (event::Status::Ignored, None),
         }
@@ -125,8 +125,8 @@ impl Program<Message, Theme> for WaveForm {
         _state: &Self::State,
         _bounds: Rectangle,
         _cursor: Cursor,
-    ) -> iced_native::mouse::Interaction {
-        iced_native::mouse::Interaction::default()
+    ) -> iced::mouse::Interaction {
+        iced::mouse::Interaction::default()
     }
 }
 

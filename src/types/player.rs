@@ -1,7 +1,6 @@
 use crate::source::callback::Callback;
 
 pub use super::common::*;
-use super::theme;
 pub use super::waveform::*;
 use async_std::task;
 use futures::channel::mpsc::unbounded;
@@ -9,6 +8,15 @@ use futures::channel::mpsc::TrySendError;
 use futures::channel::mpsc::UnboundedReceiver;
 use futures::channel::mpsc::UnboundedSender;
 use futures::StreamExt;
+use iced::widget::Button;
+use iced::widget::Canvas;
+use iced::widget::Column;
+use iced::widget::Container;
+use iced::widget::Row;
+use iced::widget::Slider;
+use iced::widget::Space;
+use iced::widget::Svg;
+use iced::Element;
 use iced::Length;
 use rodio::Source;
 use std::fs::File;
@@ -52,7 +60,7 @@ pub struct Seekbar {
 }
 
 impl Seekbar {
-    pub fn view(&self) -> Element<Message> {
+    pub fn view(&self) -> Element<'_, Message> {
         Slider::new(
             0.0..=1.0,
             1.0 - (self.remaining as f64 / self.total as f64),
@@ -91,7 +99,7 @@ impl Controls {
         .height(Length::Fixed(24.0));
         Button::new(label)
             .on_press(Message::TogglePlaying)
-            .style(theme::Button::ControlButton)
+            //.style(theme::Button::ControlButton)
             .width(Length::Fixed(50.0))
             .height(Length::Fixed(48.0))
     }
@@ -102,7 +110,7 @@ impl Controls {
             .height(Length::Fixed(24.0));
         Button::new(label)
             .on_press(Message::StopPlayback)
-            .style(theme::Button::ControlButton)
+            //.style(theme::Button::ControlButton)
             .width(Length::Fixed(50.0))
             .height(Length::Fixed(48.0))
     }
@@ -125,9 +133,9 @@ impl Controls {
             .push(self.seek_bar())
             .push(c_row)
             .width(Length::Fill)
-            .align_items(iced::Alignment::Center);
+            .align_x(iced::Alignment::Center);
         Container::new(column)
-            .style(theme::Container::Controls)
+            //.style(theme::Container::Controls)
             .align_x(iced::alignment::Horizontal::Center)
             .align_y(iced::alignment::Vertical::Center)
             .width(Length::Fill)
@@ -157,10 +165,10 @@ impl Player {
         Container::new(player)
             .width(Length::Fill)
             .height(Length::FillPortion(1))
-            .style(theme::Container::PlayerContainer)
+            //.style(theme::Container::PlayerContainer)
             .padding(1)
-            .center_x()
-            .center_y()
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
     }
 
     pub fn play_file(&mut self, file_path: PathBuf) -> UnboundedReceiver<PlayerMsg> {

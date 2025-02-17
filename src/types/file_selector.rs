@@ -1,7 +1,13 @@
 pub use super::common::*;
-use super::theme;
-use super::widget::*;
 use iced::widget::scrollable;
+use iced::widget::Button;
+use iced::widget::Column;
+use iced::widget::Container;
+use iced::widget::Row;
+use iced::widget::Svg;
+use iced::widget::Text;
+use iced::widget::TextInput;
+use iced::Element;
 use iced::Length;
 use std::cmp::*;
 use std::fs;
@@ -47,7 +53,6 @@ impl DirUp {
             Some(x) => x.to_path_buf(),
             None => cwd,
         }))
-        .style(theme::Button::DirUpButton)
         .width(Length::Fill)
     }
 }
@@ -97,19 +102,19 @@ impl FileSelector {
     }
 
     pub fn view(&self) -> Column<Message> {
-        let selected_file = self.selected_file.as_ref();
+        //let selected_file = self.selected_file.as_ref();
         let dir_up =
             Container::new(DirUp.view(self.current_dir.to_owned()).padding(5)).width(Length::Fill);
         let new_col: Vec<Element<Message>> = self
             .file_list
             .iter()
             .enumerate()
-            .map(|(i, button)| {
+            .map(|(_i, button)| {
                 let element: Button<Message> = button.view();
-                let mut container = Container::new(element.padding(10)).width(Length::Fill);
-                if Some(&i) == selected_file {
-                    container = container.style(super::theme::Container::SelectedContainer);
-                }
+                let container = Container::new(element.padding(10)).width(Length::Fill);
+                //if Some(&i) == selected_file {
+                //    container = container.style(super::theme::Container::SelectedContainer);
+                //}
                 container.into()
             })
             .collect();
@@ -117,7 +122,7 @@ impl FileSelector {
         let fs = scrollable(fs_column).height(Length::Fill);
         let search = TextInput::new("Search", &self.search_value)
             .on_input(Message::Search)
-            .style(super::theme::TextInput::FileSearch)
+            //.style(super::theme::TextInput::FileSearch)
             .size(32)
             .padding(10);
 
@@ -158,7 +163,7 @@ impl FileButton {
             vec![text.into()]
         });
         Button::new(label)
-            .style(super::theme::Button::FileButton)
+            //.style(super::theme::Button::FileButton)
             .on_press(Message::SelectedFile(Some(self.file_path.to_owned())))
             .width(Length::Fill)
     }

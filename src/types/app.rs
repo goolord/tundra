@@ -1,12 +1,10 @@
-use super::theme;
 use super::*;
 use futures::future::{AbortHandle, Abortable};
 use futures::*;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 
-use iced::Application;
-use iced::{executor, Command, Length};
+use iced::{Element, Length, Task};
 use std::sync::Arc;
 use std::{collections::hash_map::HashMap, path::PathBuf};
 use walkdir::WalkDir;
@@ -75,35 +73,40 @@ impl DirCache {
     }
 }
 
-impl Application for App {
-    type Message = Message;
-    type Executor = executor::Default;
-    type Flags = ();
-    type Theme = Theme;
+pub fn app() {
+    iced::application(App::title, App::update, App::view)
+        //.subscription(App::subscription)
+        //.theme(App::theme)
+        .antialiasing(true)
+        .run()
+        .unwrap()
+}
 
-    fn new(_flags: ()) -> (Self, Command<Message>) {
+impl Default for App {
+    fn default() -> App {
         let current_dir = std::env::current_dir().unwrap();
         let file_selector = FileSelector::new(&current_dir);
         let menu = MainMenu::new();
         let player = Player::new();
         let search_thread = AbortHandle::new_pair().0;
         let dir_cache = DirCache::get_dir_cache();
-        let app = App {
+        App {
             file_selector,
             menu,
             file_selector_divider_vpos: Some(300),
             player,
             search_thread,
             dir_cache,
-        };
-        (app, Command::none())
+        }
     }
+}
 
-    fn title(&self) -> String {
+impl App {
+    pub fn title(&self) -> String {
         String::from("Tundra Sample Browser")
     }
 
-    fn update(&mut self, message: Message) -> Command<Message> {
+    pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::SelectedFile(selected_file) => {
                 match &selected_file {
@@ -116,7 +119,7 @@ impl Application for App {
                                 self.file_selector.file_list.iter().position(|x| {
                                     selected_file.as_ref().map_or(false, |y| y == &x.file_path)
                                 });
-                            return Command::perform(receiver.into_future(), |x| {
+                            return Task::perform(receiver.into_future(), |x| {
                                 Message::PlayerMsg((x.0, Arc::new(x.1)))
                             });
                         }
@@ -126,7 +129,7 @@ impl Application for App {
                     }
                 }
 
-                Command::none()
+                Task::none()
             }
 
             Message::ChangeDirectory(parent_dir) => {
@@ -146,9 +149,9 @@ impl Application for App {
                             .collect();
                         (parent_dir, children)
                     });
-                    Command::perform(walker, Message::InsertDircache)
+                    Task::perform(walker, Message::InsertDircache)
                 } else {
-                    Command::none()
+                    Task::none()
                 }
             }
 
@@ -186,11 +189,11 @@ impl Application for App {
                                 },
                                 abort_reg,
                             );
-                            Command::perform(file_list, Message::SearchCompleted)
+                            Task::perform(file_list, Message::SearchCompleted)
                         } else {
                             self.file_selector.file_list =
                                 FileList::new(&self.file_selector.current_dir);
-                            Command::none()
+                            Task::none()
                         }
                     }
                     // dir not cached
@@ -232,11 +235,11 @@ impl Application for App {
                                 },
                                 abort_reg,
                             );
-                            Command::perform(file_list, Message::SearchCompleted)
+                            Task::perform(file_list, Message::SearchCompleted)
                         } else {
                             self.file_selector.file_list =
                                 FileList::new(&self.file_selector.current_dir);
-                            Command::none()
+                            Task::none()
                         }
                     }
                 }
@@ -249,7 +252,7 @@ impl Application for App {
                         .map(|x| FileButton::new(x.to_path_buf(), &self.file_selector.current_dir))
                         .collect();
                 }
-                Command::none()
+                Task::none()
             }
 
             Message::TogglePlaying => {
@@ -263,78 +266,76 @@ impl Application for App {
                 } else {
                     self.player.play()
                 }
-                Command::none()
+                Task::none()
             }
 
             Message::StopPlayback => {
                 self.player.stop();
-                Command::none()
+                Task::none()
             }
 
             Message::InsertDircache((parent_dir, children)) => {
                 self.dir_cache.insert(parent_dir, children);
                 self.dir_cache.persist();
-                Command::none()
+                Task::none()
             }
 
             Message::InvalidateDircache() => {
                 self.dir_cache = DirCache::new();
                 self.dir_cache.persist();
-                Command::none()
+                Task::none()
             }
 
             Message::PlayerMsg((msg, recv)) => {
                 match msg {
                     Some(PlayerMsg::PlayingStored) => (),
                     Some(PlayerMsg::SinkEmpty) => self.player.pause(),
-                    None => return Command::none(),
+                    None => return Task::none(),
                 }
                 match Arc::into_inner(recv) {
                     None => {
                         eprintln!("Message::PlayerMsg Arc::into_inner failed");
-                        Command::none()
+                        Task::none()
                     }
-                    Some(recv) => Command::perform(recv.into_future(), |x| {
+                    Some(recv) => Task::perform(recv.into_future(), |x| {
                         Message::PlayerMsg((x.0, Arc::new(x.1)))
                     }),
                 }
             }
             Message::Seek(p) => {
                 self.player.controls.seeking(p);
-                Command::none()
+                Task::none()
             }
             Message::SeekCommit => {
                 match &self.player.controls.seekbar {
                     None => (),
                     Some(seekbar) => self.player.seek(seekbar.seeking),
                 }
-                Command::none()
+                Task::none()
             }
             Message::VResizeFileSelector(position) => {
                 self.file_selector_divider_vpos = Some(position);
-                Command::none()
+                Task::none()
             }
         }
     }
 
-    fn view(&self) -> Element<Message> {
+    pub fn view(&self) -> Element<'_, Message> {
         let player = self.player.view();
         let menu = self.menu.view();
         let file_selector_container = iced::widget::container(self.file_selector.view())
             .width(Length::Fill)
             .height(Length::Fill)
-            .style(theme::Container::Container)
-            .center_x();
+            .center_x(Length::Fill);
 
         iced::widget::column![
             menu,
-            iced_aw::Split::new(
-                file_selector_container,
-                player,
-                self.file_selector_divider_vpos,
-                iced_aw::split::Axis::Vertical,
-                Message::VResizeFileSelector,
-            )
+            //PaneGrid::new(&self.panes, |id, pane, is_maximized| {
+            //}
+
+            file_selector_container,
+            player,
+            //self.file_selector_divider_vpos,
         ]
         .into()
     }
