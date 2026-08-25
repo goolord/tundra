@@ -143,6 +143,8 @@ pub struct TagFields {
     pub bpm: String,
     pub key: String,
     pub instrument: String,
+    #[serde(default)]
+    pub explicit_instrument: String,
 }
 
 impl TagFields {
@@ -285,6 +287,7 @@ fn file_mtime_secs(path: &Path) -> Option<u64> {
 
 fn push_instrument_field(fields: &mut TagFields, tag: &Tag) {
     if let Some(value) = explicit_instrument_from_tag(tag) {
+        push_field(&mut fields.explicit_instrument, Some(&value));
         push_field(&mut fields.instrument, Some(&value));
     }
 

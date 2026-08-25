@@ -16,3 +16,5 @@ test*.mp3
 test*.ogg
 
 scripts/.venv/
+scripts/__pycache__/
+**/__pycache__/

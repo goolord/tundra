@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tier 1 classifier: Librosa zero-crossing rate (microseconds-scale)."""
+"""Reference tier 1 classifier (librosa). Production path: `src/auto_tag/tier1.rs`."""
 
 from __future__ import annotations
 

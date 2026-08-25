@@ -1,5 +1,6 @@
 use super::*;
 use crate::auto_tag;
+use crate::bulk_auto_tag;
 use crate::drag_out::NativeDrag;
 use crate::metadata::{
     filter_search_paths, index_paths, instrument_tag, parse_tag_filter, refresh_cached_metadata,
@@ -7,6 +8,7 @@ use crate::metadata::{
     TagParseError,
 };
 use super::auto_tag::{auto_tag_view, AutoTagState};
+use super::bulk_auto_tag::{bulk_auto_tag_view, BulkAutoTagState};
 use super::settings::{self, AddDirectoryResult, AllowedDirectories};
 use futures::future::{AbortHandle, Abortable};
 use futures::*;
@@ -110,6 +112,13 @@ pub struct App {
     settings_error: Option<String>,
     auto_tag_open: bool,
     auto_tag: AutoTagState,
+    bulk_auto_tag: BulkAutoTagState,
+    bulk_scan_progress: Option<Arc<bulk_auto_tag::BulkScanProgress>>,
+    bulk_scan_cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+    bulk_scan_generation: u64,
+    bulk_scan_active: Option<u64>,
+    bulk_apply_generation: u64,
+    bulk_apply_active: Option<u64>,
     waveform_hovered: bool,
     search_focused: bool,
     tag_search_focused: bool,
@@ -349,6 +358,13 @@ impl Default for App {
             settings_error: None,
             auto_tag_open: false,
             auto_tag: AutoTagState::default(),
+            bulk_auto_tag: BulkAutoTagState::default(),
+            bulk_scan_progress: None,
+            bulk_scan_cancel: None,
+            bulk_scan_generation: 0,
+            bulk_scan_active: None,
+            bulk_apply_generation: 0,
+            bulk_apply_active: None,
             waveform_hovered: false,
             search_focused: false,
             tag_search_focused: false,
@@ -405,6 +421,7 @@ impl App {
             && state.dialog.is_none()
             && !state.settings_open
             && !state.auto_tag_open
+            && !state.bulk_auto_tag.is_open()
             && !state.search_focused
             && !state.tag_search_focused
             && state.waveform_hovered
@@ -549,6 +566,17 @@ impl App {
             Subscription::none()
         };
 
+        let bulk_scan_tick = if state.bulk_scan_progress.is_some() {
+            Subscription::run_with((), |_| {
+                stream::unfold((), |()| async {
+                    async_io::Timer::after(Duration::from_millis(100)).await;
+                    Some((Message::BulkAutoTagProgressTick, ()))
+                })
+            })
+        } else {
+            Subscription::none()
+        };
+
         Subscription::batch([
             file_events,
             playback_tick,
@@ -559,6 +587,7 @@ impl App {
             sidebar_resize,
             file_drag,
             file_drag_tick,
+            bulk_scan_tick,
         ])
     }
 
@@ -817,6 +846,74 @@ impl App {
         )
     }
 
+    fn abort_bulk_scan(&mut self) {
+        if let Some(cancel) = &self.bulk_scan_cancel {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.bulk_scan_cancel = None;
+        self.bulk_scan_generation = self.bulk_scan_generation.wrapping_add(1);
+        self.bulk_scan_progress = None;
+        self.bulk_scan_active = None;
+        self.bulk_apply_generation = self.bulk_apply_generation.wrapping_add(1);
+        self.bulk_apply_active = None;
+        auto_tag::shutdown_classifier_pool();
+    }
+
+    fn cancel_bulk_scan(&mut self) {
+        self.abort_bulk_scan();
+        self.bulk_auto_tag.close();
+    }
+
+    fn start_bulk_scan(&mut self) -> Task<Message> {
+        let Some(root) = self.bulk_auto_tag.root.clone() else {
+            self.bulk_auto_tag
+                .set_error("Choose a folder before scanning.");
+            return Task::none();
+        };
+        if !root.is_dir() {
+            self.bulk_auto_tag.set_error("That folder no longer exists.");
+            return Task::none();
+        }
+
+        self.abort_bulk_scan();
+        let generation = self.bulk_scan_generation;
+        self.bulk_scan_active = Some(generation);
+        self.bulk_auto_tag.start_running(root.clone());
+        let progress = bulk_auto_tag::BulkScanProgress::new();
+        self.bulk_scan_progress = Some(progress.clone());
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.bulk_scan_cancel = Some(Arc::clone(&cancel));
+        let metadata = self.metadata_cache.snapshot();
+
+        Task::perform(
+            async move {
+                let (tx, rx) = futures::channel::oneshot::channel();
+                std::thread::spawn(move || {
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        bulk_auto_tag::scan_and_classify(root, metadata, progress, cancel)
+                    }));
+                    let summary = match result {
+                        Ok(Ok(summary)) => Ok(summary),
+                        Ok(Err(message)) => Err(message),
+                        Err(_) => {
+                            eprintln!("bulk auto tag scan panicked");
+                            Err("Scan failed unexpectedly.".into())
+                        }
+                    };
+                    let _ = tx.send((generation, summary));
+                });
+                rx.await.unwrap_or_else(|_| {
+                    eprintln!("bulk auto tag scan channel dropped");
+                    (
+                        generation,
+                        Err("Scan failed unexpectedly.".into()),
+                    )
+                })
+            },
+            |(generation, result)| Message::BulkAutoTagScanCompleted { generation, result },
+        )
+    }
+
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::SelectedFile(selected_file) => {
@@ -914,6 +1011,7 @@ impl App {
             Message::OpenSettings => {
                 self.dialog = None;
                 self.auto_tag_open = false;
+                self.cancel_bulk_scan();
                 self.settings_open = true;
                 self.settings_error = None;
                 Task::none()
@@ -1022,6 +1120,7 @@ impl App {
 
             Message::OpenAutoTag => {
                 self.dialog = None;
+                self.cancel_bulk_scan();
                 self.auto_tag_open = true;
                 let target = self.file_selector.selected_audio_path();
                 let existing = target.as_ref().and_then(|path| instrument_tag(path));
@@ -1157,6 +1256,187 @@ impl App {
                         Task::none()
                     }
                 }
+            }
+
+            Message::OpenBulkAutoTag => {
+                self.dialog = None;
+                self.auto_tag_open = false;
+                self.abort_bulk_scan();
+                self.bulk_auto_tag.open();
+                Task::none()
+            }
+
+            Message::CloseBulkAutoTag => {
+                self.abort_bulk_scan();
+                self.bulk_auto_tag.close();
+                Task::none()
+            }
+
+            Message::BulkAutoTagPickDirectory => {
+                let start_dir = self
+                    .bulk_auto_tag
+                    .root
+                    .clone()
+                    .unwrap_or_else(|| self.file_selector.current_dir.clone());
+                Task::perform(pick_folder(start_dir), Message::BulkAutoTagDirectoryPicked)
+            }
+
+            Message::BulkAutoTagDirectoryPicked(path) => {
+                if let Some(dir) = path {
+                    self.bulk_auto_tag.root = Some(dir);
+                    self.bulk_auto_tag.error = None;
+                }
+                Task::none()
+            }
+
+            Message::BulkAutoTagRunScan => self.start_bulk_scan(),
+
+            Message::BulkAutoTagProgressTick => {
+                if let Some(progress) = &self.bulk_scan_progress {
+                    self.bulk_auto_tag
+                        .update_progress(progress.snapshot());
+                }
+                Task::none()
+            }
+
+            Message::BulkAutoTagScanCompleted { generation, result } => {
+                if self.bulk_scan_active != Some(generation) {
+                    return Task::none();
+                }
+                self.bulk_scan_progress = None;
+                self.bulk_scan_active = None;
+                match result {
+                    Ok(summary) if bulk_auto_tag::is_empty_scan(&summary) => {
+                        self.bulk_auto_tag
+                            .set_no_untagged_files(summary.root, summary.skipped_tagged);
+                    }
+                    Ok(summary) => {
+                        self.bulk_auto_tag.finish_scan(summary);
+                    }
+                    Err(message) if message == "Scan cancelled." => {}
+                    Err(message) => {
+                        self.bulk_auto_tag.set_error(message);
+                    }
+                }
+                Task::none()
+            }
+
+            Message::BulkAutoTagSetFileAccepted {
+                dir_idx,
+                file_idx,
+                accepted,
+            } => {
+                self.bulk_auto_tag
+                    .set_file_accepted(dir_idx, file_idx, accepted);
+                Task::none()
+            }
+
+            Message::BulkAutoTagSelectFile {
+                dir_idx,
+                file_idx,
+                shift,
+                control,
+            } => {
+                self.bulk_auto_tag
+                    .select_file(dir_idx, file_idx, shift, control);
+                Task::none()
+            }
+
+            Message::BulkAutoTagSelectDirectory {
+                dir_idx,
+                shift,
+                control,
+            } => {
+                self.bulk_auto_tag
+                    .select_directory(dir_idx, shift, control);
+                Task::none()
+            }
+
+            Message::BulkAutoTagSelectAll => {
+                self.bulk_auto_tag.select_all_files();
+                Task::none()
+            }
+
+            Message::BulkAutoTagClearSelection => {
+                self.bulk_auto_tag.selected.clear();
+                self.bulk_auto_tag.selection_anchor = None;
+                Task::none()
+            }
+
+            Message::BulkAutoTagCheckSelected => {
+                self.bulk_auto_tag.check_selected();
+                Task::none()
+            }
+
+            Message::BulkAutoTagUncheckSelected => {
+                self.bulk_auto_tag.uncheck_selected();
+                Task::none()
+            }
+
+            Message::BulkAutoTagAcceptAll => {
+                bulk_auto_tag::set_all_accepted(&mut self.bulk_auto_tag.groups, true);
+                Task::none()
+            }
+
+            Message::BulkAutoTagRejectAll => {
+                bulk_auto_tag::set_all_accepted(&mut self.bulk_auto_tag.groups, false);
+                Task::none()
+            }
+
+            Message::BulkAutoTagToggleDirectoryExpanded(dir_idx) => {
+                if let Some(group) = self.bulk_auto_tag.groups.get_mut(dir_idx) {
+                    group.expanded = !group.expanded;
+                }
+                Task::none()
+            }
+
+            Message::BulkAutoTagExpandAllDirectories => {
+                for group in &mut self.bulk_auto_tag.groups {
+                    group.expanded = true;
+                }
+                Task::none()
+            }
+
+            Message::BulkAutoTagCollapseAllDirectories => {
+                for group in &mut self.bulk_auto_tag.groups {
+                    group.expanded = false;
+                }
+                Task::none()
+            }
+
+            Message::BulkAutoTagApply => {
+                let items = bulk_auto_tag::collect_accepted(&self.bulk_auto_tag.groups);
+                let accepted = items.len();
+                if accepted == 0 {
+                    return Task::none();
+                }
+                self.bulk_apply_generation = self.bulk_apply_generation.wrapping_add(1);
+                let generation = self.bulk_apply_generation;
+                self.bulk_apply_active = Some(generation);
+                self.bulk_auto_tag.start_apply();
+                let progress = bulk_auto_tag::BulkScanProgress::new();
+                progress.set_applying(accepted);
+                self.bulk_scan_progress = Some(progress.clone());
+                Task::perform(
+                    async move { (generation, bulk_auto_tag::apply_items(&items, Some(&progress))) },
+                    |(generation, summary)| Message::BulkAutoTagApplyCompleted { generation, summary },
+                )
+            }
+
+            Message::BulkAutoTagApplyCompleted { generation, summary } => {
+                self.bulk_scan_progress = None;
+                for path in &summary.applied_paths {
+                    if let Some(cached) = refresh_cached_metadata(path) {
+                        self.metadata_cache
+                            .merge(HashMap::from([(path.clone(), cached)]));
+                    }
+                }
+                if self.bulk_apply_active != Some(generation) {
+                    return Task::none();
+                }
+                self.bulk_apply_active = None;
+                self.bulk_auto_tag.finish_apply(summary);
+                Task::none()
             }
 
             Message::SearchFocused(focused) => {
@@ -1310,6 +1590,7 @@ impl App {
                 self.dir_cache.persist();
                 self.metadata_cache = MetadataCache::new();
                 self.metadata_cache.persist();
+                auto_tag::clear_classify_cache();
                 let warm = self.warm_allowed_caches();
                 let search = if self.file_selector.search_active() {
                     self.start_file_search()
@@ -1807,6 +2088,27 @@ impl App {
         .into()
     }
 
+    fn with_bulk_auto_tag<'a>(
+        base: Element<'a, Message>,
+        state: &'a BulkAutoTagState,
+        modifiers: Modifiers,
+    ) -> Element<'a, Message> {
+        stack![
+            base,
+            opaque(
+                container(center(bulk_auto_tag_view(state, modifiers))).style(|_theme| {
+                    container::Style {
+                        background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.55).into()),
+                        ..Default::default()
+                    }
+                }),
+            ),
+        ]
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+    }
+
     fn with_auto_tag<'a>(base: Element<'a, Message>, state: &'a AutoTagState) -> Element<'a, Message> {
         stack![
             base,
@@ -1916,6 +2218,8 @@ impl App {
                 self.settings_first_run,
                 self.settings_error.clone(),
             )
+        } else if self.bulk_auto_tag.is_open() {
+            Self::with_bulk_auto_tag(layout.into(), &self.bulk_auto_tag, self.modifiers)
         } else if self.auto_tag_open {
             Self::with_auto_tag(layout.into(), &self.auto_tag)
         } else if let Some(dialog) = &self.dialog {

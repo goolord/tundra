@@ -2,6 +2,16 @@ use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod classify_cache;
+mod classifier_pool;
+mod tier1;
+
+pub use classify_cache::{clear_cache as clear_classify_cache, flush_cache as flush_classify_cache};
+pub use classifier_pool::{
+    shutdown as shutdown_classifier_pool, warm as warm_classifier_pool,
+    worker_count as classifier_worker_count,
+};
+
 #[derive(Debug, Clone)]
 pub struct ClassificationResult {
     pub instrument: String,
@@ -18,7 +28,7 @@ pub struct ClassifyError {
 }
 
 impl ClassifyError {
-    fn new(message: impl Into<String>, details: impl Into<String>) -> Self {
+    pub fn new(message: impl Into<String>, details: impl Into<String>) -> Self {
         Self {
             message: message.into(),
             details: details.into(),
@@ -27,15 +37,7 @@ impl ClassifyError {
 }
 
 #[derive(Debug, Deserialize)]
-struct Tier1Response {
-    decision: String,
-    instrument: Option<String>,
-    zcr: f64,
-    confidence: Option<f64>,
-}
-
-#[derive(Debug, Deserialize)]
-struct Tier2Response {
+struct Tier2CliResponse {
     instrument: String,
     confidence: Option<f64>,
     zcr: Option<f64>,
@@ -44,15 +46,29 @@ struct Tier2Response {
 
 const INSTALL_HINT: &str = "Install classifiers with: cargo xtask setup";
 
+/// Single-file path persists cache immediately so manual Auto Tag survives app restarts.
 pub fn classify_file(path: &Path) -> Result<ClassificationResult, ClassifyError> {
-    if !path.is_file() {
-        return Err(ClassifyError::new(
-            "Couldn't find that audio file.",
-            format!("File not found: {}", path.display()),
-        ));
+    if let Some(cached) = classify_cache::get_cached(path) {
+        return Ok(cached);
+    }
+    let result = classify_file_inner(path, true)?;
+    classify_cache::flush_cache();
+    Ok(result)
+}
+
+pub fn classify_file_bulk(path: &Path) -> Result<ClassificationResult, ClassifyError> {
+    classify_file_inner(path, false)
+}
+
+fn classify_file_inner(
+    path: &Path,
+    allow_subprocess_fallback: bool,
+) -> Result<ClassificationResult, ClassifyError> {
+    if let Some(cached) = classify_cache::get_cached(path) {
+        return Ok(cached);
     }
 
-    let tier1 = run_tier1(path)?;
+    let tier1 = tier1::classify(path)?;
     if tier1.decision == "definitive" {
         let instrument = tier1.instrument.ok_or_else(|| {
             ClassifyError::new(
@@ -61,7 +77,7 @@ pub fn classify_file(path: &Path) -> Result<ClassificationResult, ClassifyError>
             )
         })?;
         let confidence = tier1.confidence;
-        return Ok(ClassificationResult {
+        let result = ClassificationResult {
             instrument: instrument.clone(),
             tier: 1,
             zcr: Some(tier1.zcr),
@@ -71,12 +87,14 @@ pub fn classify_file(path: &Path) -> Result<ClassificationResult, ClassifyError>
                 zcr = tier1.zcr,
                 confidence = format_confidence(confidence),
             ),
-        });
+        };
+        classify_cache::store_cached(path, &result);
+        return Ok(result);
     }
 
-    let tier2 = run_tier2(path)?;
+    let tier2 = classify_tier2(path, tier1.zcr, allow_subprocess_fallback)?;
     let engine = tier2.engine.as_deref().unwrap_or("essentia");
-    Ok(ClassificationResult {
+    let result = ClassificationResult {
         instrument: tier2.instrument.clone(),
         tier: 2,
         zcr: tier2.zcr.or(Some(tier1.zcr)),
@@ -88,7 +106,27 @@ pub fn classify_file(path: &Path) -> Result<ClassificationResult, ClassifyError>
             instrument = tier2.instrument,
             confidence = format_confidence(tier2.confidence),
         ),
-    })
+    };
+    classify_cache::store_cached(path, &result);
+    Ok(result)
+}
+
+fn classify_tier2(
+    path: &Path,
+    tier1_zcr: f64,
+    allow_subprocess_fallback: bool,
+) -> Result<classifier_pool::Tier2Response, ClassifyError> {
+    match classifier_pool::classify_tier2(path, tier1_zcr) {
+        Ok(response) => Ok(response),
+        Err(worker_err) if allow_subprocess_fallback => {
+            eprintln!(
+                "classifier worker failed ({}); falling back to subprocess tier 2",
+                worker_err.details
+            );
+            run_tier2_subprocess(path)
+        }
+        Err(worker_err) => Err(worker_err),
+    }
 }
 
 fn engine_label(engine: &str) -> &'static str {
@@ -107,7 +145,7 @@ fn format_confidence(confidence: Option<f64>) -> String {
         .unwrap_or_default()
 }
 
-fn scripts_dir() -> PathBuf {
+pub fn scripts_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts")
 }
 
@@ -140,7 +178,20 @@ pub fn bundled_models_dir() -> Option<PathBuf> {
     None
 }
 
-fn configure_classifier_command(command: &mut Command) {
+pub fn configure_classifier_command(command: &mut Command) {
+    // Cap BLAS/OpenMP threads per subprocess so bulk parallel runs stay polite.
+    // CUDA_VISIBLE_DEVICES only affects this child env (classifier may still ignore it).
+    for (key, value) in [
+        ("OMP_NUM_THREADS", "1"),
+        ("OPENBLAS_NUM_THREADS", "1"),
+        ("MKL_NUM_THREADS", "1"),
+        ("VECLIB_MAXIMUM_THREADS", "1"),
+        ("NUMEXPR_NUM_THREADS", "1"),
+        ("TF_CPP_MIN_LOG_LEVEL", "3"),
+        ("CUDA_VISIBLE_DEVICES", "-1"),
+    ] {
+        command.env(key, value);
+    }
     if let Some(models) = bundled_models_dir() {
         command.env("ESSENTIA_MODELS", &models);
         command.env("TUNDRA_ESSENTIA_DL", "1");
@@ -171,7 +222,12 @@ fn run_script(script: &str, path: &Path) -> Result<String, ClassifyError> {
     for python in ["python3", "python"] {
         let mut command = Command::new(python);
         configure_classifier_command(&mut command);
-        match command.arg(&script_path).arg(path).output() {
+        match command
+            .arg(&script_path)
+            .current_dir(&scripts_dir)
+            .arg(path)
+            .output()
+        {
             Ok(output) if output.status.success() => {
                 return String::from_utf8(output.stdout)
                     .map_err(|err| {
@@ -216,6 +272,8 @@ fn try_uv_run(scripts_dir: &Path, script: &str, path: &Path) -> Option<Result<St
     command
         .current_dir(scripts_dir)
         .arg("run")
+        .arg("--python")
+        .arg("3.14")
         .arg(script)
         .arg(path);
     configure_classifier_command(&mut command);
@@ -237,23 +295,19 @@ fn try_uv_run(scripts_dir: &Path, script: &str, path: &Path) -> Option<Result<St
     }
 }
 
-fn run_tier1(path: &Path) -> Result<Tier1Response, ClassifyError> {
-    let stdout = run_script("tier1_zcr.py", path)?;
-    serde_json::from_str(&stdout).map_err(|err| {
-        ClassifyError::new(
-            "Analysis returned unexpected data.",
-            format!("Invalid tier 1 output: {err}"),
-        )
-    })
-}
-
-fn run_tier2(path: &Path) -> Result<Tier2Response, ClassifyError> {
+fn run_tier2_subprocess(path: &Path) -> Result<classifier_pool::Tier2Response, ClassifyError> {
     let stdout = run_script("tier2_essentia.py", path)?;
-    serde_json::from_str(&stdout).map_err(|err| {
+    let parsed: Tier2CliResponse = serde_json::from_str(&stdout).map_err(|err| {
         ClassifyError::new(
             "Analysis returned unexpected data.",
             format!("Invalid tier 2 output: {err}"),
         )
+    })?;
+    Ok(classifier_pool::Tier2Response {
+        instrument: parsed.instrument,
+        confidence: parsed.confidence,
+        zcr: parsed.zcr,
+        engine: parsed.engine,
     })
 }
 
