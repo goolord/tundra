@@ -322,7 +322,6 @@ pub fn read_tag_fields(path: &Path) -> Option<TagFields> {
     }
 
     let tagged_file = read_from_path(path).ok()?;
-    discard_tag_backup(path);
 
     let Some(tag) = tagged_file.primary_tag().or_else(|| tagged_file.first_tag()) else {
         return Some(TagFields::default());
@@ -815,7 +814,6 @@ pub fn instrument_tag(path: &Path) -> Option<String> {
     }
 
     let tagged_file = read_from_path(path).ok()?;
-    discard_tag_backup(path);
     let tag = tagged_file.primary_tag().or_else(|| tagged_file.first_tag())?;
     explicit_instrument_from_tag(tag)
 }
@@ -882,14 +880,9 @@ fn save_tags_atomically(path: &Path, tag: &lofty::tag::Tag) -> Result<(), String
     use lofty::config::WriteOptions;
     use lofty::tag::TagExt;
 
-    let tmp = crate::path_util::sidecar(path, ".tundra-tag.tmp");
-    let bak = crate::path_util::sidecar(path, ".tundra-tag.bak");
+    let tmp = crate::path_util::sidecar(path, crate::path_util::TAG_TMP_SUFFIX);
     std::fs::copy(path, &tmp)
         .map_err(|err| format!("Failed to stage {}: {err}", path.display()))?;
-    if !bak.exists() {
-        std::fs::copy(path, &bak)
-            .map_err(|err| format!("Failed to back up {}: {err}", path.display()))?;
-    }
 
     let write_result = tag
         .save_to_path(&tmp, WriteOptions::default())
@@ -904,25 +897,19 @@ fn save_tags_atomically(path: &Path, tag: &lofty::tag::Tag) -> Result<(), String
                 .map_err(|err| format!("Failed to replace {}: {err}", path.display()))
         });
 
-    if write_result.is_err() {
-        if path.exists() {
-            let _ = std::fs::remove_file(&tmp);
-        } else if std::fs::rename(&tmp, path).is_err() {
-            let _ = std::fs::copy(&bak, path);
-        }
+    if write_result.is_ok() {
+        let _ = crate::path_util::sync_parent_dir(path);
+    } else if path.exists() {
+        let _ = std::fs::remove_file(&tmp);
+    } else {
+        let _ = std::fs::rename(&tmp, path);
     }
     write_result
-}
-
-fn discard_tag_backup(path: &Path) {
-    let bak = crate::path_util::sidecar(path, ".tundra-tag.bak");
-    let _ = std::fs::remove_file(bak);
 }
 
 pub fn refresh_cached_metadata(path: &Path) -> Option<CachedMetadata> {
     let mtime_secs = file_mtime_secs(path)?;
     let fields = read_tag_fields(path)?;
-    discard_tag_backup(path);
     Some(CachedMetadata {
         mtime_secs,
         fields,

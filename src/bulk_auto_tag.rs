@@ -217,6 +217,7 @@ pub struct BulkApplySummary {
     pub applied: usize,
     pub applied_paths: Vec<PathBuf>,
     pub failed: Vec<(PathBuf, String)>,
+    pub cancelled: bool,
 }
 
 fn has_explicit_instrument(path: &Path, metadata: &HashMap<PathBuf, CachedMetadata>) -> bool {
@@ -272,6 +273,8 @@ fn collect_audio_paths(
 ) -> Result<Vec<PathBuf>, String> {
     let mut paths = Vec::new();
     let mut seen = 0usize;
+
+    crate::path_util::reclaim_write_sidecars_tree(root);
 
     for entry in WalkDir::new(root)
         .follow_links(false)
@@ -483,9 +486,11 @@ pub fn apply_items(
     let mut applied = 0usize;
     let mut applied_paths = Vec::new();
     let mut failed = Vec::new();
+    let mut cancelled = false;
 
     for item in items {
         if scan_cancelled(cancel) {
+            cancelled = true;
             break;
         }
         match write_instrument_tag_if_untagged(&item.path, &item.instrument) {
@@ -505,6 +510,7 @@ pub fn apply_items(
         applied,
         applied_paths,
         failed,
+        cancelled,
     }
 }
 

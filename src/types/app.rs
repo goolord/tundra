@@ -8,7 +8,7 @@ use crate::metadata::{
     TagParseError,
 };
 use super::auto_tag::{auto_tag_view, AutoTagState};
-use super::bulk_auto_tag::{bulk_auto_tag_view, BulkAutoTagState};
+use super::bulk_auto_tag::{bulk_auto_tag_view, BulkAutoTagPhase, BulkAutoTagState};
 use super::settings::{self, AddDirectoryResult, AllowedDirectories};
 use futures::future::{AbortHandle, Abortable};
 use futures::*;
@@ -39,6 +39,7 @@ const SIDEBAR_RESIZER_LINE_WIDTH: f32 = 2.0;
 const FILE_DRAG_THRESHOLD: f32 = 8.0;
 
 fn walk_directory(dir: &Path) -> Vec<PathBuf> {
+    crate::path_util::reclaim_write_sidecars_tree(dir);
     WalkDir::new(dir)
         .max_depth(100)
         .max_open(100)
@@ -859,6 +860,13 @@ impl App {
         auto_tag::shutdown_classifier_pool();
     }
 
+    fn request_cancel_bulk_apply(&mut self) {
+        if let Some(cancel) = &self.bulk_scan_cancel {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.bulk_auto_tag.request_stop_apply();
+    }
+
     fn cancel_bulk_scan(&mut self) {
         self.abort_bulk_scan();
         self.bulk_auto_tag.close();
@@ -1287,6 +1295,19 @@ impl App {
             }
 
             Message::CloseBulkAutoTag => {
+                let applying = matches!(
+                    self.bulk_auto_tag.phase,
+                    Some(BulkAutoTagPhase::Applying)
+                ) && self.bulk_apply_active.is_some();
+                if applying {
+                    if self.bulk_auto_tag.apply_stop_requested {
+                        self.abort_bulk_scan();
+                        self.bulk_auto_tag.close();
+                    } else {
+                        self.request_cancel_bulk_apply();
+                    }
+                    return Task::none();
+                }
                 self.abort_bulk_scan();
                 self.bulk_auto_tag.close();
                 Task::none()
@@ -1467,7 +1488,9 @@ impl App {
                     return Task::none();
                 }
                 self.bulk_apply_active = None;
-                self.bulk_auto_tag.finish_apply(summary);
+                if self.bulk_auto_tag.is_open() {
+                    self.bulk_auto_tag.finish_apply(summary);
+                }
                 Task::none()
             }
 

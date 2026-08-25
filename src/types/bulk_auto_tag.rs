@@ -52,6 +52,7 @@ pub struct BulkAutoTagState {
     pub progress_fraction: f32,
     pub progress_label: String,
     pub progress_detail: String,
+    pub apply_stop_requested: bool,
 }
 
 impl BulkAutoTagState {
@@ -314,6 +315,7 @@ impl BulkAutoTagState {
 
     pub fn start_apply(&mut self) {
         self.phase = Some(BulkAutoTagPhase::Applying);
+        self.apply_stop_requested = false;
         self.progress_label = "Writing tags…".into();
         self.progress_done = 0;
         self.progress_total = self.accepted_count();
@@ -324,6 +326,11 @@ impl BulkAutoTagState {
             "Starting…".into()
         };
         self.error = None;
+    }
+
+    pub fn request_stop_apply(&mut self) {
+        self.apply_stop_requested = true;
+        self.progress_label = "Stopping… already-written tags stay.".into();
     }
 
     pub fn finish_apply(&mut self, summary: BulkApplySummary) {
@@ -1298,30 +1305,54 @@ pub fn bulk_auto_tag_view<'a>(
         BulkAutoTagPhase::Done => {
             let mut done = Column::new().spacing(8);
             if let Some(summary) = &state.apply_summary {
-                done = done.push(
-                    container(
-                        text(format!(
+                let (message, tone) = if summary.cancelled {
+                    (
+                        if summary.applied == 0 {
+                            "Apply stopped. No files were tagged.".to_string()
+                        } else {
+                            format!(
+                                "Partial apply: {} file{} already tagged. Apply stopped.",
+                                summary.applied,
+                                if summary.applied == 1 { "" } else { "s" }
+                            )
+                        },
+                        Color::from_rgb(0.88, 0.78, 0.52),
+                    )
+                } else {
+                    (
+                        format!(
                             "Applied {} tags. {} failed.",
                             summary.applied,
                             summary.failed.len()
-                        ))
+                        ),
+                        Color::from_rgb(0.62, 0.88, 0.68),
+                    )
+                };
+                let banner = if summary.cancelled {
+                    Color::from_rgb8(0xd4, 0xa5, 0x4a)
+                } else {
+                    Color::from_rgb8(0x5c, 0xb8, 0x85)
+                };
+                done = done.push(
+                    container(
+                        text(message)
                         .size(13)
                         .font(iced::Font {
                             weight: iced::font::Weight::Medium,
                             ..iced::Font::default()
                         })
-                        .style(|_theme: &Theme| iced::widget::text::Style {
-                            color: Some(Color::from_rgb(0.62, 0.88, 0.68)),
+                        .style(move |_theme: &Theme| iced::widget::text::Style {
+                            color: Some(tone),
                         }),
                     )
                     .padding([10, 12])
                     .width(Length::Fill)
-                    .style(|_theme: &Theme| container::Style {
-                        background: Some(Color::from_rgb8(0x5c, 0xb8, 0x85).scale_alpha(0.12).into()),
+                    .style(move |_theme: &Theme| container::Style {
+                        background: Some(banner.scale_alpha(0.12).into()),
                         border: Border {
                             radius: 6.0.into(),
                             width: 1.0,
-                            color: Color::from_rgb8(0x5c, 0xb8, 0x85).scale_alpha(0.35),
+                            color: banner.scale_alpha(0.35),
                         },
                         ..Default::default()
                     }),
