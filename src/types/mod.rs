@@ -1,4 +1,5 @@
 mod app;
+mod auto_tag;
 mod common;
 mod file_selector;
 mod menu;

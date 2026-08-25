@@ -1,0 +1,18 @@
+[project]
+name = "tundra-classifiers"
+version = "0.1.0"
+description = "Tier 1/2 audio classifiers for Tundra auto-tag"
+requires-python = ">=3.10"
+dependencies = [
+    "librosa>=0.10",
+    "numpy>=1.24",
+    "soundfile>=0.12",
+]
+
+[dependency-groups]
+dl = [
+    "essentia-tensorflow>=2.1b6.dev1389; sys_platform != 'win32' and python_full_version >= '3.14'",
+]
+
+[tool.uv]
+package = false
