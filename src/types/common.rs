@@ -71,6 +71,13 @@ pub enum Message {
     SelectedFile(Option<PathBuf>),
     ChangeDirectory(PathBuf),
     FileListScrolled(iced::widget::scrollable::Viewport),
+    FileListScrollbarPress {
+        track_y: f32,
+        track_top: f32,
+        track_height: f32,
+    },
+    FileListScrollbarDrag(iced::Point),
+    FileListScrollbarRelease,
     Search(String),
     SearchFocused(bool),
     TagSearchInput(String),
