@@ -147,6 +147,46 @@ pub enum Message {
     AutoTagCompleted(Result<crate::auto_tag::ClassificationResult, crate::auto_tag::ClassifyError>),
     AutoTagApply,
     ToggleAutoTagDetails,
+    OpenBulkAutoTag,
+    CloseBulkAutoTag,
+    BulkAutoTagPickDirectory,
+    BulkAutoTagDirectoryPicked(Option<PathBuf>),
+    BulkAutoTagRunScan,
+    BulkAutoTagProgressTick,
+    BulkAutoTagScanCompleted {
+        generation: u64,
+        result: Result<crate::bulk_auto_tag::BulkScanSummary, String>,
+    },
+    BulkAutoTagSetFileAccepted {
+        dir_idx: usize,
+        file_idx: usize,
+        accepted: bool,
+    },
+    BulkAutoTagSelectFile {
+        dir_idx: usize,
+        file_idx: usize,
+        shift: bool,
+        control: bool,
+    },
+    BulkAutoTagSelectDirectory {
+        dir_idx: usize,
+        shift: bool,
+        control: bool,
+    },
+    BulkAutoTagSelectAll,
+    BulkAutoTagClearSelection,
+    BulkAutoTagCheckSelected,
+    BulkAutoTagUncheckSelected,
+    BulkAutoTagAcceptAll,
+    BulkAutoTagRejectAll,
+    BulkAutoTagToggleDirectoryExpanded(usize),
+    BulkAutoTagExpandAllDirectories,
+    BulkAutoTagCollapseAllDirectories,
+    BulkAutoTagApply,
+    BulkAutoTagApplyCompleted {
+        generation: u64,
+        summary: crate::bulk_auto_tag::BulkApplySummary,
+    },
 }
 
 pub fn is_audio(path: &Path) -> bool {

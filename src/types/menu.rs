@@ -54,6 +54,7 @@ fn menu_bar_widget<'a>() -> Element<'a, Message> {
             (menu_item("Refresh", Message::RefreshDirectory)),
             (menu_item("Settings…", Message::OpenSettings)),
             (menu_item("Auto Tag (untagged)…", Message::OpenAutoTag)),
+            (menu_item("Bulk Auto Tag…", Message::OpenBulkAutoTag)),
             (menu_item("Invalidate Cache", Message::InvalidateDircache)),
             (menu_item("Quit", Message::Quit)),
         ))),
