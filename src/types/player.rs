@@ -28,6 +28,15 @@ const MAX_AUDIO_BYTES: u64 = 100 * 1024 * 1024;
 const SEEKBAR_HEIGHT: f32 = 22.0;
 const TRANSPORT_BUTTON: f32 = 42.0;
 const TRANSPORT_ICON: f32 = 18.0;
+const VOLUME_SLIDER_WIDTH: f32 = 72.0;
+
+pub fn clamp_volume(volume: f32) -> f32 {
+    if volume.is_finite() {
+        volume.clamp(0.0, 1.0)
+    } else {
+        1.0
+    }
+}
 
 fn accent_color(theme: &Theme) -> Color {
     theme.extended_palette().primary.base.color
@@ -194,6 +203,39 @@ fn seekbar_style(theme: &Theme, status: SliderStatus) -> SliderStyle {
     }
 }
 
+fn volume_slider_style(theme: &Theme, status: SliderStatus) -> SliderStyle {
+    let palette = theme.extended_palette();
+    let accent = accent_color(theme);
+    let track = palette.background.strong.color.scale_alpha(0.42);
+    let fill = match status {
+        SliderStatus::Active => accent.scale_alpha(0.72),
+        SliderStatus::Hovered => accent.scale_alpha(0.92),
+        SliderStatus::Dragged => accent,
+    };
+    let handle_radius = match status {
+        SliderStatus::Dragged => 6.0,
+        SliderStatus::Hovered => 5.5,
+        SliderStatus::Active => 5.0,
+    };
+    SliderStyle {
+        rail: Rail {
+            backgrounds: (fill.into(), track.into()),
+            width: 3.0,
+            border: Border {
+                radius: 1.5.into(),
+                width: 0.0,
+                color: Color::TRANSPARENT,
+            },
+        },
+        handle: Handle {
+            shape: HandleShape::Circle { radius: handle_radius },
+            background: palette.background.base.color.into(),
+            border_width: 1.5,
+            border_color: fill,
+        },
+    }
+}
+
 fn time_label(content: String, emphasized: bool, align: iced::alignment::Horizontal) -> Element<'static, Message> {
     container(
         text(content)
@@ -225,6 +267,7 @@ enum PlayerCommand {
     Pause,
     Stop,
     Seek(f64, bool),
+    SetVolume(f32),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -240,6 +283,7 @@ pub struct Controls {
     pub playback_position: Option<sync::Arc<PlaybackPosition>>,
     pub track_duration: Option<f64>,
     pub scrubbing: bool,
+    pub volume: f32,
 }
 
 pub struct Seekbar {
@@ -395,6 +439,32 @@ impl Controls {
         .into()
     }
 
+    fn volume_control(&self) -> Element<'_, Message> {
+        row![
+            text("V")
+                .size(11)
+                .style(|theme: &Theme| iced::widget::text::Style {
+                    color: Some(
+                        theme
+                            .extended_palette()
+                            .background
+                            .base
+                            .text
+                            .scale_alpha(0.62),
+                    ),
+                }),
+            Slider::new(0.0..=1.0_f32, self.volume, Message::VolumeChanged)
+                .step(0.01_f32)
+                .width(Length::Fixed(VOLUME_SLIDER_WIDTH))
+                .height(16.0)
+                .on_release(Message::VolumeCommit)
+                .style(volume_slider_style),
+        ]
+        .spacing(4)
+        .align_y(Alignment::Center)
+        .into()
+    }
+
     pub fn seek_bar(&self) -> Element<'_, Message> {
         let progress = match &self.seekbar {
             None => 0.0,
@@ -425,18 +495,26 @@ impl Controls {
         let transport = self.transport_cluster();
         let footer: Element<Message> = if let Some(name) = track_name {
             row![
-                track_name_label(name.to_owned()),
-                Space::new().width(Length::Fill),
+                container(track_name_label(name.to_owned()))
+                    .width(Length::FillPortion(2))
+                    .height(Length::Shrink),
+                self.volume_control(),
                 transport,
             ]
+            .spacing(8)
             .align_y(Alignment::Center)
             .width(Length::Fill)
             .into()
         } else {
-            row![Space::new().width(Length::Fill), transport]
-                .align_y(Alignment::Center)
-                .width(Length::Fill)
-                .into()
+            row![
+                Space::new().width(Length::Fill),
+                self.volume_control(),
+                transport,
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .width(Length::Fill)
+            .into()
         };
 
         Container::new(
@@ -454,13 +532,14 @@ impl Controls {
 }
 
 impl Player {
-    pub fn new() -> (Self, UnboundedReceiver<PlayerMsg>) {
+    pub fn new(volume: f32) -> (Self, UnboundedReceiver<PlayerMsg>) {
+        let volume = clamp_volume(volume);
         let is_playing = sync::Arc::new(sync::atomic::AtomicBool::new(false));
         let worker_is_playing = is_playing.clone();
         let (cmd_sender, cmd_receiver) = unbounded();
         let (msg_sender, msg_receiver) = unbounded();
         thread::spawn(move || {
-            run_audio_worker(cmd_receiver, msg_sender, worker_is_playing);
+            run_audio_worker(cmd_receiver, msg_sender, worker_is_playing, volume);
         });
 
         (
@@ -473,6 +552,7 @@ impl Player {
                     playback_position: None,
                     track_duration: None,
                     scrubbing: false,
+                    volume,
                 },
                 cmd_sender,
             },
@@ -615,6 +695,12 @@ impl Player {
         send_command(&self.cmd_sender, PlayerCommand::Seek(p, resume));
     }
 
+    pub fn set_volume(&mut self, volume: f32) {
+        let volume = clamp_volume(volume);
+        self.controls.volume = volume;
+        send_command(&self.cmd_sender, PlayerCommand::SetVolume(volume));
+    }
+
     pub fn begin_scrub(&mut self, p: f64) {
         self.controls.scrubbing = true;
         if let Some(seekbar) = &mut self.controls.seekbar {
@@ -677,6 +763,7 @@ fn run_audio_worker(
     mut cmd_receiver: UnboundedReceiver<PlayerCommand>,
     msg_sender: UnboundedSender<PlayerMsg>,
     is_playing: sync::Arc<sync::atomic::AtomicBool>,
+    initial_volume: f32,
 ) {
     let stream = match rodio::OutputStreamBuilder::open_default_stream() {
         Ok(stream) => stream,
@@ -689,6 +776,7 @@ fn run_audio_worker(
     };
 
     let sink = rodio::Sink::connect_new(stream.mixer());
+    sink.set_volume(clamp_volume(initial_volume));
     let mut playback: Option<PlaybackData> = None;
     let mut playback_position: Option<sync::Arc<PlaybackPosition>> = None;
     let mut play_offset = 0.0_f64;
@@ -763,6 +851,9 @@ fn run_audio_worker(
                         sink.pause();
                     }
                     is_playing.store(resume, Ordering::SeqCst);
+                }
+                PlayerCommand::SetVolume(next) => {
+                    sink.set_volume(clamp_volume(next));
                 }
             }
         }

@@ -143,40 +143,66 @@ fn tundra_cache_dir() -> Option<PathBuf> {
     })
 }
 
+fn cache_file(name: &str) -> Option<PathBuf> {
+    tundra_cache_dir().map(|mut path| {
+        path.push(name);
+        path
+    })
+}
+
+fn load_cached_f32(name: &str, default: f32, clamp: impl Fn(f32) -> f32) -> f32 {
+    let Some(path) = cache_file(name) else {
+        return default;
+    };
+    match std::fs::read(path) {
+        Ok(bytes) => bincode::deserialize::<f32>(&bytes)
+            .ok()
+            .filter(|value| value.is_finite())
+            .map(clamp)
+            .unwrap_or(default),
+        Err(_) => default,
+    }
+}
+
+fn persist_cached_f32(name: &str, value: f32, label: &str) {
+    let Some(path) = cache_file(name) else {
+        return;
+    };
+    let Ok(bytes) = bincode::serialize(&value) else {
+        eprintln!("Failed to serialize {label}");
+        return;
+    };
+    if let Err(err) = std::fs::write(path, bytes) {
+        eprintln!("Failed to write {label}: {err}");
+    }
+}
+
 struct SidebarSettings;
 
 impl SidebarSettings {
-    fn path() -> Option<PathBuf> {
-        tundra_cache_dir().map(|mut path| {
-            path.push("sidebar_width.bin");
-            path
-        })
-    }
-
     fn load() -> f32 {
-        let Some(path) = Self::path() else {
-            return DEFAULT_SIDEBAR_WIDTH;
-        };
-        match std::fs::read(path) {
-            Ok(bytes) => bincode::deserialize::<f32>(&bytes)
-                .unwrap_or(DEFAULT_SIDEBAR_WIDTH)
-                .clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH),
-            Err(_) => DEFAULT_SIDEBAR_WIDTH,
-        }
+        load_cached_f32(
+            "sidebar_width.bin",
+            DEFAULT_SIDEBAR_WIDTH,
+            |width| width.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH),
+        )
     }
 
     fn persist(width: f32) {
-        let Some(path) = Self::path() else {
-            return;
-        };
         let width = width.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
-        let Ok(bytes) = bincode::serialize(&width) else {
-            eprintln!("Failed to serialize sidebar width");
-            return;
-        };
-        if let Err(err) = std::fs::write(path, bytes) {
-            eprintln!("Failed to write sidebar width: {err}");
-        }
+        persist_cached_f32("sidebar_width.bin", width, "sidebar width");
+    }
+}
+
+struct VolumeSettings;
+
+impl VolumeSettings {
+    fn load() -> f32 {
+        load_cached_f32("volume.bin", 1.0, clamp_volume)
+    }
+
+    fn persist(volume: f32) {
+        persist_cached_f32("volume.bin", clamp_volume(volume), "volume");
     }
 }
 
@@ -195,7 +221,7 @@ impl Default for App {
         let current_dir = startup_directory();
         let file_selector = FileSelector::new(&current_dir);
         let menu = MainMenu::new();
-        let (player, player_msgs) = Player::new();
+        let (player, player_msgs) = Player::new(VolumeSettings::load());
         let search_thread = AbortHandle::new_pair().0;
         let dir_cache = DirCache::get_dir_cache();
         App {
@@ -1010,6 +1036,16 @@ impl App {
                 if let Some(seekbar) = &self.player.controls.seekbar {
                     self.player.seek(seekbar.seeking);
                 }
+                Task::none()
+            }
+
+            Message::VolumeChanged(volume) => {
+                self.player.set_volume(volume);
+                Task::none()
+            }
+
+            Message::VolumeCommit => {
+                VolumeSettings::persist(self.player.controls.volume);
                 Task::none()
             }
 

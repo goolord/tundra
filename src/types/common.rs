@@ -73,6 +73,8 @@ pub enum Message {
     InvalidateDircache,
     Seek(f64),
     SeekCommit,
+    VolumeChanged(f32),
+    VolumeCommit,
     WaveformSeek(f64),
     SidebarResizeStart,
     SidebarResizeMove(f32),
