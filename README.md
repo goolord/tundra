@@ -1,6 +1,25 @@
 # Tundra
-fast sample browser GUI
 
-some icons from https://fontawesome.com/license
+Fast sample browser GUI built with [iced](https://github.com/iced-rs/iced).
 
-resources/\* stored with git lfs
+## Requirements
+
+- Rust 1.85+ (edition 2024)
+- Git LFS (for SVG icons in `resources/`)
+
+## Run
+
+```bash
+git lfs pull
+cargo run --release
+```
+
+## Features
+
+- Browse directories for audio samples (FLAC, WAV, MP3, OGG)
+- Fuzzy search with directory caching
+- Waveform preview with playback controls
+
+Some icons from https://fontawesome.com/license
+
+`resources/*` stored with git LFS.

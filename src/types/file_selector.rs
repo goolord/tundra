@@ -11,8 +11,7 @@ use iced::Element;
 use iced::Length;
 use std::cmp::*;
 use std::fs;
-use std::path::Path;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
 pub struct FileSelector {
@@ -20,12 +19,10 @@ pub struct FileSelector {
     pub file_list: Vec<FileButton>,
     pub selected_file: Option<usize>,
     pub search_value: String,
+    pub list_error: Option<String>,
 }
 
-#[derive(Debug, Clone)]
-pub struct FileList {
-    pub files: Vec<PathBuf>,
-}
+pub struct FileList;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileButton {
@@ -36,18 +33,16 @@ pub struct FileButton {
 pub struct DirUp;
 
 impl DirUp {
-    pub fn view(&self, cwd: PathBuf) -> Button<Message> {
-        let mut text = String::new();
-        text.push_str("  ");
-        text.push_str(cwd.to_str().unwrap_or("Go up"));
+    pub fn view(&self, cwd: PathBuf) -> Button<'_, Message> {
+        let label = format!("  {}", truncate_path(&cwd, 28));
         Button::new(
             Row::new()
                 .push(
-                    Svg::from_path("resources/up_chevron.svg")
+                    Svg::from_path(resource_path("up_chevron.svg"))
                         .height(Length::Fixed(16.0))
                         .width(Length::Shrink),
                 )
-                .push(Text::new(text).size(24)),
+                .push(Text::new(label).size(16)),
         )
         .on_press(Message::ChangeDirectory(match cwd.parent() {
             Some(x) => x.to_path_buf(),
@@ -58,102 +53,108 @@ impl DirUp {
 }
 
 impl FileList {
-    pub fn file_filter(x: PathBuf) -> bool {
-        (x.is_dir() && !is_hidden(&x)) || x.extension().map_or(false, is_audio)
-    }
-    pub fn list_dir(
-        dir: &Path,
-    ) -> std::iter::FilterMap<
-        std::fs::ReadDir,
-        fn(x: std::io::Result<std::fs::DirEntry>) -> Option<std::fs::DirEntry>,
-    > {
-        fn the_filter(x: std::io::Result<std::fs::DirEntry>) -> Option<std::fs::DirEntry> {
-            match x {
-                Ok(x) => {
-                    if FileList::file_filter(x.path()) {
-                        Some(x)
-                    } else {
-                        None
-                    }
-                }
-                Err(_) => None,
-            }
-        }
-        fs::read_dir(dir).unwrap().filter_map(the_filter)
+    pub fn file_filter(x: &Path) -> bool {
+        (x.is_dir() && !is_hidden(x)) || is_audio(x)
     }
 
-    pub fn new(dir: &Path) -> Vec<FileButton> {
-        let mut buttons: Vec<FileButton> = FileList::list_dir(dir)
-            .map(|x| FileButton::new(x.path(), dir))
+    pub fn list_buttons(dir: &Path) -> (Vec<FileButton>, Option<String>) {
+        let entries = match fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(err) => {
+                return (
+                    Vec::new(),
+                    Some(format!("Cannot read {}: {err}", dir.display())),
+                );
+            }
+        };
+
+        let mut buttons: Vec<FileButton> = entries
+            .filter_map(|entry| {
+                let entry = entry.ok()?;
+                if Self::file_filter(&entry.path()) {
+                    Some(FileButton::new(entry.path(), dir))
+                } else {
+                    None
+                }
+            })
             .collect();
         buttons.sort();
-        buttons
+        (buttons, None)
     }
 }
 
 impl FileSelector {
     pub fn new(dir: &Path) -> Self {
+        let (file_list, list_error) = FileList::list_buttons(dir);
         FileSelector {
             current_dir: dir.to_owned(),
-            file_list: FileList::new(dir),
+            file_list,
             selected_file: None,
             search_value: String::new(),
+            list_error,
         }
     }
 
-    pub fn view(&self) -> Column<Message> {
-        //let selected_file = self.selected_file.as_ref();
+    pub fn view(&self) -> Column<'_, Message> {
         let dir_up =
             Container::new(DirUp.view(self.current_dir.to_owned()).padding(5)).width(Length::Fill);
+
+        let mut column = Column::new().push(dir_up);
+
+        if let Some(error) = &self.list_error {
+            column = column.push(
+                Container::new(Text::new(error).size(16))
+                    .padding(8)
+                    .width(Length::Fill),
+            );
+        }
+
         let new_col: Vec<Element<Message>> = self
             .file_list
             .iter()
-            .enumerate()
-            .map(|(_i, button)| {
-                let element: Button<Message> = button.view();
-                let container = Container::new(element.padding(10)).width(Length::Fill);
-                //if Some(&i) == selected_file {
-                //    container = container.style(super::theme::Container::SelectedContainer);
-                //}
-                container.into()
+            .map(|button| {
+                let element: Button<'_, Message> = button.view();
+                Container::new(element.padding(5))
+                    .width(Length::Fill)
+                    .into()
             })
             .collect();
-        let fs_column = Column::with_children(new_col).spacing(0).padding(0);
-        let fs = scrollable(fs_column).height(Length::Fill);
+
+        let fs = scrollable(Column::with_children(new_col).spacing(0).padding(0))
+            .height(Length::Fill);
         let search = TextInput::new("Search", &self.search_value)
             .on_input(Message::Search)
-            //.style(super::theme::TextInput::FileSearch)
-            .size(32)
+            .size(18)
             .padding(10);
 
-        Column::new().push(dir_up).push(fs).push(search)
+        column.push(fs).push(search)
     }
 }
 
 impl FileButton {
-    pub fn new(x: PathBuf, base_path: &Path) -> Self {
-        let fp = remove_prefix(x.to_str().unwrap(), base_path.as_os_str().to_str().unwrap());
-        let mut label = String::with_capacity(2 + fp.len());
-        label.push_str("  ");
-        label.push_str(fp);
+    pub fn new(path: PathBuf, base_path: &Path) -> Self {
+        let label = match path.strip_prefix(base_path) {
+            Ok(relative) => format!("  {}", relative.display()),
+            Err(_) => format!("  {}", path.display()),
+        };
         FileButton {
-            file_path: x,
+            file_path: path,
             label,
         }
     }
 
-    pub fn view(&self) -> Button<Message> {
-        let text = Text::new(&self.label).size(24);
+    pub fn view(&self) -> Button<'_, Message> {
+        let text = Text::new(&self.label).size(16);
         let label = Row::with_children(if self.file_path.is_dir() {
             vec![
-                Svg::from_path("./resources/folder-solid.svg")
+                Svg::from_path(resource_path("folder-solid.svg"))
                     .width(Length::Fixed(24.0))
                     .into(),
                 text.into(),
             ]
-        } else if is_audio(self.file_path.as_os_str()) {
+        } else if is_audio(&self.file_path) {
             vec![
-                Svg::from_path("./resources/music-solid.svg")
+                Svg::from_path(resource_path("music-solid.svg"))
                     .height(Length::Fixed(24.0))
                     .width(Length::Shrink)
                     .into(),
@@ -163,7 +164,6 @@ impl FileButton {
             vec![text.into()]
         });
         Button::new(label)
-            //.style(super::theme::Button::FileButton)
             .on_press(Message::SelectedFile(Some(self.file_path.to_owned())))
             .width(Length::Fill)
     }
@@ -178,12 +178,5 @@ impl PartialOrd for FileButton {
 impl Ord for FileButton {
     fn cmp(&self, other: &Self) -> Ordering {
         self.file_path.cmp(&other.file_path)
-    }
-}
-
-fn remove_prefix<'a>(s: &'a str, prefix: &str) -> &'a str {
-    match s.strip_prefix(prefix) {
-        Some(s) => unsafe { s.get_unchecked(1..s.len()) },
-        None => s,
     }
 }

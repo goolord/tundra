@@ -1,4 +1,5 @@
 use super::*;
+use super::common::debounce;
 use futures::future::{AbortHandle, Abortable};
 use futures::*;
 use fuzzy_matcher::skim::SkimMatcherV2;
@@ -12,10 +13,11 @@ use walkdir::WalkDir;
 pub struct App {
     pub file_selector: FileSelector,
     pub menu: MainMenu,
-    pub file_selector_divider_vpos: Option<u16>,
     pub player: Player,
     pub search_thread: AbortHandle,
     pub dir_cache: DirCache,
+    player_msgs: Option<futures::channel::mpsc::UnboundedReceiver<super::PlayerMsg>>,
+    player_events_started: bool,
 }
 
 pub struct DirCache(HashMap<PathBuf, Vec<PathBuf>>);
@@ -29,19 +31,19 @@ impl DirCache {
         self.0.insert(k, v)
     }
 
-    fn get(&self, k: &PathBuf ) -> Option<&Vec<PathBuf>>  {
+    fn get(&self, k: &PathBuf) -> Option<&Vec<PathBuf>> {
         self.0.get(k)
     }
 
-    fn contains_key(&self, k: &PathBuf ) -> bool {
+    fn contains_key(&self, k: &PathBuf) -> bool {
         self.0.contains_key(k)
     }
 
-    fn get_path() -> std::option::Option<std::path::PathBuf> {
+    fn get_path() -> Option<std::path::PathBuf> {
         match dirs::cache_dir() {
             Some(mut cache_dir) => {
                 cache_dir.push("tundra");
-                let _ = std::fs::create_dir(cache_dir.clone());
+                let _ = std::fs::create_dir(&cache_dir);
                 cache_dir.push("dir_cache");
                 cache_dir.set_extension("bin");
                 Some(cache_dir)
@@ -56,27 +58,27 @@ impl DirCache {
                 Ok(s) => bincode::deserialize(&s).map_or(DirCache::new(), DirCache),
                 Err(_) => DirCache::new(),
             },
-            None => {
-                DirCache::new()
-            },
+            None => DirCache::new(),
         }
     }
 
     fn persist(&self) {
-        match DirCache::get_path() {
-            Some(dir_cache) => {
-                std::fs::write(dir_cache, bincode::serialize(&self.0).unwrap())
-                    .unwrap();
-            }
-            None => (),
+        let Some(dir_cache) = DirCache::get_path() else {
+            return;
         };
+        let Ok(bytes) = bincode::serialize(&self.0) else {
+            eprintln!("Failed to serialize directory cache");
+            return;
+        };
+        if let Err(err) = std::fs::write(dir_cache, bytes) {
+            eprintln!("Failed to write directory cache: {err}");
+        }
     }
 }
 
 pub fn app() {
-    iced::application(App::title, App::update, App::view)
-        //.subscription(App::subscription)
-        //.theme(App::theme)
+    iced::application(App::default, App::update, App::view)
+        .title(App::title)
         .antialiasing(true)
         .run()
         .unwrap()
@@ -84,19 +86,20 @@ pub fn app() {
 
 impl Default for App {
     fn default() -> App {
-        let current_dir = std::env::current_dir().unwrap();
+        let current_dir = startup_directory();
         let file_selector = FileSelector::new(&current_dir);
         let menu = MainMenu::new();
-        let player = Player::new();
+        let (player, player_msgs) = Player::new();
         let search_thread = AbortHandle::new_pair().0;
         let dir_cache = DirCache::get_dir_cache();
         App {
             file_selector,
             menu,
-            file_selector_divider_vpos: Some(300),
             player,
             search_thread,
             dir_cache,
+            player_msgs: Some(player_msgs),
+            player_events_started: false,
         }
     }
 }
@@ -114,14 +117,28 @@ impl App {
                         if file_path.is_dir() {
                             self.file_selector = FileSelector::new(file_path);
                         } else {
-                            let receiver = self.player.play_file(file_path.to_owned());
-                            self.file_selector.selected_file =
-                                self.file_selector.file_list.iter().position(|x| {
-                                    selected_file.as_ref().map_or(false, |y| y == &x.file_path)
-                                });
-                            return Task::perform(receiver.into_future(), |x| {
-                                Message::PlayerMsg((x.0, Arc::new(x.1)))
-                            });
+                            match self.player.play_file(file_path) {
+                                Ok(()) => {
+                                    self.file_selector.selected_file =
+                                        self.file_selector.file_list.iter().position(|x| {
+                                            selected_file
+                                                .as_ref()
+                                                .is_some_and(|y| y == &x.file_path)
+                                        });
+                                    if !self.player_events_started {
+                                        self.player_events_started = true;
+                                        if let Some(recv) = self.player_msgs.take() {
+                                            return Task::perform(recv.into_future(), |x| {
+                                                Message::PlayerMsg((x.0, Arc::new(x.1)))
+                                            });
+                                        }
+                                    }
+                                }
+                                Err(err) => {
+                                    self.player.set_error(err);
+                                    self.file_selector.selected_file = None;
+                                }
+                            }
                         }
                     }
                     None => {
@@ -141,7 +158,7 @@ impl App {
                             .max_open(100)
                             .follow_links(true)
                             .into_iter()
-                            .filter_entry(|e| FileList::file_filter(e.path().into()))
+                            .filter_entry(|e| FileList::file_filter(e.path()))
                             .filter_map(|e| match e {
                                 Ok(e) => Some(e.path().to_path_buf()),
                                 Err(_) => None,
@@ -158,7 +175,6 @@ impl App {
             Message::Search(search_str) => {
                 self.search_thread.abort();
                 match self.dir_cache.get(&self.file_selector.current_dir) {
-                    // dir is cached
                     Some(children) => {
                         let (abort_handle, abort_reg) = AbortHandle::new_pair();
                         self.search_thread = abort_handle;
@@ -168,8 +184,7 @@ impl App {
                             let children_clone = children.clone();
                             let file_list = Abortable::new(
                                 async move {
-                                    async_std::task::sleep(std::time::Duration::from_millis(200))
-                                        .await;
+                                    debounce(std::time::Duration::from_millis(200)).await;
                                     children_clone
                                         .iter()
                                         .filter_map(|e| {
@@ -191,12 +206,13 @@ impl App {
                             );
                             Task::perform(file_list, Message::SearchCompleted)
                         } else {
-                            self.file_selector.file_list =
-                                FileList::new(&self.file_selector.current_dir);
+                            let (file_list, list_error) =
+                                FileList::list_buttons(&self.file_selector.current_dir);
+                            self.file_selector.file_list = file_list;
+                            self.file_selector.list_error = list_error;
                             Task::none()
                         }
                     }
-                    // dir not cached
                     None => {
                         let (abort_handle, abort_reg) = AbortHandle::new_pair();
                         self.search_thread = abort_handle;
@@ -206,14 +222,13 @@ impl App {
                             let matcher = SkimMatcherV2::default();
                             let file_list = Abortable::new(
                                 async move {
-                                    async_std::task::sleep(std::time::Duration::from_millis(300))
-                                        .await;
+                                    debounce(std::time::Duration::from_millis(300)).await;
                                     WalkDir::new(&current_dir)
                                         .max_depth(100)
                                         .max_open(100)
                                         .follow_links(true)
                                         .into_iter()
-                                        .filter_entry(|e| FileList::file_filter(e.path().into()))
+                                        .filter_entry(|e| FileList::file_filter(e.path()))
                                         .filter_map(|e| match e {
                                             Ok(e) => {
                                                 let epath = e.path();
@@ -237,8 +252,10 @@ impl App {
                             );
                             Task::perform(file_list, Message::SearchCompleted)
                         } else {
-                            self.file_selector.file_list =
-                                FileList::new(&self.file_selector.current_dir);
+                            let (file_list, list_error) =
+                                FileList::list_buttons(&self.file_selector.current_dir);
+                            self.file_selector.file_list = file_list;
+                            self.file_selector.list_error = list_error;
                             Task::none()
                         }
                     }
@@ -251,6 +268,7 @@ impl App {
                         .iter()
                         .map(|x| FileButton::new(x.to_path_buf(), &self.file_selector.current_dir))
                         .collect();
+                    self.file_selector.list_error = None;
                 }
                 Task::none()
             }
@@ -262,9 +280,9 @@ impl App {
                     .is_playing
                     .load(std::sync::atomic::Ordering::SeqCst)
                 {
-                    self.player.pause()
+                    self.player.pause();
                 } else {
-                    self.player.play()
+                    self.player.play();
                 }
                 Task::none()
             }
@@ -280,7 +298,7 @@ impl App {
                 Task::none()
             }
 
-            Message::InvalidateDircache() => {
+            Message::InvalidateDircache => {
                 self.dir_cache = DirCache::new();
                 self.dir_cache.persist();
                 Task::none()
@@ -290,6 +308,9 @@ impl App {
                 match msg {
                     Some(PlayerMsg::PlayingStored) => (),
                     Some(PlayerMsg::SinkEmpty) => self.player.pause(),
+                    Some(PlayerMsg::StreamFailed) => self.player.set_error(
+                        "Audio output unavailable. Check your sound device.".into(),
+                    ),
                     None => return Task::none(),
                 }
                 match Arc::into_inner(recv) {
@@ -302,41 +323,44 @@ impl App {
                     }),
                 }
             }
+
+            Message::DismissError => {
+                self.player.error = None;
+                Task::none()
+            }
+
             Message::Seek(p) => {
                 self.player.controls.seeking(p);
                 Task::none()
             }
+
             Message::SeekCommit => {
-                match &self.player.controls.seekbar {
-                    None => (),
-                    Some(seekbar) => self.player.seek(seekbar.seeking),
+                if let Some(seekbar) = &self.player.controls.seekbar {
+                    self.player.seek(seekbar.seeking);
                 }
-                Task::none()
-            }
-            Message::VResizeFileSelector(position) => {
-                self.file_selector_divider_vpos = Some(position);
                 Task::none()
             }
         }
     }
 
     pub fn view(&self) -> Element<'_, Message> {
-        let player = self.player.view();
         let menu = self.menu.view();
-        let file_selector_container = iced::widget::container(self.file_selector.view())
+        let file_selector = iced::widget::container(self.file_selector.view())
+            .width(Length::FillPortion(1))
+            .max_width(320.0)
+            .height(Length::Fill)
+            .padding(4);
+
+        let player = self.player.view();
+
+        let workspace = iced::widget::row![file_selector, player]
+            .spacing(4)
+            .height(Length::Fill)
+            .width(Length::Fill);
+
+        iced::widget::column![menu, workspace]
             .width(Length::Fill)
             .height(Length::Fill)
-            .center_x(Length::Fill);
-
-        iced::widget::column![
-            menu,
-            //PaneGrid::new(&self.panes, |id, pane, is_maximized| {
-            //}
-
-            file_selector_container,
-            player,
-            //self.file_selector_divider_vpos,
-        ]
-        .into()
+            .into()
     }
 }

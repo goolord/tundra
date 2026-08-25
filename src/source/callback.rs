@@ -1,61 +1,62 @@
 use std::marker::PhantomData;
 use std::time::Duration;
 
-use rodio::{Sample, Source};
+use rodio::{ChannelCount, Sample, SampleRate, Source};
 
-/// An empty source.
-pub struct Callback<T, S> {
-    pub phantom_data: PhantomData<S>,
-    pub callback: Box<dyn Send + Fn(T)>,
-    pub args: T,
+/// Signals completion by invoking a callback once, then yielding no samples.
+pub struct Callback<T> {
+    callback: Box<dyn Send + Fn(T)>,
+    args: T,
+    sample_rate: SampleRate,
+    _sample: PhantomData<Sample>,
 }
 
-impl<T, S> Callback<T, S> {
+impl<T> Callback<T> {
     #[inline]
-    pub fn new(callback: Box<dyn Send + Fn(T)>, args: T) -> Callback<T, S> {
-        Callback {
-            phantom_data: PhantomData,
+    pub fn new(callback: Box<dyn Send + Fn(T)>, args: T, sample_rate: SampleRate) -> Self {
+        Self {
             callback,
             args,
+            sample_rate,
+            _sample: PhantomData,
         }
     }
 }
 
-impl<T, S> Iterator for Callback<T, S>
+impl<T> Iterator for Callback<T>
 where
     T: Copy,
 {
-    type Item = S;
+    type Item = Sample;
 
     #[inline]
-    fn next(&mut self) -> Option<S> {
+    fn next(&mut self) -> Option<Sample> {
         (self.callback)(self.args);
         None
     }
 }
 
-impl<T, S> Source for Callback<T, S>
+impl<T> Source for Callback<T>
 where
-    S: Sample,
     T: Copy,
 {
     #[inline]
-    fn current_frame_len(&self) -> Option<usize> {
+    fn current_span_len(&self) -> Option<usize> {
         None
     }
 
     #[inline]
-    fn channels(&self) -> u16 {
+    fn channels(&self) -> ChannelCount {
         1
     }
 
     #[inline]
-    fn sample_rate(&self) -> u32 {
-        48000
+    fn sample_rate(&self) -> SampleRate {
+        self.sample_rate
     }
 
     #[inline]
     fn total_duration(&self) -> Option<Duration> {
-        Some(Duration::new(0, 0))
+        Some(Duration::ZERO)
     }
 }

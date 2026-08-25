@@ -1,12 +1,9 @@
 use iced::widget::{button, text};
 use iced::{Element, Length, alignment};
-use iced_aw::menu::{Item, Menu};
+use iced_aw::menu::Menu;
 use iced_aw::{menu_bar, menu_items};
 
 pub use super::common::*;
-
-#[derive(Clone)]
-enum MenuMessage {}
 
 pub struct MainMenu {}
 
@@ -23,9 +20,9 @@ impl MainMenu {
 fn menu_1<'a>() -> Element<'a, Message> {
     let menu_tpl_1 = |items| Menu::new(items).max_width(180.0).offset(15.0).spacing(5.0);
     let root = menu_bar!((
-        debug_button_s("Menu"),
+        menu_button("Menu"),
         menu_tpl_1(menu_items!(
-            (debug_button_s("Invalidate cache").on_press(Message::InvalidateDircache()))
+            (menu_button("Invalidate cache").on_press(Message::InvalidateDircache))
         ))
     ))
     .width(110);
@@ -46,45 +43,10 @@ fn base_button<'a>(
     }
 }
 
-fn labeled_button(
-    label: &str,
-    msg: Option<Message>,
-) -> button::Button<Message, iced::Theme, iced::Renderer> {
-    base_button(text(label).align_y(alignment::Vertical::Center), msg)
+fn menu_button<'a>(label: &'a str) -> button::Button<'a, Message> {
+    base_button(
+        text(label).align_y(alignment::Vertical::Center),
+        None,
+    )
+    .width(Length::Shrink)
 }
-
-fn debug_button(label: &str) -> button::Button<Message, iced::Theme, iced::Renderer> {
-    labeled_button(label, None).width(Length::Fill)
-}
-
-fn debug_button_s(label: &str) -> button::Button<Message, iced::Theme, iced::Renderer> {
-    labeled_button(label, None).width(Length::Shrink)
-}
-
-// fn sub_menu<'a>(
-//     label: &str,
-//     msg: Message,
-//     children: Vec<Menu<'a, Message>>,
-// ) -> Menu<'a, Message> {
-//     let handle = svg::Handle::from_path(format!(
-//         "{}/caret-right-fill.svg",
-//         env!("CARGO_MANIFEST_DIR")
-//     ));
-//     let arrow = svg(handle).width(Length::Shrink);
-//
-//     Menu::with_children(
-//         base_button(
-//             row![
-//                 text(label)
-//                     .width(Length::Fill)
-//                     .height(Length::Fill)
-//                     .vertical_alignment(alignment::Vertical::Center),
-//                 arrow
-//             ],
-//         )
-//         .on_press(msg)
-//         .width(Length::Fill)
-//         .height(Length::Fill),
-//         children,
-//     )
-// }
