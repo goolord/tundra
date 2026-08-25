@@ -18,6 +18,7 @@ static RESOURCE_PATHS: LazyLock<HashMap<&'static str, String>> = LazyLock::new(|
         "up_chevron.svg",
         "folder-solid.svg",
         "music-solid.svg",
+        "search-solid.svg",
     ]
     .into_iter()
     .map(|name| (name, format!("{RESOURCES}/{name}")))
@@ -71,6 +72,7 @@ pub enum Message {
     SearchFocused(bool),
     TagSearchInput(String),
     TagSearchSubmit,
+    TagSearchAutocomplete,
     TagSearchFocused(bool),
     TagFilterRemove(crate::metadata::TagField),
     TagSuggestionSelect(crate::metadata::TagField),
@@ -130,6 +132,12 @@ pub enum Message {
     FileCopyName(PathBuf),
     FileCopyPath(PathBuf),
     FileRevealInFileManager(PathBuf),
+    OpenSettings,
+    CloseSettings,
+    PickAllowedDirectory,
+    AllowedDirectoryPicked(Option<PathBuf>),
+    RemoveAllowedDirectory(PathBuf),
+    ToggleSearchCaseSensitive,
 }
 
 pub fn is_audio(path: &Path) -> bool {

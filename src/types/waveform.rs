@@ -66,25 +66,31 @@ impl Default for WaveFormView {
 }
 
 impl WaveFormView {
-    pub fn zoom_in(&mut self) {
-        self.apply_zoom_at(ZOOM_FACTOR, 0.5);
+    pub fn zoom_in(&mut self, sample_count: usize) {
+        self.apply_zoom_at(ZOOM_FACTOR, 0.5, sample_count);
     }
 
-    pub fn zoom_out(&mut self) {
-        self.apply_zoom_at(1.0 / ZOOM_FACTOR, 0.5);
+    pub fn zoom_out(&mut self, sample_count: usize) {
+        self.apply_zoom_at(1.0 / ZOOM_FACTOR, 0.5, sample_count);
     }
 
     pub fn wheel_lines(delta: ScrollDelta) -> f32 {
         scroll_lines(delta).1
     }
 
-    pub fn accumulate_wheel(&mut self, lines: f32, anchor_x: f32, pending: &mut f32) -> bool {
+    pub fn accumulate_wheel(
+        &mut self,
+        lines: f32,
+        anchor_x: f32,
+        sample_count: usize,
+        pending: &mut f32,
+    ) -> bool {
         *pending += lines;
         if pending.abs() < WHEEL_ZOOM_TAIL {
             return false;
         }
         let step = pending.clamp(-WHEEL_ZOOM_MAX, WHEEL_ZOOM_MAX);
-        self.apply_zoom_at(ZOOM_FACTOR.powf(step), anchor_x);
+        self.apply_zoom_at(ZOOM_FACTOR.powf(step), anchor_x, sample_count);
         *pending -= step;
         true
     }
@@ -151,13 +157,47 @@ impl WaveFormView {
         (current + additional / resistance).clamp(-MAX_OVERSCROLL, MAX_OVERSCROLL)
     }
 
-    fn apply_zoom_at(&mut self, factor: f32, anchor_x: f32) {
-        let old_visible = self.visible_fraction();
+    fn timeline_window(&self, sample_count: usize) -> (f32, f32) {
+        if sample_count == 0 {
+            return (0.0, 1.0);
+        }
+        let (start, end, phase) = self.sample_window(sample_count);
+        let width = (end - start) as f32 / sample_count as f32;
+        let left = (start as f32 + phase) / sample_count as f32;
+        (left, width)
+    }
+
+    fn set_timeline_left(&mut self, left: f32, sample_count: usize) {
+        if sample_count == 0 {
+            self.offset = 0.0;
+            return;
+        }
+        let visible = (sample_count as f32 * self.visible_fraction())
+            .ceil()
+            .clamp(1.0, sample_count as f32) as usize;
+        let max_start = sample_count.saturating_sub(visible);
+        if max_start == 0 {
+            self.offset = 0.0;
+            return;
+        }
+        let raw_start = (left * sample_count as f32).clamp(0.0, max_start as f32);
+        let start = raw_start.round() as usize;
+        self.offset = (start as f32 / max_start as f32).clamp(0.0, self.max_offset());
+    }
+
+    fn apply_zoom_at(&mut self, factor: f32, anchor_x: f32, sample_count: usize) {
+        if sample_count == 0 {
+            return;
+        }
         let anchor_x = anchor_x.clamp(0.0, 1.0);
-        let anchor_pos = self.offset + anchor_x * old_visible;
+        let (old_left, old_width) = self.timeline_window(sample_count);
+        let anchor_timeline = old_left + anchor_x * old_width;
+
         self.zoom = (self.zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
-        let new_visible = self.visible_fraction();
-        self.offset = (anchor_pos - anchor_x * new_visible).clamp(0.0, self.max_offset());
+
+        let (_, new_width) = self.timeline_window(sample_count);
+        let new_left = anchor_timeline - anchor_x * new_width;
+        self.set_timeline_left(new_left, sample_count);
         self.overscroll = 0.0;
     }
 
@@ -244,14 +284,14 @@ impl WaveFormView {
             && width / visible_samples as f32 >= SAMPLE_POINTS_MIN_PX
     }
 
-    pub fn apply_key(view: &mut Self, key: &Key) -> bool {
+    pub fn apply_key(view: &mut Self, key: &Key, sample_count: usize) -> bool {
         match key.as_ref() {
             Key::Character("+") | Key::Character("=") => {
-                view.zoom_in();
+                view.zoom_in(sample_count);
                 true
             }
             Key::Character("-") => {
-                view.zoom_out();
+                view.zoom_out(sample_count);
                 true
             }
             Key::Named(iced::keyboard::key::Named::ArrowLeft) => {
@@ -309,12 +349,25 @@ struct WaveformPalette {
     marker_label: Color,
 }
 
+#[derive(Clone, Copy)]
+enum TimeMarkerTier {
+    Major,
+    Second,
+    Subsecond,
+    Sample,
+}
+
 impl WaveformPalette {
     fn from_theme(theme: &Theme) -> Self {
         let palette = theme.extended_palette();
         let primary = palette.primary.base.color;
+        let base = palette.background.base.color;
         Self {
-            background: palette.background.base.color.scale_alpha(0.45),
+            background: Color::from_rgb(
+                base.r * 0.76,
+                base.g * 0.76,
+                base.b * 0.78,
+            ),
             axis: palette.background.strong.color.scale_alpha(0.35),
             fill: primary.scale_alpha(0.22),
             stroke: primary.scale_alpha(0.92),
@@ -810,6 +863,14 @@ impl WaveForm {
         }
     }
 
+    fn is_on_time_grid(tick_secs: f64, step: f64) -> bool {
+        if step <= 0.0 {
+            return false;
+        }
+        let remainder = tick_secs.rem_euclid(step);
+        remainder < step * 0.05 || (step - remainder) < step * 0.05
+    }
+
     fn draw_time_tick(
         frame: &mut Frame,
         palette: &WaveformPalette,
@@ -817,18 +878,19 @@ impl WaveForm {
         line_bottom: f32,
         label_y: f32,
         label: Option<&str>,
-        minor: bool,
+        tier: TimeMarkerTier,
     ) {
-        let line = Path::line(Point::new(x, 0.0), Point::new(x, line_bottom));
+        let tick_height = line_bottom;
+        let color = match tier {
+            TimeMarkerTier::Major => palette.marker,
+            TimeMarkerTier::Second => palette.marker.scale_alpha(0.82),
+            TimeMarkerTier::Subsecond => palette.marker.scale_alpha(0.28),
+            TimeMarkerTier::Sample => palette.marker.scale_alpha(0.16),
+        };
+        let line = Path::line(Point::new(x, 0.0), Point::new(x, tick_height));
         frame.stroke(
             &line,
-            Stroke::default()
-                .with_color(if minor {
-                    palette.marker.scale_alpha(0.22)
-                } else {
-                    palette.marker
-                })
-                .with_width(1.0),
+            Stroke::default().with_color(color).with_width(1.0),
         );
 
         if let Some(text) = label {
@@ -865,55 +927,79 @@ impl WaveForm {
         let px_per_sample = size.width / visible_samples as f32;
         let start_secs = start as f64 / sample_rate;
         let visible_secs = visible_samples as f64 / sample_rate;
-        let step = Self::nice_time_step(visible_secs);
+        let major_step = Self::nice_time_step(visible_secs);
         let end_secs = start_secs + visible_secs;
         let label_y = size.height - 2.0;
         let line_bottom = size.height - TIME_MARKER_HEIGHT;
+        let sample_point_mode = view.sample_point_mode(size.width, visible_samples);
 
         let tick_x = |tick_secs: f64| -> f32 {
             let sample_pos = ((tick_secs - start_secs) / visible_secs) * visible_samples as f64;
             (sample_pos as f32 - phase) * px_per_sample
         };
 
-        if let Some(minor_step) = Self::minor_time_step(step) {
+        let draw_if_visible =
+            |frame: &mut Frame, x: f32, tier: TimeMarkerTier, label: Option<&str>| {
+                if (0.0..=size.width).contains(&x) {
+                    Self::draw_time_tick(
+                        frame,
+                        palette,
+                        x,
+                        line_bottom,
+                        label_y,
+                        label,
+                        tier,
+                    );
+                }
+            };
+
+        if sample_point_mode {
+            let step = ((visible_samples as f32 / size.width).ceil() as usize).max(1);
+            for offset in (0..visible_samples).step_by(step) {
+                let sample_index = start + offset;
+                let tick_secs = sample_index as f64 / sample_rate;
+                if Self::is_on_time_grid(tick_secs, major_step)
+                    || Self::is_on_time_grid(tick_secs, 1.0)
+                {
+                    continue;
+                }
+                let x = (offset as f32 + 0.5 - phase) * px_per_sample;
+                draw_if_visible(frame, x, TimeMarkerTier::Sample, None);
+            }
+        } else if let Some(minor_step) = Self::minor_time_step(major_step) {
             let mut tick = ((start_secs / minor_step).ceil() * minor_step).max(0.0);
             while tick <= end_secs + minor_step * 0.001 {
-                let remainder = tick % step;
-                let on_major =
-                    remainder < minor_step * 0.05 || (step - remainder) < minor_step * 0.05;
-                if !on_major {
-                    let x = tick_x(tick);
-                    if (0.0..=size.width).contains(&x) {
-                        Self::draw_time_tick(
-                            frame,
-                            palette,
-                            x,
-                            line_bottom,
-                            label_y,
-                            None,
-                            true,
-                        );
-                    }
+                if !Self::is_on_time_grid(tick, major_step)
+                    && !Self::is_on_time_grid(tick, 1.0)
+                {
+                    draw_if_visible(
+                        frame,
+                        tick_x(tick),
+                        TimeMarkerTier::Subsecond,
+                        None,
+                    );
                 }
                 tick += minor_step;
             }
         }
 
-        let mut tick = (start_secs / step).ceil() * step;
-        while tick <= end_secs + step * 0.001 {
-            let x = tick_x(tick);
-            if (0.0..=size.width).contains(&x) {
-                Self::draw_time_tick(
-                    frame,
-                    palette,
-                    x,
-                    line_bottom,
-                    label_y,
-                    Some(&Self::format_time(tick, step)),
-                    false,
-                );
+        let mut second = ((start_secs / 1.0).ceil() * 1.0).max(0.0);
+        while second <= end_secs + 0.001 {
+            if !Self::is_on_time_grid(second, major_step) {
+                draw_if_visible(frame, tick_x(second), TimeMarkerTier::Second, None);
             }
-            tick += step;
+            second += 1.0;
+        }
+
+        let mut major = (start_secs / major_step).ceil() * major_step;
+        while major <= end_secs + major_step * 0.001 {
+            draw_if_visible(
+                frame,
+                tick_x(major),
+                TimeMarkerTier::Major,
+                Some(&Self::format_time(major, major_step)),
+            );
+            major += major_step;
         }
     }
 
@@ -948,7 +1034,7 @@ impl WaveForm {
                     .map(|point| (point.x / bounds.width).clamp(0.0, 1.0))
                     .unwrap_or(0.5);
                 let lines = WaveFormView::wheel_lines(*delta);
-                view.accumulate_wheel(lines, anchor_x, &mut state.wheel_lines)
+                view.accumulate_wheel(lines, anchor_x, self.samples.len(), &mut state.wheel_lines)
             }
             _ => false,
         }

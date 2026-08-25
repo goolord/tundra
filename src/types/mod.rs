@@ -3,6 +3,7 @@ mod common;
 mod file_selector;
 mod menu;
 mod player;
+mod settings;
 mod waveform;
 
 pub use app::*;

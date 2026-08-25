@@ -1,12 +1,15 @@
 use super::*;
 use crate::drag_out::NativeDrag;
 use crate::metadata::{
-    filter_search_paths, index_paths, parse_tag_filter, tag_parse_message, CachedMetadata,
+    filter_search_paths, index_paths, parse_tag_filter, tag_field_best_match, tag_parse_message,
+    CachedMetadata, TagParseError,
 };
+use super::settings::{self, AddDirectoryResult, AllowedDirectories};
 use futures::future::{AbortHandle, Abortable};
 use futures::*;
 
-use iced::widget::{button, center, column, container, mouse_area, operation, opaque, row, stack, text, Space};
+use iced::widget::{button, center, column, container, mouse_area, opaque, operation, row, stack, text, Space};
+use iced::widget::Id;
 use iced::widget::operation::AbsoluteOffset;
 use iced::{Border, Color, Element, Event, Length, Point, Shadow, Subscription, Task, Theme};
 use iced::event;
@@ -29,6 +32,20 @@ const MAX_SIDEBAR_WIDTH: f32 = 720.0;
 const SIDEBAR_RESIZER_HIT_WIDTH: f32 = 10.0;
 const SIDEBAR_RESIZER_LINE_WIDTH: f32 = 2.0;
 const FILE_DRAG_THRESHOLD: f32 = 8.0;
+
+fn walk_directory(dir: &Path) -> Vec<PathBuf> {
+    WalkDir::new(dir)
+        .max_depth(100)
+        .max_open(100)
+        .follow_links(true)
+        .into_iter()
+        .filter_entry(|e| FileList::file_filter(e.path()))
+        .filter_map(|e| match e {
+            Ok(e) => Some(e.path().to_path_buf()),
+            Err(_) => None,
+        })
+        .collect()
+}
 
 fn transport_shortcut_allowed(modifiers: Modifiers) -> bool {
     !modifiers.shift() && !modifiers.control() && !modifiers.alt() && !modifiers.logo()
@@ -74,6 +91,10 @@ pub struct App {
     player_events_started: bool,
     drag_over: bool,
     dialog: Option<Dialog>,
+    allowed_directories: AllowedDirectories,
+    settings_open: bool,
+    settings_first_run: bool,
+    settings_error: Option<String>,
     waveform_hovered: bool,
     search_focused: bool,
     tag_search_focused: bool,
@@ -105,6 +126,10 @@ impl DirCache {
 
     fn contains_key(&self, k: &PathBuf) -> bool {
         self.0.contains_key(k)
+    }
+
+    fn retain(&mut self, mut keep: impl FnMut(&PathBuf) -> bool) {
+        self.0.retain(|path, _| keep(path));
     }
 
     fn get_path() -> Option<std::path::PathBuf> {
@@ -160,7 +185,7 @@ impl MetadataCache {
     }
 
     fn get_path() -> Option<std::path::PathBuf> {
-        cache_file("metadata_cache_v3.bin")
+        cache_file("metadata_cache_v4.bin")
     }
 
     fn load() -> Self {
@@ -203,6 +228,11 @@ impl MetadataCache {
             return;
         }
         self.0.extend(entries);
+        self.persist();
+    }
+
+    fn retain(&mut self, mut keep: impl FnMut(&PathBuf) -> bool) {
+        self.0.retain(|path, _| keep(path));
         self.persist();
     }
 }
@@ -275,14 +305,19 @@ pub fn app() {
 
 impl Default for App {
     fn default() -> App {
-        let current_dir = startup_directory();
+        let allowed_directories = AllowedDirectories::load();
+        let settings_first_run = allowed_directories.is_empty();
+        let settings_open = settings_first_run;
+        let current_dir = allowed_directories
+            .startup_directory()
+            .unwrap_or_else(startup_directory);
         let file_selector = FileSelector::new(&current_dir);
         let menu = MainMenu::new();
         let (player, player_msgs) = Player::new(VolumeSettings::load());
         let search_thread = AbortHandle::new_pair().0;
         let dir_cache = DirCache::get_dir_cache();
         let metadata_cache = MetadataCache::load();
-        App {
+        let mut app = App {
             file_selector,
             menu,
             player,
@@ -293,6 +328,10 @@ impl Default for App {
             player_events_started: false,
             drag_over: false,
             dialog: None,
+            allowed_directories,
+            settings_open,
+            settings_first_run,
+            settings_error: None,
             waveform_hovered: false,
             search_focused: false,
             tag_search_focused: false,
@@ -303,8 +342,18 @@ impl Default for App {
             x11_drag_ready: cfg!(any(windows, target_os = "macos")),
             last_cursor: Point::ORIGIN,
             modifiers: Modifiers::default(),
+        };
+        if !app.allowed_directories.is_empty() {
+            app.prune_caches();
         }
+        app
     }
+}
+
+fn tag_search_can_autocomplete(input: &str) -> bool {
+    !input.contains(':')
+        && !input.trim().is_empty()
+        && tag_field_best_match(input).is_some()
 }
 
 impl App {
@@ -337,6 +386,7 @@ impl App {
 
         let transport_keys = if state.player.waveform.is_some()
             && state.dialog.is_none()
+            && !state.settings_open
             && !state.search_focused
             && !state.tag_search_focused
             && state.waveform_hovered
@@ -446,16 +496,66 @@ impl App {
             Subscription::none()
         };
 
+        let tag_autocomplete_keys = if state.tag_search_focused
+            && tag_search_can_autocomplete(&state.file_selector.tag_search_value)
+        {
+            event::listen_with(|event, status, _window| {
+                if status != event::Status::Ignored {
+                    return None;
+                }
+                match event {
+                    Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                        key,
+                        modifiers,
+                        repeat,
+                        ..
+                    }) => {
+                        if repeat
+                            || modifiers.shift()
+                            || modifiers.control()
+                            || modifiers.logo()
+                            || modifiers.alt()
+                        {
+                            return None;
+                        }
+                        if key == Key::Named(iced::keyboard::key::Named::Tab) {
+                            Some(Message::TagSearchAutocomplete)
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                }
+            })
+        } else {
+            Subscription::none()
+        };
+
         Subscription::batch([
             file_events,
             playback_tick,
             waveform_keys,
             transport_keys,
+            tag_autocomplete_keys,
             waveform_spring,
             sidebar_resize,
             file_drag,
             file_drag_tick,
         ])
+    }
+
+    fn autocomplete_tag_field(&mut self) -> Task<Message> {
+        let input = self.file_selector.tag_search_value.clone();
+        if input.contains(':') || input.trim().is_empty() {
+            return Task::none();
+        }
+        if let Some(field) = tag_field_best_match(&input) {
+            self.file_selector.tag_search_error = None;
+            self.file_selector.tag_search_value = format!("{}:", field.as_str());
+            operation::focus(Id::new(TAG_SEARCH_INPUT_ID))
+        } else {
+            Task::none()
+        }
     }
 
     fn open_path(&mut self, path: &Path) -> Task<Message> {
@@ -468,32 +568,18 @@ impl App {
         }
     }
 
-    fn walk_directory(dir: &Path) -> Vec<PathBuf> {
-        WalkDir::new(dir)
-            .max_depth(100)
-            .max_open(100)
-            .follow_links(true)
-            .into_iter()
-            .filter_entry(|e| FileList::file_filter(e.path()))
-            .filter_map(|e| match e {
-                Ok(e) => Some(e.path().to_path_buf()),
-                Err(_) => None,
-            })
-            .collect()
-    }
-
     fn navigate_directory(&mut self, dir: PathBuf) -> Task<Message> {
         self.search_focused = false;
         self.tag_search_focused = false;
         self.file_selector.reload_directory(&dir);
-        if self.dir_cache.contains_key(&dir) {
-            self.start_file_search()
-        } else {
+        if self.allowed_directories.contains_path(&dir) && !self.dir_cache.contains_key(&dir) {
             let walker = future::lazy(move |_| {
-                let children = Self::walk_directory(&dir);
+                let children = walk_directory(&dir);
                 (dir, children)
             });
             Task::perform(walker, Message::InsertDircache)
+        } else {
+            self.start_file_search()
         }
     }
 
@@ -597,65 +683,117 @@ impl App {
         self.file_selector.list_error = list_error;
     }
 
+    fn prune_caches(&mut self) {
+        let allowed = self.allowed_directories.clone();
+        self.dir_cache
+            .retain(|path| allowed.contains_path(path));
+        self.dir_cache.persist();
+        self.metadata_cache
+            .retain(|path| allowed.contains_path(path));
+    }
+
+    fn warm_allowed_caches(&self) -> Task<Message> {
+        let tasks: Vec<Task<Message>> = self
+            .allowed_directories
+            .roots()
+            .iter()
+            .filter(|root| !self.dir_cache.contains_key(*root))
+            .map(|root| {
+                let dir = root.clone();
+                let walker = future::lazy(move |_| {
+                    let children = walk_directory(&dir);
+                    (dir, children)
+                });
+                Task::perform(walker, Message::InsertDircache)
+            })
+            .collect();
+        Task::batch(tasks)
+    }
+
+    fn allowed_search_paths(&self) -> (Vec<PathBuf>, Vec<PathBuf>) {
+        let mut paths = Vec::new();
+        let mut missing_roots = Vec::new();
+        for root in self.allowed_directories.roots() {
+            if let Some(cached) = self.dir_cache.get(root) {
+                paths.extend(cached.iter().cloned());
+            } else {
+                missing_roots.push(root.clone());
+            }
+        }
+        paths.sort();
+        paths.dedup();
+        (paths, missing_roots)
+    }
+
     fn start_file_search(&mut self) -> Task<Message> {
         self.search_thread.abort();
         let file_query = self.file_selector.search_value.clone();
         let tag_filters = self.file_selector.tag_filters.clone();
+        let case_sensitive = self.file_selector.search_case_sensitive;
 
         if file_query.len() <= 2 && tag_filters.is_empty() {
             self.reset_file_list();
             return Task::none();
         }
 
-        let current_dir = self.file_selector.current_dir.clone();
+        if self.allowed_directories.is_empty() {
+            self.reset_file_list();
+            return Task::none();
+        }
+
+        let (paths, missing_roots) = self.allowed_search_paths();
         let (abort_handle, abort_reg) = AbortHandle::new_pair();
         self.search_thread = abort_handle;
         let metadata = self.metadata_cache.snapshot();
 
-        let paths_source = match self.dir_cache.get(&current_dir) {
-            Some(children) => {
-                let debounce_ms = 200;
-                let paths = children.clone();
-                Task::perform(
-                    Abortable::new(
-                        async move {
-                            filter_search_paths(
-                                debounce_ms,
-                                paths,
-                                file_query,
-                                tag_filters,
-                                metadata,
-                            )
-                            .await
-                        },
-                        abort_reg,
-                    ),
-                    Message::SearchCompleted,
-                )
-            }
-            None => Task::perform(
+        if missing_roots.is_empty() {
+            return Task::perform(
                 Abortable::new(
                     async move {
-                        let paths: Vec<PathBuf> = WalkDir::new(&current_dir)
-                            .max_depth(100)
-                            .max_open(100)
-                            .follow_links(true)
-                            .into_iter()
-                            .filter_entry(|e| FileList::file_filter(e.path()))
-                            .filter_map(|e| match e {
-                                Ok(entry) => Some(entry.path().to_path_buf()),
-                                Err(_) => None,
-                            })
-                            .collect();
-                        filter_search_paths(300, paths, file_query, tag_filters, metadata).await
+                        filter_search_paths(
+                            200,
+                            paths,
+                            file_query,
+                            tag_filters,
+                            case_sensitive,
+                            metadata,
+                        )
+                        .await
                     },
                     abort_reg,
                 ),
                 Message::SearchCompleted,
-            ),
-        };
+            );
+        }
 
-        paths_source
+        Task::perform(
+            Abortable::new(
+                async move {
+                    let mut paths = paths;
+                    let mut cached_roots = HashMap::new();
+                    for root in missing_roots {
+                        let children = walk_directory(&root);
+                        paths.extend(children.iter().cloned());
+                        cached_roots.insert(root, children);
+                    }
+                    paths.sort();
+                    paths.dedup();
+                    let mut result = filter_search_paths(
+                        300,
+                        paths,
+                        file_query,
+                        tag_filters,
+                        case_sensitive,
+                        metadata,
+                    )
+                    .await;
+                    result.cached_roots = cached_roots;
+                    result
+                },
+                abort_reg,
+            ),
+            Message::SearchCompleted,
+        )
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -720,6 +858,9 @@ impl App {
             }
 
             Message::GoHome => {
+                if let Some(home) = self.allowed_directories.startup_directory() {
+                    return self.navigate_directory(home);
+                }
                 if let Some(home) = dirs::home_dir() {
                     return self.navigate_directory(home);
                 }
@@ -749,12 +890,105 @@ impl App {
                 Task::none()
             }
 
+            Message::OpenSettings => {
+                self.dialog = None;
+                self.settings_open = true;
+                self.settings_error = None;
+                Task::none()
+            }
+
+            Message::CloseSettings => {
+                if self.allowed_directories.is_empty() {
+                    self.settings_error =
+                        Some("Add at least one directory to search.".into());
+                    return Task::none();
+                }
+                self.settings_open = false;
+                self.settings_first_run = false;
+                self.settings_error = None;
+                self.prune_caches();
+                let navigate = if let Some(dir) = self.allowed_directories.startup_directory() {
+                    if !self
+                        .allowed_directories
+                        .contains_path(&self.file_selector.current_dir)
+                    {
+                        Some(self.navigate_directory(dir))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                let warm = self.warm_allowed_caches();
+                let search = if self.file_selector.search_active() {
+                    self.start_file_search()
+                } else {
+                    Task::none()
+                };
+                match navigate {
+                    Some(task) => Task::batch([task, warm, search]),
+                    None => Task::batch([warm, search]),
+                }
+            }
+
+            Message::PickAllowedDirectory => {
+                let start_dir = self
+                    .allowed_directories
+                    .startup_directory()
+                    .or_else(dirs::home_dir)
+                    .unwrap_or_else(startup_directory);
+                Task::perform(pick_folder(start_dir), Message::AllowedDirectoryPicked)
+            }
+
+            Message::AllowedDirectoryPicked(path) => {
+                if let Some(path) = path {
+                    match self.allowed_directories.add(path) {
+                        (AddDirectoryResult::Added, Some(resolved)) => {
+                            self.allowed_directories.persist();
+                            self.settings_error = None;
+                            if self.dir_cache.contains_key(&resolved) {
+                                return Task::none();
+                            }
+                            let walker = future::lazy(move |_| {
+                                let children = walk_directory(&resolved);
+                                (resolved, children)
+                            });
+                            return Task::perform(walker, Message::InsertDircache);
+                        }
+                        (AddDirectoryResult::Unresolved, _) => {
+                            self.settings_error =
+                                Some("Could not resolve that directory.".into());
+                        }
+                        (AddDirectoryResult::Duplicate, _) => {}
+                        (AddDirectoryResult::Added, None) => {}
+                    }
+                }
+                Task::none()
+            }
+
+            Message::RemoveAllowedDirectory(path) => {
+                self.allowed_directories.remove(&path);
+                self.allowed_directories.persist();
+                self.prune_caches();
+                if self.file_selector.search_active() {
+                    self.start_file_search()
+                } else {
+                    Task::none()
+                }
+            }
+
             Message::ChangeDirectory(parent_dir) => self.navigate_directory(parent_dir),
 
             Message::Search(search_str) => {
                 self.search_focused = true;
                 self.tag_search_focused = false;
                 self.file_selector.search_value = search_str;
+                self.start_file_search()
+            }
+
+            Message::ToggleSearchCaseSensitive => {
+                self.file_selector.search_case_sensitive =
+                    !self.file_selector.search_case_sensitive;
                 self.start_file_search()
             }
 
@@ -771,26 +1005,46 @@ impl App {
                 self.search_focused = false;
                 self.file_selector.tag_search_error = None;
                 self.file_selector.tag_search_value = input;
-                Task::none()
+                operation::focus(Id::new(TAG_SEARCH_INPUT_ID))
             }
 
             Message::TagSearchSubmit => {
                 self.tag_search_focused = true;
                 self.search_focused = false;
                 let input = self.file_selector.tag_search_value.clone();
+                if !input.contains(':') {
+                    let trimmed = input.trim();
+                    if !trimmed.is_empty() {
+                        if tag_field_best_match(&input).is_some() {
+                            return self.autocomplete_tag_field();
+                        }
+                        self.file_selector.tag_search_error =
+                            Some(tag_parse_message(TagParseError::UnknownField).into());
+                        return operation::focus(Id::new(TAG_SEARCH_INPUT_ID));
+                    }
+                }
                 match parse_tag_filter(&input) {
                     Ok(filter) => {
                         self.file_selector.tag_search_error = None;
                         self.file_selector.add_tag_filter(filter);
                         self.file_selector.tag_search_value.clear();
-                        self.start_file_search()
+                        Task::batch([
+                            self.start_file_search(),
+                            operation::focus(Id::new(TAG_SEARCH_INPUT_ID)),
+                        ])
                     }
                     Err(err) => {
                         self.file_selector.tag_search_error =
                             Some(tag_parse_message(err).into());
-                        Task::none()
+                        operation::focus(Id::new(TAG_SEARCH_INPUT_ID))
                     }
                 }
+            }
+
+            Message::TagSearchAutocomplete => {
+                self.tag_search_focused = true;
+                self.search_focused = false;
+                self.autocomplete_tag_field()
             }
 
             Message::TagSearchFocused(focused) => {
@@ -813,11 +1067,21 @@ impl App {
                 self.search_focused = false;
                 self.file_selector.tag_search_error = None;
                 self.file_selector.tag_search_value = format!("{}:", field.as_str());
-                Task::none()
+                operation::focus(Id::new(TAG_SEARCH_INPUT_ID))
             }
 
             Message::SearchCompleted(file_list_res) => {
                 if let Ok(result) = file_list_res {
+                    let mut cache_updated = false;
+                    for (root, children) in result.cached_roots {
+                        if self.allowed_directories.contains_path(&root) {
+                            self.dir_cache.insert(root, children);
+                            cache_updated = true;
+                        }
+                    }
+                    if cache_updated {
+                        self.dir_cache.persist();
+                    }
                     self.file_selector.file_list = result
                         .paths
                         .iter()
@@ -849,6 +1113,9 @@ impl App {
             }
 
             Message::InsertDircache((parent_dir, children)) => {
+                if !self.allowed_directories.contains_path(&parent_dir) {
+                    return Task::none();
+                }
                 self.dir_cache.insert(parent_dir, children.clone());
                 self.dir_cache.persist();
                 let metadata = self.metadata_cache.snapshot();
@@ -876,7 +1143,13 @@ impl App {
                 self.dir_cache.persist();
                 self.metadata_cache = MetadataCache::new();
                 self.metadata_cache.persist();
-                Task::none()
+                let warm = self.warm_allowed_caches();
+                let search = if self.file_selector.search_active() {
+                    self.start_file_search()
+                } else {
+                    Task::none()
+                };
+                Task::batch([warm, search])
             }
 
             Message::PlayerMsg((msg, recv)) => {
@@ -937,7 +1210,7 @@ impl App {
             Message::WaveformZoomIn => {
                 if let Some(waveform) = &mut self.player.waveform {
                     let mut view = waveform.view_state();
-                    view.zoom_in();
+                    view.zoom_in(waveform.samples.len());
                     waveform.set_view(view);
                 }
                 Task::none()
@@ -946,7 +1219,7 @@ impl App {
             Message::WaveformZoomOut => {
                 if let Some(waveform) = &mut self.player.waveform {
                     let mut view = waveform.view_state();
-                    view.zoom_out();
+                    view.zoom_out(waveform.samples.len());
                     waveform.set_view(view);
                 }
                 Task::none()
@@ -963,7 +1236,7 @@ impl App {
             Message::WaveformKey(key) => {
                 if let Some(waveform) = &mut self.player.waveform {
                     let mut view = waveform.view_state();
-                    if WaveFormView::apply_key(&mut view, &key) {
+                    if WaveFormView::apply_key(&mut view, &key, waveform.samples.len()) {
                         waveform.set_view(view);
                     }
                 }
@@ -1345,6 +1618,28 @@ impl App {
         )
     }
 
+    fn with_settings<'a>(
+        base: Element<'a, Message>,
+        allowed: &[PathBuf],
+        first_run: bool,
+        error: Option<String>,
+    ) -> Element<'a, Message> {
+        stack![
+            base,
+            opaque(
+                container(center(settings::settings_view(allowed, first_run, error))).style(
+                    |_theme| container::Style {
+                        background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.55).into()),
+                        ..Default::default()
+                    },
+                ),
+            ),
+        ]
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+    }
+
     fn with_dialog<'a>(base: Element<'a, Message>, dialog: &'a Dialog) -> Element<'a, Message> {
         stack![
             base,
@@ -1370,11 +1665,17 @@ impl App {
             .width(Length::Fixed(self.sidebar_width))
             .height(Length::Fill)
             .style(|theme| {
-                let base = theme.extended_palette().background.base.color;
+                let palette = theme.extended_palette();
+                let base = palette.background.base.color;
                 container::Style {
                     background: Some(
-                        Color::from_rgb(base.r * 0.58, base.g * 0.58, base.b * 0.58).into(),
+                        Color::from_rgb(base.r * 0.56, base.g * 0.56, base.b * 0.58).into(),
                     ),
+                    border: Border {
+                        width: 1.0,
+                        color: palette.background.strong.color.scale_alpha(0.42),
+                        radius: 0.0.into(),
+                    },
                     ..Default::default()
                 }
             });
@@ -1424,10 +1725,19 @@ impl App {
             .width(Length::Fill)
             .height(Length::Fill);
 
-        if let Some(dialog) = &self.dialog {
+        let layout: Element<_> = if self.settings_open {
+            Self::with_settings(
+                layout.into(),
+                self.allowed_directories.roots(),
+                self.settings_first_run,
+                self.settings_error.clone(),
+            )
+        } else if let Some(dialog) = &self.dialog {
             Self::with_dialog(layout.into(), dialog)
         } else {
             layout.into()
-        }
+        };
+
+        layout
     }
 }

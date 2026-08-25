@@ -14,6 +14,7 @@ use iced::widget::{
     button, container, mouse_area, row, text, Button, Canvas, Column, Container, Slider,
     Space, Svg,
 };
+use iced::widget::text::Wrapping;
 use iced::{Alignment, Border, Color, Element, Length, Shadow, Theme, theme};
 use iced_aw::ContextMenu;
 use std::path::PathBuf;
@@ -40,6 +41,84 @@ pub fn clamp_volume(volume: f32) -> f32 {
 
 fn accent_color(theme: &Theme) -> Color {
     theme.extended_palette().primary.base.color
+}
+
+fn zoom_button_style(theme: &Theme, status: ButtonStatus) -> ButtonStyle {
+    let palette = theme.extended_palette();
+    let accent = accent_color(theme);
+    let mut style = ButtonStyle {
+        text_color: palette.background.base.text.scale_alpha(0.82),
+        border: Border {
+            radius: 6.0.into(),
+            width: 1.0,
+            color: palette.background.strong.color.scale_alpha(0.35),
+        },
+        shadow: Shadow::default(),
+        ..ButtonStyle::default()
+    };
+    match status {
+        ButtonStatus::Active | ButtonStatus::Disabled => {
+            style.background = Some(palette.background.weak.color.scale_alpha(0.42).into());
+        }
+        ButtonStatus::Hovered => {
+            style.text_color = palette.background.base.text;
+            style.background = Some(accent.scale_alpha(0.18).into());
+            style.border.color = accent.scale_alpha(0.35);
+        }
+        ButtonStatus::Pressed => {
+            style.text_color = palette.background.base.text;
+            style.background = Some(accent.scale_alpha(0.28).into());
+        }
+    }
+    style
+}
+
+fn waveform_toolbar_style(theme: &Theme) -> container::Style {
+    let palette = theme.extended_palette();
+    container::Style {
+        background: Some(palette.background.weak.color.scale_alpha(0.48).into()),
+        border: Border {
+            width: 1.0,
+            color: palette.background.strong.color.scale_alpha(0.28),
+            radius: 0.0.into(),
+        },
+        ..Default::default()
+    }
+}
+
+fn zoom_label_badge(zoom: f32) -> Element<'static, Message> {
+    container(
+        text(format!("Zoom {zoom:.1}×"))
+            .size(11)
+            .font(iced::Font {
+                weight: iced::font::Weight::Semibold,
+                ..iced::Font::default()
+            })
+            .style(|theme: &Theme| iced::widget::text::Style {
+                color: Some(accent_color(theme).scale_alpha(0.92)),
+            }),
+    )
+    .padding([4, 8])
+    .style(|theme| {
+        let accent = accent_color(theme);
+        container::Style {
+            background: Some(accent.scale_alpha(0.14).into()),
+            border: Border {
+                radius: 6.0.into(),
+                width: 1.0,
+                color: accent.scale_alpha(0.24),
+            },
+            ..Default::default()
+        }
+    })
+    .into()
+}
+
+fn zoom_button(label: &'static str, message: Message) -> Button<'static, Message> {
+    button(text(label).size(15))
+        .padding([2, 10])
+        .on_press(message)
+        .style(zoom_button_style)
 }
 
 fn controls_panel_style(theme: &Theme) -> container::Style {
@@ -567,29 +646,32 @@ impl Player {
 
         if let Some(wf) = &self.waveform {
             let zoom = wf.view_state().zoom;
-            let toolbar = row![
-                text(format!("Zoom {zoom:.1}×")).size(12),
-                button(text("−").size(16))
-                    .padding([2, 8])
-                    .on_press(Message::WaveformZoomOut),
-                button(text("+").size(16))
-                    .padding([2, 8])
-                    .on_press(Message::WaveformZoomIn),
-                text("Click to seek. Scroll to zoom. Shift+scroll or drag to pan.")
-                    .size(11)
-                    .style(|theme: &Theme| text::Style {
-                        color: Some(
-                            theme
-                                .extended_palette()
-                                .background
-                                .base
-                                .text
-                                .scale_alpha(0.72),
-                        ),
-                    }),
-            ]
-            .spacing(6)
-            .align_y(iced::Alignment::Center);
+            let toolbar = container(
+                row![
+                    zoom_label_badge(zoom),
+                    zoom_button("−", Message::WaveformZoomOut),
+                    zoom_button("+", Message::WaveformZoomIn),
+                    Space::new().width(Length::Fill),
+                    text("Click to seek. Scroll to zoom. Shift+scroll or drag to pan.")
+                        .size(11)
+                        .wrapping(Wrapping::None)
+                        .style(|theme: &Theme| text::Style {
+                            color: Some(
+                                theme
+                                    .extended_palette()
+                                    .background
+                                    .base
+                                    .text
+                                    .scale_alpha(0.62),
+                            ),
+                        }),
+                ]
+                .spacing(8)
+                .align_y(iced::Alignment::Center)
+                .padding([6, 10]),
+            )
+            .width(Length::Fill)
+            .style(waveform_toolbar_style);
 
             let underlay = Column::new()
                 .push(toolbar)

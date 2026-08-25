@@ -1,5 +1,5 @@
 pub use super::common::*;
-use crate::metadata::{tag_field_suggestions, TagField, TagFilter};
+use crate::metadata::{tag_field_match_score, tag_field_suggestions, TagField, TagFilter};
 use iced::widget::button::{Status as ButtonStatus, Style as ButtonStyle};
 use iced::widget::{button, container, mouse_area, row, scrollable, text, Button, Column, Row, Space, Svg, TextInput};
 use iced::widget::Id;
@@ -11,10 +11,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const TUNDRA_ACCENT: Color = Color::from_rgb8(0x50, 0x7a, 0xe0);
-const TAG_PANEL_TOP_RADIUS: f32 = 12.0;
 const TAG_CHIP_RADIUS: f32 = 16.0;
-const TAG_INPUT_RADIUS: f32 = 8.0;
+const FILTER_INPUT_RADIUS: f32 = 0.0;
 pub const FILE_LIST_SCROLL_ID: &str = "file-list-scroll";
+pub const TAG_SEARCH_INPUT_ID: &str = "tag-search-input";
+pub const FILE_SEARCH_INPUT_ID: &str = "file-search-input";
 
 #[derive(Debug, Clone)]
 pub struct FileSelector {
@@ -23,6 +24,7 @@ pub struct FileSelector {
     pub selected_file: Option<usize>,
     pub hovered_file: Option<usize>,
     pub search_value: String,
+    pub search_case_sensitive: bool,
     pub tag_search_value: String,
     pub tag_filters: Vec<TagFilter>,
     pub tag_search_error: Option<String>,
@@ -88,7 +90,7 @@ fn file_tree_button_style(
         ButtonStatus::Active | ButtonStatus::Disabled => {
             style.background = Some(
                 if selected {
-                    TUNDRA_ACCENT.scale_alpha(0.28)
+                    TUNDRA_ACCENT.scale_alpha(0.20)
                 } else {
                     Color::TRANSPARENT
                 }
@@ -97,11 +99,18 @@ fn file_tree_button_style(
         }
         ButtonStatus::Hovered => {
             style.text_color = palette.background.base.text;
-            style.background = Some(TUNDRA_ACCENT.scale_alpha(0.55).into());
+            style.background = Some(
+                if selected {
+                    TUNDRA_ACCENT.scale_alpha(0.28)
+                } else {
+                    TUNDRA_ACCENT.scale_alpha(0.12)
+                }
+                .into(),
+            );
         }
         ButtonStatus::Pressed => {
             style.text_color = palette.background.base.text;
-            style.background = Some(TUNDRA_ACCENT.scale_alpha(0.72).into());
+            style.background = Some(TUNDRA_ACCENT.scale_alpha(0.34).into());
         }
     }
 
@@ -157,6 +166,9 @@ fn tag_field_accent(field: TagField) -> Color {
         TagField::AlbumArtist => Color::from_rgb8(0x62, 0x66, 0xd8),
         TagField::Composer => Color::from_rgb8(0x86, 0x70, 0xc0),
         TagField::Label => Color::from_rgb8(0x6a, 0x88, 0xb4),
+        TagField::Bpm => Color::from_rgb8(0xc8, 0x72, 0x48),
+        TagField::Key => Color::from_rgb8(0x9a, 0x68, 0xc0),
+        TagField::Instrument => Color::from_rgb8(0x52, 0xa8, 0x86),
     }
 }
 
@@ -280,6 +292,180 @@ fn tag_count_badge(count: usize) -> Element<'static, Message> {
     .into()
 }
 
+fn filter_dock_accent_bar() -> Element<'static, Message> {
+    container(
+        Space::new()
+            .width(Length::Fill)
+            .height(Length::Fixed(2.0)),
+    )
+    .width(Length::Fill)
+    .style(|_theme| container::Style {
+        background: Some(TUNDRA_ACCENT.scale_alpha(0.42).into()),
+        ..Default::default()
+    })
+    .into()
+}
+
+fn filter_dock_style(theme: &theme::Theme) -> container::Style {
+    let palette = theme.extended_palette();
+    container::Style {
+        background: Some(sidebar_panel(theme).scale_alpha(0.98).into()),
+        border: Border {
+            width: 1.0,
+            color: palette.background.strong.color.scale_alpha(0.30),
+            radius: 0.0.into(),
+        },
+        shadow: Shadow {
+            color: palette.background.base.color.scale_alpha(0.55),
+            offset: iced::Vector::new(0.0, -4.0),
+            blur_radius: 14.0,
+        },
+        ..Default::default()
+    }
+}
+
+fn filter_section_divider() -> Element<'static, Message> {
+    container(
+        Space::new()
+            .width(Length::Fill)
+            .height(Length::Fixed(1.0)),
+    )
+    .width(Length::Fill)
+    .style(|theme: &theme::Theme| {
+        let palette = theme.extended_palette();
+        container::Style {
+            background: Some(palette.background.strong.color.scale_alpha(0.22).into()),
+            ..Default::default()
+        }
+    })
+    .into()
+}
+
+fn file_search_header(active: bool, case_sensitive: bool) -> Element<'static, Message> {
+    let mut header = Row::new()
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .push(
+            Svg::from_path(resource_path("search-solid.svg"))
+                .width(Length::Fixed(12.0))
+                .height(Length::Fixed(12.0))
+                .style(|_theme, _status| iced::widget::svg::Style {
+                    color: Some(TUNDRA_ACCENT.scale_alpha(0.85)),
+                }),
+        )
+        .push(
+            text("File search")
+                .size(11)
+                .font(iced::Font {
+                    weight: iced::font::Weight::Semibold,
+                    ..iced::Font::default()
+                })
+                .style(|theme: &theme::Theme| iced::widget::text::Style {
+                    color: Some(muted_text(theme)),
+                }),
+        );
+
+    if active {
+        header = header.push(
+            container(
+                text("active")
+                    .size(9)
+                    .font(iced::Font {
+                        weight: iced::font::Weight::Semibold,
+                        ..iced::Font::default()
+                    })
+                    .style(|_theme: &theme::Theme| iced::widget::text::Style {
+                        color: Some(TUNDRA_ACCENT.scale_alpha(0.95)),
+                    }),
+            )
+            .padding([2, 6])
+            .style(|_theme| container::Style {
+                background: Some(TUNDRA_ACCENT.scale_alpha(0.18).into()),
+                border: Border {
+                    radius: 8.0.into(),
+                    width: 1.0,
+                    color: TUNDRA_ACCENT.scale_alpha(0.28),
+                },
+                ..Default::default()
+            }),
+        );
+    }
+
+    header
+        .push(Space::new().width(Length::Fill))
+        .push(file_search_case_button(case_sensitive))
+        .into()
+}
+
+fn file_search_case_button(case_sensitive: bool) -> Element<'static, Message> {
+    button(
+        row![
+            text("a")
+                .size(11)
+                .style(move |theme: &theme::Theme| iced::widget::text::Style {
+                    color: Some(if case_sensitive {
+                        muted_text(theme).scale_alpha(0.72)
+                    } else {
+                        TUNDRA_ACCENT.scale_alpha(0.95)
+                    }),
+                }),
+            text("A")
+                .size(11)
+                .font(iced::Font {
+                    weight: iced::font::Weight::Semibold,
+                    ..iced::Font::default()
+                })
+                .style(move |theme: &theme::Theme| iced::widget::text::Style {
+                    color: Some(if case_sensitive {
+                        TUNDRA_ACCENT.scale_alpha(0.95)
+                    } else {
+                        muted_text(theme).scale_alpha(0.72)
+                    }),
+                }),
+        ]
+        .spacing(0)
+        .align_y(Alignment::Center),
+    )
+    .padding([2, 6])
+    .on_press(Message::ToggleSearchCaseSensitive)
+    .style(move |theme: &theme::Theme, status| {
+        let palette = theme.extended_palette();
+        let mut style = ButtonStyle {
+            text_color: palette.background.base.text,
+            border: Border {
+                radius: 6.0.into(),
+                width: 1.0,
+                color: if case_sensitive {
+                    TUNDRA_ACCENT.scale_alpha(0.35)
+                } else {
+                    palette.background.strong.color.scale_alpha(0.24)
+                },
+            },
+            ..ButtonStyle::default()
+        };
+        match status {
+            ButtonStatus::Active | ButtonStatus::Disabled => {
+                style.background = Some(
+                    if case_sensitive {
+                        TUNDRA_ACCENT.scale_alpha(0.14)
+                    } else {
+                        Color::TRANSPARENT
+                    }
+                    .into(),
+                );
+            }
+            ButtonStatus::Hovered => {
+                style.background = Some(TUNDRA_ACCENT.scale_alpha(0.18).into());
+            }
+            ButtonStatus::Pressed => {
+                style.background = Some(TUNDRA_ACCENT.scale_alpha(0.26).into());
+            }
+        }
+        style
+    })
+    .into()
+}
+
 fn tag_section_header(filter_count: usize) -> Element<'static, Message> {
     let mut header = Row::new()
         .spacing(8)
@@ -311,26 +497,25 @@ fn tag_section_header(filter_count: usize) -> Element<'static, Message> {
     header.push(Space::new().width(Length::Fill)).into()
 }
 
-fn tag_input_shell(content: Element<'_, Message>) -> Element<'_, Message> {
+fn filter_label_row(content: Element<'_, Message>) -> Element<'_, Message> {
     container(content)
         .width(Length::Fill)
-        .padding([2, 2])
-        .style(|theme| {
-            let palette = theme.extended_palette();
-            container::Style {
-                background: Some(palette.background.weak.color.scale_alpha(0.45).into()),
-                border: Border {
-                    radius: TAG_INPUT_RADIUS.into(),
-                    width: 1.0,
-                    color: TUNDRA_ACCENT.scale_alpha(0.22),
-                },
-                ..Default::default()
-            }
-        })
+        .padding([8, 10])
         .into()
 }
 
-fn tag_suggestion_row(field: TagField) -> Element<'static, Message> {
+fn filter_helper_text(label: &str) -> Element<'_, Message> {
+    filter_label_row(
+        text(label)
+            .size(10)
+            .style(|theme: &theme::Theme| iced::widget::text::Style {
+                color: Some(muted_text(theme).scale_alpha(0.85)),
+            })
+            .into(),
+    )
+}
+
+fn tag_suggestion_row(field: TagField, highlighted: bool) -> Element<'static, Message> {
     let name = field.as_str().to_owned();
     let hint = field.label().to_owned();
     button(
@@ -366,7 +551,7 @@ fn tag_suggestion_row(field: TagField) -> Element<'static, Message> {
     .on_press(Message::TagSuggestionSelect(field))
     .width(Length::Fill)
     .padding([6, 10])
-    .style(|theme, status| file_tree_button_style(theme, status, false))
+    .style(move |theme, status| file_tree_button_style(theme, status, highlighted))
     .into()
 }
 
@@ -380,14 +565,14 @@ fn tag_suggestions_panel(suggestions: Vec<Element<'static, Message>>) -> Element
     .style(|theme| {
         let palette = theme.extended_palette();
         container::Style {
-            background: Some(palette.background.base.color.scale_alpha(0.92).into()),
+            background: Some(palette.background.base.color.scale_alpha(0.94).into()),
             border: Border {
-                radius: TAG_INPUT_RADIUS.into(),
+                radius: FILTER_INPUT_RADIUS.into(),
                 width: 1.0,
-                color: palette.background.strong.color.scale_alpha(0.45),
+                color: palette.background.strong.color.scale_alpha(0.40),
             },
             shadow: Shadow {
-                color: Color::BLACK.scale_alpha(0.22),
+                color: palette.background.base.color.scale_alpha(0.65),
                 offset: iced::Vector::new(0.0, 4.0),
                 blur_radius: 10.0,
             },
@@ -397,28 +582,48 @@ fn tag_suggestions_panel(suggestions: Vec<Element<'static, Message>>) -> Element
     .into()
 }
 
-fn tag_panel_style(theme: &theme::Theme) -> container::Style {
-    let palette = theme.extended_palette();
-    container::Style {
-        background: Some(sidebar_panel(theme).scale_alpha(0.92).into()),
-        border: Border {
-            width: 1.0,
-            color: palette.background.strong.color.scale_alpha(0.28),
-            radius: iced::border::Radius {
-                top_left: TAG_PANEL_TOP_RADIUS,
-                top_right: TAG_PANEL_TOP_RADIUS,
-                bottom_right: 0.0,
-                bottom_left: 0.0,
-            },
-        },
-        ..Default::default()
+fn tag_suggestions_slot(suggestions: Vec<Element<'static, Message>>) -> Element<'static, Message> {
+    if suggestions.is_empty() {
+        container(Space::new())
+            .height(Length::Fixed(0.0))
+            .width(Length::Fill)
+            .into()
+    } else {
+        tag_suggestions_panel(suggestions)
     }
 }
 
-fn search_panel(theme: &theme::Theme) -> container::Style {
-    let mut style = section_divider(theme);
-    style.background = Some(sidebar_panel(theme).into());
-    style
+fn file_search_input(search_value: &str) -> Element<'_, Message> {
+    container(
+        mouse_area(
+            TextInput::new("Search files…", search_value)
+                .id(Id::new(FILE_SEARCH_INPUT_ID))
+                .on_input(Message::Search)
+                .size(13)
+                .padding([8, 10])
+                .width(Length::Fill),
+        )
+        .on_press(Message::SearchFocused(true)),
+    )
+    .width(Length::Fill)
+    .into()
+}
+
+fn tag_search_input(tag_search_value: &str) -> Element<'_, Message> {
+    container(
+        mouse_area(
+            TextInput::new("title:value — Enter or Tab", tag_search_value)
+                .id(Id::new(TAG_SEARCH_INPUT_ID))
+                .on_input(Message::TagSearchInput)
+                .on_submit(Message::TagSearchSubmit)
+                .size(12)
+                .padding([8, 10])
+                .width(Length::Fill),
+        )
+        .on_press(Message::TagSearchFocused(true)),
+    )
+    .width(Length::Fill)
+    .into()
 }
 
 fn section_divider(theme: &theme::Theme) -> container::Style {
@@ -518,6 +723,7 @@ impl FileSelector {
             selected_file: None,
             hovered_file: None,
             search_value: String::new(),
+            search_case_sensitive: false,
             tag_search_value: String::new(),
             tag_filters: Vec::new(),
             tag_search_error: None,
@@ -527,6 +733,7 @@ impl FileSelector {
 
     pub fn reload_directory(&mut self, dir: &Path) {
         let search_value = self.search_value.clone();
+        let search_case_sensitive = self.search_case_sensitive;
         let tag_search_value = self.tag_search_value.clone();
         let tag_filters = self.tag_filters.clone();
         let tag_search_error = self.tag_search_error.clone();
@@ -537,6 +744,7 @@ impl FileSelector {
         self.hovered_file = None;
         self.list_error = list_error;
         self.search_value = search_value;
+        self.search_case_sensitive = search_case_sensitive;
         self.tag_search_value = tag_search_value;
         self.tag_filters = tag_filters;
         self.tag_search_error = tag_search_error;
@@ -559,9 +767,19 @@ impl FileSelector {
     }
 
     fn tag_suggestions(&self) -> Vec<Element<'static, Message>> {
-        tag_field_suggestions(&self.tag_search_value)
+        let suggestions = tag_field_suggestions(&self.tag_search_value);
+        let best_score = suggestions
+            .iter()
+            .map(|field| tag_field_match_score(*field, &self.tag_search_value))
+            .max()
+            .unwrap_or(0);
+        suggestions
             .into_iter()
-            .map(tag_suggestion_row)
+            .map(|field| {
+                let highlighted =
+                    best_score > 0 && tag_field_match_score(field, &self.tag_search_value) == best_score;
+                tag_suggestion_row(field, highlighted)
+            })
             .collect()
     }
 
@@ -600,23 +818,17 @@ impl FileSelector {
             .id(Id::new(FILE_LIST_SCROLL_ID))
             .height(Length::Fill);
 
-        let file_search = mouse_area(
-            container(
-                TextInput::new("Search files…", &self.search_value)
-                    .on_input(Message::Search)
-                    .size(13)
-                    .padding([8, 10])
-                    .width(Length::Fill),
-            )
-            .width(Length::Fill)
-            .style(search_panel),
-        )
-        .on_press(Message::SearchFocused(true));
+        let file_search_active = self.search_value.len() > 2;
 
-        let mut tag_section = Column::new()
-            .spacing(8)
-            .padding([10, 10])
-            .push(tag_section_header(self.tag_filters.len()));
+        let mut filter_body = Column::new()
+            .spacing(0)
+            .push(filter_label_row(file_search_header(
+                file_search_active,
+                self.search_case_sensitive,
+            )))
+            .push(file_search_input(&self.search_value))
+            .push(filter_section_divider())
+            .push(filter_label_row(tag_section_header(self.tag_filters.len())));
 
         if !self.tag_filters.is_empty() {
             let chips: Vec<Element<Message>> = self
@@ -624,44 +836,26 @@ impl FileSelector {
                 .iter()
                 .map(tag_chip)
                 .collect();
-            tag_section = tag_section.push(
-                scrollable(Row::with_children(chips).spacing(8))
-                    .width(Length::Fill)
-                    .direction(iced::widget::scrollable::Direction::Horizontal(
-                        iced::widget::scrollable::Scrollbar::default().width(5).scroller_width(5),
-                    )),
+            filter_body = filter_body.push(
+                container(
+                    Row::with_children(chips)
+                        .spacing(8)
+                        .align_y(Alignment::Center)
+                        .width(Length::Fill)
+                        .wrap()
+                        .vertical_spacing(8),
+                )
+                .width(Length::Fill)
+                .padding([4, 10]),
             );
         }
 
-        tag_section = tag_section.push(
-            text("Add filters like title:Kick or genre:Electronic")
-                .size(10)
-                .style(|theme: &theme::Theme| iced::widget::text::Style {
-                    color: Some(muted_text(theme).scale_alpha(0.85)),
-                }),
-        );
-
-        let tag_input = mouse_area(tag_input_shell(
-            TextInput::new("title:value — press Enter", &self.tag_search_value)
-                .on_input(Message::TagSearchInput)
-                .on_submit(Message::TagSearchSubmit)
-                .size(12)
-                .padding([8, 10])
-                .width(Length::Fill)
-                .into(),
-        ))
-        .on_press(Message::TagSearchFocused(true));
-        tag_section = tag_section.push(tag_input);
-
-        if !self.tag_search_value.is_empty() && !self.tag_search_value.contains(':') {
-            let suggestions = self.tag_suggestions();
-            if !suggestions.is_empty() {
-                tag_section = tag_section.push(tag_suggestions_panel(suggestions));
-            }
-        }
+        filter_body = filter_body.push(filter_helper_text(
+            "Add filters like bpm:120, key:Am, or instrument:Kick",
+        ));
 
         if let Some(error) = &self.tag_search_error {
-            tag_section = tag_section.push(
+            filter_body = filter_body.push(
                 container(
                     text(error)
                         .size(11)
@@ -669,12 +863,12 @@ impl FileSelector {
                             color: Some(Color::from_rgb(0.95, 0.62, 0.62)),
                         }),
                 )
-                .padding([6, 8])
+                .padding([6, 10])
                 .width(Length::Fill)
                 .style(|_theme| container::Style {
                     background: Some(Color::from_rgb8(0xff, 0x66, 0x66).scale_alpha(0.12).into()),
                     border: Border {
-                        radius: 6.0.into(),
+                        radius: 0.0.into(),
                         width: 1.0,
                         color: Color::from_rgb8(0xff, 0x66, 0x66).scale_alpha(0.28),
                     },
@@ -683,11 +877,23 @@ impl FileSelector {
             );
         }
 
-        let tag_panel = container(tag_section)
-            .width(Length::Fill)
-            .style(tag_panel_style);
+        let suggestions = if !self.tag_search_value.is_empty() && !self.tag_search_value.contains(':') {
+            self.tag_suggestions()
+        } else {
+            Vec::new()
+        };
+        filter_body = filter_body.push(tag_suggestions_slot(suggestions));
+        filter_body = filter_body.push(tag_search_input(&self.tag_search_value));
 
-        column.push(fs).push(file_search).push(tag_panel)
+        let filter_dock = container(
+            Column::new()
+                .push(filter_dock_accent_bar())
+                .push(filter_body),
+        )
+        .width(Length::Fill)
+        .style(filter_dock_style);
+
+        column.push(fs).push(filter_dock)
     }
 }
 

@@ -2,9 +2,9 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use lofty::file::TaggedFileExt;
 use lofty::read_from_path;
-use lofty::tag::{Accessor, ItemKey};
+use lofty::tag::{Accessor, ItemKey, ItemValue, Tag};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -20,15 +20,21 @@ pub enum TagField {
     AlbumArtist,
     Composer,
     Label,
+    Bpm,
+    Key,
+    Instrument,
 }
 
 impl TagField {
-    pub const ALL: [TagField; 8] = [
+    pub const ALL: [TagField; 11] = [
+        TagField::Bpm,
+        TagField::Key,
+        TagField::Instrument,
         TagField::Title,
         TagField::Artist,
-        TagField::Album,
         TagField::Genre,
         TagField::Comment,
+        TagField::Album,
         TagField::AlbumArtist,
         TagField::Composer,
         TagField::Label,
@@ -44,6 +50,9 @@ impl TagField {
             TagField::AlbumArtist => "albumartist",
             TagField::Composer => "composer",
             TagField::Label => "label",
+            TagField::Bpm => "bpm",
+            TagField::Key => "key",
+            TagField::Instrument => "instrument",
         }
     }
 
@@ -57,6 +66,9 @@ impl TagField {
             TagField::AlbumArtist => "Album artist",
             TagField::Composer => "Composer",
             TagField::Label => "Label",
+            TagField::Bpm => "BPM",
+            TagField::Key => "Key",
+            TagField::Instrument => "Instrument",
         }
     }
 
@@ -70,6 +82,9 @@ impl TagField {
             "albumartist" | "album_artist" => Some(TagField::AlbumArtist),
             "composer" => Some(TagField::Composer),
             "label" => Some(TagField::Label),
+            "bpm" | "tempo" => Some(TagField::Bpm),
+            "key" | "initialkey" | "initial_key" => Some(TagField::Key),
+            "instrument" | "inst" => Some(TagField::Instrument),
             _ => None,
         }
     }
@@ -78,12 +93,35 @@ impl TagField {
         if needle.is_empty() {
             return true;
         }
-        self.as_str().contains(needle)
-            || self
-                .label()
-                .to_ascii_lowercase()
-                .contains(needle)
+        self.match_score(needle) >= 700
     }
+
+    fn match_score(self, needle: &str) -> i32 {
+        if needle.is_empty() {
+            return 0;
+        }
+        let key = self.as_str();
+        let label = self.label().to_ascii_lowercase();
+        if key == needle {
+            1_000
+        } else if label == needle {
+            900
+        } else if key.starts_with(needle) {
+            800
+        } else if label.starts_with(needle) {
+            700
+        } else if key.contains(needle) {
+            400
+        } else if label.contains(needle) {
+            300
+        } else {
+            0
+        }
+    }
+}
+
+pub fn tag_field_match_score(field: TagField, input: &str) -> i32 {
+    field.match_score(&input.trim().to_ascii_lowercase())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -102,6 +140,9 @@ pub struct TagFields {
     pub album_artist: String,
     pub composer: String,
     pub label: String,
+    pub bpm: String,
+    pub key: String,
+    pub instrument: String,
 }
 
 impl TagFields {
@@ -115,6 +156,9 @@ impl TagFields {
             TagField::AlbumArtist => &self.album_artist,
             TagField::Composer => &self.composer,
             TagField::Label => &self.label,
+            TagField::Bpm => &self.bpm,
+            TagField::Key => &self.key,
+            TagField::Instrument => &self.instrument,
         }
     }
 }
@@ -133,7 +177,7 @@ pub fn tag_parse_message(err: TagParseError) -> &'static str {
             "Use field:value (example: title:My Song)."
         }
         TagParseError::UnknownField => {
-            "Unknown tag field. Try title, artist, album, genre…"
+            "Unknown tag field. Try bpm, key, instrument, title, genre…"
         }
         TagParseError::EmptyValue => "Tag value cannot be empty.",
         TagParseError::UnclosedQuote => "Closing quote missing in tag value.",
@@ -150,6 +194,7 @@ pub struct CachedMetadata {
 pub struct SearchResult {
     pub paths: Vec<PathBuf>,
     pub new_metadata: HashMap<PathBuf, CachedMetadata>,
+    pub cached_roots: HashMap<PathBuf, Vec<PathBuf>>,
 }
 
 pub struct MetadataLookup {
@@ -238,6 +283,25 @@ fn file_mtime_secs(path: &Path) -> Option<u64> {
         .map(|duration| duration.as_secs())
 }
 
+fn push_instrument_field(fields: &mut TagFields, tag: &Tag) {
+    for item in tag.items() {
+        let description = item.description();
+        if description.eq_ignore_ascii_case("instrument")
+            || description.eq_ignore_ascii_case("instrumentname")
+            || description.eq_ignore_ascii_case("instrument type")
+        {
+            if let ItemValue::Text(text) = item.value() {
+                push_field(&mut fields.instrument, Some(text.as_str()));
+            }
+        }
+    }
+
+    if fields.instrument.is_empty() {
+        push_field(&mut fields.instrument, tag.get_string(ItemKey::ContentGroup));
+        push_field(&mut fields.instrument, tag.get_string(ItemKey::Description));
+    }
+}
+
 /// Returns `None` when metadata cannot be read (do not cache).
 pub fn read_tag_fields(path: &Path) -> Option<TagFields> {
     if !is_audio(path) {
@@ -264,6 +328,10 @@ pub fn read_tag_fields(path: &Path) -> Option<TagFields> {
     push_field(&mut fields.label, tag.get_string(ItemKey::Label));
     push_field(&mut fields.title, tag.get_string(ItemKey::TrackTitle));
     push_field(&mut fields.artist, tag.get_string(ItemKey::TrackArtist));
+    push_field(&mut fields.bpm, tag.get_string(ItemKey::Bpm));
+    push_field(&mut fields.bpm, tag.get_string(ItemKey::IntegerBpm));
+    push_field(&mut fields.key, tag.get_string(ItemKey::InitialKey));
+    push_instrument_field(&mut fields, tag);
 
     Some(fields)
 }
@@ -313,6 +381,21 @@ pub fn tag_field_suggestions(input: &str) -> Vec<TagField> {
         .collect()
 }
 
+pub fn tag_field_best_match(input: &str) -> Option<TagField> {
+    if input.contains(':') {
+        return None;
+    }
+    let needle = input.trim().to_ascii_lowercase();
+    if needle.is_empty() {
+        return None;
+    }
+    TagField::ALL
+        .iter()
+        .filter(|field| field.matches_query(&needle))
+        .max_by_key(|field| field.match_score(&needle))
+        .copied()
+}
+
 pub fn index_paths(
     paths: &[PathBuf],
     cache: Arc<HashMap<PathBuf, CachedMetadata>>,
@@ -326,58 +409,318 @@ pub fn index_paths(
     lookup.into_new_entries()
 }
 
-pub fn path_matches(matcher: &SkimMatcherV2, path: &Path, query: &str) -> bool {
-    matcher
-        .fuzzy_match(path.to_string_lossy().as_ref(), query)
-        .is_some()
+fn path_match_scores(matcher: &SkimMatcherV2, path: &Path, query: &str) -> (i64, i64) {
+    let path_score = path_search_strings(path)
+        .iter()
+        .filter_map(|candidate| matcher.fuzzy_match(candidate, query))
+        .max()
+        .unwrap_or(0) as i64;
+
+    let mut name_score = 0i64;
+    if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
+        if let Some(score) = matcher.fuzzy_match(name, query) {
+            name_score = name_score.max(score as i64);
+        }
+    }
+    if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) {
+        if let Some(score) = matcher.fuzzy_match(stem, query) {
+            name_score = name_score.max(score as i64);
+        }
+    }
+
+    (name_score, path_score)
 }
 
-fn filter_matches_field(
+fn is_direct_name_match(name_score: i64) -> bool {
+    name_score > 0
+}
+
+fn text_eq(a: &str, b: &str, case_sensitive: bool) -> bool {
+    if case_sensitive {
+        a == b
+    } else {
+        a.eq_ignore_ascii_case(b)
+    }
+}
+
+fn text_starts_with(haystack: &str, needle: &str, case_sensitive: bool) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    if haystack.len() < needle.len() {
+        return false;
+    }
+    if case_sensitive {
+        haystack.starts_with(needle)
+    } else {
+        haystack[..needle.len()].eq_ignore_ascii_case(needle)
+    }
+}
+
+const FILE_SEARCH_BONUS: i64 = 1_000;
+const DIRECT_FOLDER_BONUS: i64 = 2_000;
+const EXACT_STEM_BONUS: i64 = 50_000;
+const PREFIX_STEM_BONUS: i64 = 10_000;
+
+fn search_sort_score(
+    path: &Path,
+    query: &str,
+    name_score: i64,
+    path_score: i64,
+    is_dir: bool,
+    case_sensitive: bool,
+) -> i64 {
+    if is_dir {
+        if is_direct_name_match(name_score) {
+            name_score + DIRECT_FOLDER_BONUS
+        } else {
+            path_score
+        }
+    } else {
+        let base = if name_score > 0 { name_score } else { path_score };
+        let mut score = base + FILE_SEARCH_BONUS;
+        if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) {
+            if text_eq(stem, query, case_sensitive) {
+                score += EXACT_STEM_BONUS;
+            } else if text_starts_with(stem, query, case_sensitive) {
+                score += PREFIX_STEM_BONUS;
+            }
+        }
+        score
+    }
+}
+
+#[derive(Eq, PartialEq)]
+struct SearchRank {
+    score: i64,
+    path: PathBuf,
+}
+
+impl Ord for SearchRank {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        other
+            .score
+            .cmp(&self.score)
+            .then_with(|| self.path.cmp(&other.path))
+    }
+}
+
+impl PartialOrd for SearchRank {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl SearchRank {
+    fn for_file_search(
+        path: PathBuf,
+        query: &str,
+        name_score: i64,
+        path_score: i64,
+        case_sensitive: bool,
+    ) -> Self {
+        let is_dir = !is_audio(&path);
+        Self {
+            score: search_sort_score(&path, query, name_score, path_score, is_dir, case_sensitive),
+            path,
+        }
+    }
+
+    fn for_tag_search(path: PathBuf, tag_score: i64) -> Self {
+        Self { score: tag_score, path }
+    }
+
+    fn for_combined_search(
+        path: PathBuf,
+        query: &str,
+        name_score: i64,
+        path_score: i64,
+        tag_score: i64,
+        case_sensitive: bool,
+    ) -> Self {
+        let file_score =
+            search_sort_score(&path, query, name_score, path_score, !is_audio(&path), case_sensitive);
+        Self {
+            score: file_score.saturating_add(tag_score.saturating_mul(100)),
+            path,
+        }
+    }
+}
+
+fn path_search_strings(path: &Path) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut strings = Vec::new();
+    let mut push = |value: &str| {
+        if !value.is_empty() && seen.insert(value.to_owned()) {
+            strings.push(value.to_string());
+        }
+    };
+    push(&path.to_string_lossy());
+    if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
+        push(name);
+    }
+    if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) {
+        push(stem);
+    }
+    strings
+}
+
+fn file_search_matcher(case_sensitive: bool) -> SkimMatcherV2 {
+    if case_sensitive {
+        SkimMatcherV2::default().respect_case()
+    } else {
+        SkimMatcherV2::default().ignore_case()
+    }
+}
+
+fn tag_search_matcher() -> SkimMatcherV2 {
+    SkimMatcherV2::default().ignore_case()
+}
+
+const INSTRUMENT_ALIAS_GROUPS: &[&[&str]] = &[
+    &[
+        "kick", "bd", "bassdrum", "bass drum", "kick drum", "kickdrum", "808 kick", "808kick",
+        "kik",
+    ],
+    &["snare", "sd", "sn", "snr"],
+    &["rim", "rimshot", "rim shot", "side stick", "sidestick"],
+    &[
+        "hihat", "hi-hat", "hi hat", "hh", "hat", "open hat", "closed hat", "openhat",
+        "closedhat", "op hat", "cl hat",
+    ],
+    &["clap", "handclap", "hand clap"],
+    &["tom", "toms", "floor tom", "floortom", "rack tom", "racktom"],
+    &[
+        "perc", "percussion", "conga", "bongo", "shaker", "tamb", "tambourine", "cowbell",
+        "triangle", "woodblock", "cabasa",
+    ],
+    &["crash", "cymbal", "cymbals", "ride", "splash", "china"],
+    &["bass", "sub", "subbass", "sub bass", "808 bass", "808bass", "reese", "wobble"],
+    &["synth", "lead", "pad", "pluck", "stab", "arp", "arpeggio", "keys"],
+    &[
+        "fx", "sfx", "effect", "impact", "riser", "sweep", "noise", "atm", "atmosphere",
+        "ambient", "transition", "downlifter", "uplifter",
+    ],
+    &["vocal", "vox", "voice", "acapella", "aca", "phrase", "adlib"],
+    &["piano", "rhodes", "organ", "electric piano", "ep"],
+    &["guitar", "gtr", "acoustic guitar", "acousticguitar"],
+    &["loop", "loops", "top loop", "toploop", "drum loop", "drumloop"],
+    &["oneshot", "one shot", "one-shot"],
+    &["brass", "horn", "trumpet", "sax", "saxophone", "flute", "strings", "string"],
+];
+
+const MIN_INSTRUMENT_SUBSTRING_LEN: usize = 4;
+
+fn instrument_alias_matches(needle: &str, alias_norm: &str) -> bool {
+    if needle.is_empty() || alias_norm.is_empty() {
+        return false;
+    }
+    if needle == alias_norm {
+        return true;
+    }
+    if alias_norm.starts_with(needle) || needle.starts_with(alias_norm) {
+        return true;
+    }
+    if needle.len() >= MIN_INSTRUMENT_SUBSTRING_LEN && alias_norm.len() >= MIN_INSTRUMENT_SUBSTRING_LEN
+    {
+        return alias_norm.contains(needle) || needle.contains(alias_norm);
+    }
+    false
+}
+
+fn normalize_instrument_term(term: &str) -> String {
+    term.to_ascii_lowercase()
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .collect()
+}
+
+fn instrument_alias_groups_for(term: &str) -> Vec<&'static [&'static str]> {
+    let needle = normalize_instrument_term(term);
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    INSTRUMENT_ALIAS_GROUPS
+        .iter()
+        .copied()
+        .filter(|group| {
+            group.iter().any(|alias| {
+                instrument_alias_matches(&needle, &normalize_instrument_term(alias))
+            })
+        })
+        .collect()
+}
+
+fn instrument_search_terms(query: &str) -> Vec<String> {
+    let mut terms = HashSet::new();
+    terms.insert(normalize_instrument_term(query));
+    for group in instrument_alias_groups_for(query) {
+        for alias in group {
+            terms.insert(normalize_instrument_term(alias));
+        }
+    }
+    terms.into_iter().filter(|term| !term.is_empty()).collect()
+}
+
+fn instrument_terms_related(query: &str, value: &str) -> bool {
+    let query_groups = instrument_alias_groups_for(query);
+    let value_groups = instrument_alias_groups_for(value);
+    query_groups
+        .iter()
+        .any(|group| value_groups.iter().any(|other| std::ptr::eq(*group, *other)))
+}
+
+fn instrument_field_score(
+    matcher: &SkimMatcherV2,
+    value: &str,
+    query: &str,
+) -> Option<i64> {
+    if let Some(score) = matcher.fuzzy_match(value, query) {
+        return Some(score as i64);
+    }
+
+    if instrument_terms_related(query, value) {
+        return Some(80);
+    }
+
+    let terms = instrument_search_terms(query);
+    terms
+        .iter()
+        .filter_map(|term| matcher.fuzzy_match(value, term))
+        .max()
+        .map(|score| score as i64)
+}
+
+fn tag_field_score(
     matcher: &SkimMatcherV2,
     fields: &TagFields,
     filter: &TagFilter,
-) -> bool {
+) -> Option<i64> {
     let value = fields.field_value(filter.field);
-    !value.is_empty() && matcher.fuzzy_match(value, &filter.value).is_some()
+    if value.is_empty() {
+        None
+    } else if filter.field == TagField::Instrument {
+        instrument_field_score(matcher, value, &filter.value)
+    } else {
+        matcher.fuzzy_match(value, &filter.value).map(|score| score as i64)
+    }
 }
 
-pub fn tag_filters_match(
+fn tag_match_score(
     matcher: &SkimMatcherV2,
     path: &Path,
     filters: &[TagFilter],
     lookup: &mut MetadataLookup,
-) -> bool {
-    if filters.is_empty() {
-        return true;
-    }
-    if !is_audio(path) {
-        return false;
+) -> i64 {
+    if filters.is_empty() || !is_audio(path) {
+        return 0;
     }
     let fields = lookup.tag_fields(path);
     filters
         .iter()
-        .all(|filter| filter_matches_field(matcher, &fields, filter))
-}
-
-pub fn file_matches_search(
-    matcher: &SkimMatcherV2,
-    path: &Path,
-    file_query: &str,
-    tag_filters: &[TagFilter],
-    lookup: &mut MetadataLookup,
-) -> bool {
-    let file_active = file_query.len() > 2;
-    let tag_active = !tag_filters.is_empty();
-
-    if file_active && !path_matches(matcher, path, file_query) {
-        return false;
-    }
-
-    if tag_active && !tag_filters_match(matcher, path, tag_filters, lookup) {
-        return false;
-    }
-
-    file_active || tag_active
+        .filter_map(|filter| tag_field_score(matcher, &fields, filter))
+        .min()
+        .unwrap_or(0)
 }
 
 pub async fn filter_search_paths(
@@ -385,25 +728,64 @@ pub async fn filter_search_paths(
     paths: Vec<PathBuf>,
     file_query: String,
     tag_filters: Vec<TagFilter>,
+    case_sensitive: bool,
     metadata: Arc<HashMap<PathBuf, CachedMetadata>>,
 ) -> SearchResult {
     async_io::Timer::after(std::time::Duration::from_millis(debounce_ms)).await;
-    let matcher = SkimMatcherV2::default();
+    let file_matcher = file_search_matcher(case_sensitive);
+    let tag_matcher = tag_search_matcher();
+    let file_active = file_query.len() > 2;
+    let tag_active = !tag_filters.is_empty();
     let mut lookup = MetadataLookup::new(metadata);
-    let paths = paths
-        .into_iter()
-        .filter(|path| {
-            file_matches_search(
-                &matcher,
+    let mut matches = Vec::new();
+
+    for path in paths {
+        let (name_score, path_score) = if file_active {
+            path_match_scores(&file_matcher, &path, &file_query)
+        } else {
+            (0, 0)
+        };
+
+        if file_active && name_score == 0 && path_score == 0 {
+            continue;
+        }
+
+        let tag_score = if tag_active {
+            tag_match_score(&tag_matcher, &path, &tag_filters, &mut lookup)
+        } else {
+            0
+        };
+
+        if tag_active && tag_score == 0 {
+            continue;
+        }
+
+        if !file_active && !tag_active {
+            continue;
+        }
+
+        let rank = if file_active && tag_active {
+            SearchRank::for_combined_search(
                 path,
                 &file_query,
-                &tag_filters,
-                &mut lookup,
+                name_score,
+                path_score,
+                tag_score,
+                case_sensitive,
             )
-        })
-        .collect();
+        } else if file_active {
+            SearchRank::for_file_search(path, &file_query, name_score, path_score, case_sensitive)
+        } else {
+            SearchRank::for_tag_search(path, tag_score)
+        };
+        matches.push(rank);
+    }
+
+    matches.sort();
+    let paths = matches.into_iter().map(|entry| entry.path).collect();
     SearchResult {
         paths,
         new_metadata: lookup.into_new_entries(),
+        cached_roots: HashMap::new(),
     }
 }
