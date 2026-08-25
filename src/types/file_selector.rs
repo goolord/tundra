@@ -1,9 +1,13 @@
 pub use super::common::*;
 use crate::metadata::{tag_field_match_score, tag_field_suggestions, TagField, TagFilter};
 use iced::widget::button::{Status as ButtonStatus, Style as ButtonStyle};
+use iced::widget::canvas::{self, Action, Event, Frame, Program};
+use iced::widget::canvas::Path as CanvasPath;
+use iced::widget::scrollable::Scrollbar;
 use iced::widget::{button, container, mouse_area, row, scrollable, text, Button, Column, Row, Space, Svg, TextInput};
 use iced::widget::Id;
-use iced::{Alignment, Border, Color, Element, Length, Shadow, theme};
+use iced::{Alignment, Border, Color, Element, Length, Rectangle, Shadow, theme};
+use iced::mouse::{self, Cursor};
 use iced_aw::ContextMenu;
 
 use std::cmp::Ordering;
@@ -21,8 +25,179 @@ pub const FILE_ROW_HEIGHT: f32 = 31.0;
 const FILE_ROW_OVERDRAW: usize = 12;
 /// Assumed viewport height until the first scroll event reports the real one.
 const FILE_LIST_DEFAULT_VIEWPORT: f32 = 2400.0;
+pub const FILE_LIST_SCROLLBAR_WIDTH: f32 = 10.0;
+pub const FILE_LIST_SCROLLBAR_MIN_THUMB: f32 = 36.0;
 pub const TAG_SEARCH_INPUT_ID: &str = "tag-search-input";
 pub const FILE_SEARCH_INPUT_ID: &str = "file-search-input";
+
+#[derive(Debug, Clone, Copy)]
+pub struct FileListScrollMetrics {
+    pub max_scroll: f32,
+    pub thumb_height: f32,
+    pub thumb_top: f32,
+    pub scroll_range: f32,
+}
+
+pub fn file_list_viewport_height(list_viewport_height: f32) -> f32 {
+    if list_viewport_height > 0.0 {
+        list_viewport_height
+    } else {
+        FILE_LIST_DEFAULT_VIEWPORT
+    }
+}
+
+pub fn file_list_scroll_metrics(
+    total_rows: usize,
+    scroll_offset: f32,
+    viewport_height: f32,
+) -> FileListScrollMetrics {
+    let content_height = total_rows as f32 * FILE_ROW_HEIGHT;
+    let track_height = viewport_height.max(0.0);
+    let max_scroll = (content_height - track_height).max(0.0);
+    let ratio = if content_height > 0.0 {
+        track_height / content_height
+    } else {
+        1.0
+    };
+    let thumb_height = (track_height * ratio)
+        .max(FILE_LIST_SCROLLBAR_MIN_THUMB)
+        .min(track_height);
+    let scroll_range = (track_height - thumb_height).max(0.0);
+    let thumb_top = if max_scroll > 0.0 && scroll_range > 0.0 {
+        (scroll_offset / max_scroll) * scroll_range
+    } else {
+        0.0
+    };
+    FileListScrollMetrics {
+        max_scroll,
+        thumb_height,
+        thumb_top,
+        scroll_range,
+    }
+}
+
+pub fn file_list_scroll_offset_for_track_y(
+    metrics: &FileListScrollMetrics,
+    track_y: f32,
+    grab_offset: f32,
+) -> f32 {
+    if metrics.scroll_range <= 0.0 || metrics.max_scroll <= 0.0 {
+        return 0.0;
+    }
+    let thumb_top = (track_y - grab_offset).clamp(0.0, metrics.scroll_range);
+    (thumb_top / metrics.scroll_range) * metrics.max_scroll
+}
+
+#[derive(Debug, Clone)]
+struct FileListScrollbar {
+    total_rows: usize,
+    scroll_offset: f32,
+    viewport_height: f32,
+}
+
+impl FileListScrollbar {
+    fn metrics(&self) -> FileListScrollMetrics {
+        file_list_scroll_metrics(self.total_rows, self.scroll_offset, self.viewport_height)
+    }
+}
+
+impl Program<Message> for FileListScrollbar {
+    type State = ();
+
+    fn update(
+        &self,
+        _state: &mut Self::State,
+        event: &Event,
+        bounds: Rectangle,
+        cursor: Cursor,
+    ) -> Option<Action<Message>> {
+        if self.metrics().max_scroll <= 0.0 {
+            return None;
+        }
+        match event {
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+                cursor.position_in(bounds).map(|position| {
+                    Action::publish(Message::FileListScrollbarPress {
+                        track_y: position.y,
+                        track_top: bounds.y,
+                        track_height: bounds.height,
+                    })
+                    .and_capture()
+                })
+            }
+            _ => None,
+        }
+    }
+
+    fn draw(
+        &self,
+        _state: &Self::State,
+        renderer: &iced::Renderer,
+        theme: &theme::Theme,
+        bounds: Rectangle,
+        cursor: Cursor,
+    ) -> Vec<canvas::Geometry> {
+        let metrics = self.metrics();
+        let mut frame = Frame::new(renderer, bounds.size());
+        if metrics.max_scroll <= 0.0 {
+            return vec![frame.into_geometry()];
+        }
+
+        let thumb_bounds = Rectangle {
+            x: 1.0,
+            y: metrics.thumb_top,
+            width: bounds.width - 2.0,
+            height: metrics.thumb_height,
+        };
+        let hovered = cursor
+            .position_in(bounds)
+            .is_some_and(|point| {
+                point.y >= thumb_bounds.y
+                    && point.y <= thumb_bounds.y + thumb_bounds.height
+            });
+
+        let thumb_color = muted_text(theme).scale_alpha(if hovered { 0.72 } else { 0.48 });
+        let thumb = CanvasPath::rectangle(thumb_bounds.position(), thumb_bounds.size());
+        frame.fill(&thumb, thumb_color);
+        vec![frame.into_geometry()]
+    }
+
+    fn mouse_interaction(
+        &self,
+        _state: &Self::State,
+        bounds: Rectangle,
+        cursor: Cursor,
+    ) -> mouse::Interaction {
+        if self.metrics().max_scroll <= 0.0 {
+            return mouse::Interaction::default();
+        }
+        let Some(point) = cursor.position_in(bounds) else {
+            return mouse::Interaction::default();
+        };
+        let metrics = self.metrics();
+        let on_thumb = point.y >= metrics.thumb_top && point.y <= metrics.thumb_top + metrics.thumb_height;
+        if on_thumb {
+            mouse::Interaction::Grab
+        } else {
+            mouse::Interaction::Pointer
+        }
+    }
+}
+
+fn file_list_scrollbar(
+    total_rows: usize,
+    scroll_offset: f32,
+    viewport_height: f32,
+) -> Element<'static, Message> {
+    iced::widget::canvas(FileListScrollbar {
+        total_rows,
+        scroll_offset,
+        viewport_height,
+    })
+    .width(Length::Fixed(FILE_LIST_SCROLLBAR_WIDTH))
+    .height(Length::Fill)
+    .into()
+}
 
 #[derive(Debug, Clone)]
 pub struct FileSelector {
@@ -920,11 +1095,7 @@ impl FileSelector {
         // Windowed rendering: only build widgets for rows near the viewport;
         // spacers stand in for the rest so scrollbar geometry stays correct.
         let total = self.file_list.len();
-        let viewport_height = if self.list_viewport_height > 0.0 {
-            self.list_viewport_height
-        } else {
-            FILE_LIST_DEFAULT_VIEWPORT
-        };
+        let viewport_height = file_list_viewport_height(self.list_viewport_height);
         let rows_in_view = (viewport_height / FILE_ROW_HEIGHT).ceil() as usize + 1;
         let first_in_view = ((self.list_scroll_offset / FILE_ROW_HEIGHT).floor() as usize)
             .min(total.saturating_sub(rows_in_view));
@@ -958,8 +1129,16 @@ impl FileSelector {
         }
         let fs = scrollable(Column::with_children(new_col).spacing(0))
             .id(Id::new(FILE_LIST_SCROLL_ID))
+            .direction(iced::widget::scrollable::Direction::Vertical(Scrollbar::hidden()))
             .on_scroll(Message::FileListScrolled)
             .height(Length::Fill);
+
+        let list_with_scrollbar = row![
+            fs.width(Length::Fill),
+            file_list_scrollbar(total, self.list_scroll_offset, viewport_height),
+        ]
+        .spacing(0)
+        .height(Length::Fill);
 
         let file_search_active =
             self.search_value.len() >= crate::metadata::FILE_SEARCH_MIN_QUERY_LEN;
@@ -1038,7 +1217,7 @@ impl FileSelector {
         .width(Length::Fill)
         .style(filter_dock_style);
 
-        column.push(fs).push(filter_dock)
+        column.push(list_with_scrollbar).push(filter_dock)
     }
 }
 

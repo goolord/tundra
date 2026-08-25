@@ -96,6 +96,12 @@ struct SidebarResize {
     pending_origin: bool,
 }
 
+struct FileListScrollbarDrag {
+    track_top: f32,
+    track_height: f32,
+    grab_offset: f32,
+}
+
 pub struct App {
     pub file_selector: FileSelector,
     pub menu: MainMenu,
@@ -125,6 +131,7 @@ pub struct App {
     tag_search_focused: bool,
     sidebar_width: f32,
     sidebar_resize: Option<SidebarResize>,
+    file_list_scrollbar_drag: Option<FileListScrollbarDrag>,
     file_drag: Option<FileDragPending>,
     native_drag: NativeDrag,
     drag_ready: bool,
@@ -371,6 +378,7 @@ impl Default for App {
             tag_search_focused: false,
             sidebar_width: SidebarSettings::load(),
             sidebar_resize: None,
+            file_list_scrollbar_drag: None,
             file_drag: None,
             native_drag: NativeDrag::new(),
             drag_ready: cfg!(any(windows, target_os = "macos")),
@@ -492,7 +500,22 @@ impl App {
             Subscription::none()
         };
 
+        let file_list_scrollbar = if state.file_list_scrollbar_drag.is_some() {
+            event::listen_with(|event, _status, _window| match event {
+                Event::Mouse(mouse::Event::CursorMoved { position }) => {
+                    Some(Message::FileListScrollbarDrag(position))
+                }
+                Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                    Some(Message::FileListScrollbarRelease)
+                }
+                _ => None,
+            })
+        } else {
+            Subscription::none()
+        };
+
         let file_drag = if state.sidebar_resize.is_none()
+            && state.file_list_scrollbar_drag.is_none()
             && (state.file_drag.is_some() || state.native_drag.is_active())
         {
             event::listen_with(|event, _status, _window| match event {
@@ -586,6 +609,7 @@ impl App {
             tag_autocomplete_keys,
             waveform_spring,
             sidebar_resize,
+            file_list_scrollbar,
             file_drag,
             file_drag_tick,
             bulk_scan_tick,
@@ -1952,6 +1976,73 @@ impl App {
             Message::FileListScrolled(viewport) => {
                 self.file_selector.list_scroll_offset = viewport.absolute_offset().y;
                 self.file_selector.list_viewport_height = viewport.bounds().height;
+                Task::none()
+            }
+
+            Message::FileListScrollbarPress {
+                track_y,
+                track_top,
+                track_height,
+            } => {
+                let total = self.file_selector.file_list.len();
+                let viewport_height =
+                    file_list_viewport_height(self.file_selector.list_viewport_height);
+                let metrics = file_list_scroll_metrics(
+                    total,
+                    self.file_selector.list_scroll_offset,
+                    viewport_height,
+                );
+                if metrics.max_scroll <= 0.0 {
+                    return Task::none();
+                }
+                let grab_offset = if track_y >= metrics.thumb_top
+                    && track_y <= metrics.thumb_top + metrics.thumb_height
+                {
+                    track_y - metrics.thumb_top
+                } else {
+                    metrics.thumb_height / 2.0
+                };
+                self.file_list_scrollbar_drag = Some(FileListScrollbarDrag {
+                    track_top,
+                    track_height,
+                    grab_offset,
+                });
+                let offset = file_list_scroll_offset_for_track_y(&metrics, track_y, grab_offset);
+                operation::scroll_to(
+                    Id::new(FILE_LIST_SCROLL_ID),
+                    AbsoluteOffset {
+                        x: Some(0.0),
+                        y: Some(offset),
+                    },
+                )
+            }
+
+            Message::FileListScrollbarDrag(point) => {
+                let Some(drag) = self.file_list_scrollbar_drag.as_ref() else {
+                    return Task::none();
+                };
+                let total = self.file_selector.file_list.len();
+                let viewport_height =
+                    file_list_viewport_height(self.file_selector.list_viewport_height);
+                let metrics = file_list_scroll_metrics(
+                    total,
+                    self.file_selector.list_scroll_offset,
+                    viewport_height,
+                );
+                let track_y = (point.y - drag.track_top).clamp(0.0, drag.track_height);
+                let offset =
+                    file_list_scroll_offset_for_track_y(&metrics, track_y, drag.grab_offset);
+                operation::scroll_to(
+                    Id::new(FILE_LIST_SCROLL_ID),
+                    AbsoluteOffset {
+                        x: Some(0.0),
+                        y: Some(offset),
+                    },
+                )
+            }
+
+            Message::FileListScrollbarRelease => {
+                self.file_list_scrollbar_drag = None;
                 Task::none()
             }
 
