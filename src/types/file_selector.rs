@@ -745,6 +745,7 @@ impl FileList {
     }
 
     pub fn list_buttons(dir: &Path) -> (Vec<FileButton>, Option<String>) {
+        crate::path_util::reclaim_write_sidecars(dir);
         let entries = match fs::read_dir(dir) {
             Ok(entries) => entries,
             Err(err) => {
