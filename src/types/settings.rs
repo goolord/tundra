@@ -49,7 +49,7 @@ impl AllowedDirectories {
             eprintln!("Failed to serialize allowed directories");
             return;
         };
-        if let Err(err) = std::fs::write(path, bytes) {
+        if let Err(err) = crate::path_util::write_atomic(&path, &bytes) {
             eprintln!("Failed to write allowed directories: {err}");
         }
     }
@@ -93,12 +93,26 @@ fn try_resolve_path(path: &Path) -> Option<PathBuf> {
 }
 
 fn settings_file_path() -> Option<PathBuf> {
-    dirs::cache_dir().map(|mut cache_dir| {
-        cache_dir.push("tundra");
-        let _ = std::fs::create_dir_all(&cache_dir);
-        cache_dir.push("allowed_directories.bin");
-        cache_dir
-    })
+    let mut config_dir = dirs::config_dir()?;
+    config_dir.push("tundra");
+    let _ = std::fs::create_dir_all(&config_dir);
+    config_dir.push("allowed_directories.bin");
+    migrate_settings_from_cache(&config_dir);
+    Some(config_dir)
+}
+
+fn migrate_settings_from_cache(config_path: &Path) {
+    if config_path.exists() {
+        return;
+    }
+    let Some(mut cache_path) = dirs::cache_dir() else {
+        return;
+    };
+    cache_path.push("tundra");
+    cache_path.push("allowed_directories.bin");
+    if cache_path.exists() && std::fs::copy(&cache_path, config_path).is_ok() {
+        let _ = std::fs::remove_file(cache_path);
+    }
 }
 
 fn modal_button_style(theme: &theme::Theme, status: ButtonStatus, primary: bool) -> ButtonStyle {

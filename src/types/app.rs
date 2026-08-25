@@ -182,7 +182,7 @@ impl DirCache {
             eprintln!("Failed to serialize directory cache");
             return;
         };
-        if let Err(err) = std::fs::write(dir_cache, bytes) {
+        if let Err(err) = crate::path_util::write_atomic(&dir_cache, &bytes) {
             eprintln!("Failed to write directory cache: {err}");
         }
     }
@@ -238,7 +238,7 @@ impl MetadataCache {
             eprintln!("Failed to serialize metadata cache");
             return;
         };
-        if let Err(err) = std::fs::write(path, bytes) {
+        if let Err(err) = crate::path_util::write_atomic(&path, &bytes) {
             eprintln!("Failed to write metadata cache: {err}");
         }
     }
@@ -283,7 +283,7 @@ fn persist_cached_f32(name: &str, value: f32, label: &str) {
         eprintln!("Failed to serialize {label}");
         return;
     };
-    if let Err(err) = std::fs::write(path, bytes) {
+    if let Err(err) = crate::path_util::write_atomic(&path, &bytes) {
         eprintln!("Failed to write {label}: {err}");
     }
 }
@@ -874,6 +874,11 @@ impl App {
             self.bulk_auto_tag.set_error("That folder no longer exists.");
             return Task::none();
         }
+        if !self.allowed_directories.contains_path(&root) {
+            self.bulk_auto_tag
+                .set_error("Folder must be inside allowed directories.");
+            return Task::none();
+        }
 
         self.abort_bulk_scan();
         let generation = self.bulk_scan_generation;
@@ -1146,8 +1151,13 @@ impl App {
             Message::AutoTagFilePicked(path) => {
                 match path {
                     Some(candidate) if is_audio(&candidate) => {
-                        let existing = instrument_tag(&candidate);
-                        self.auto_tag.reset_for_target(Some(candidate), existing);
+                        if !self.allowed_directories.contains_path(&candidate) {
+                            self.auto_tag
+                                .set_error("File must be inside allowed directories.");
+                        } else {
+                            let existing = instrument_tag(&candidate);
+                            self.auto_tag.reset_for_target(Some(candidate), existing);
+                        }
                     }
                     Some(_) => {
                         self.auto_tag.set_error("Choose a FLAC, WAV, MP3, or OGG file.");
@@ -1162,6 +1172,11 @@ impl App {
                     self.auto_tag.set_error("Select an audio file first.");
                     return Task::none();
                 };
+                if !self.allowed_directories.contains_path(&path) {
+                    self.auto_tag
+                        .set_error("File must be inside allowed directories.");
+                    return Task::none();
+                }
                 if let Some(existing) = instrument_tag(&path) {
                     self.auto_tag.existing_instrument = Some(existing);
                     self.auto_tag.set_error(
@@ -1224,6 +1239,11 @@ impl App {
                     self.auto_tag.set_error("Select an audio file first.");
                     return Task::none();
                 };
+                if !self.allowed_directories.contains_path(&path) {
+                    self.auto_tag
+                        .set_error("File must be inside allowed directories.");
+                    return Task::none();
+                }
                 if !self.auto_tag.is_untagged() {
                     self.auto_tag.set_error(
                         "This file already has an instrument tag. Auto Tag only fills untagged files.",
@@ -1283,8 +1303,13 @@ impl App {
 
             Message::BulkAutoTagDirectoryPicked(path) => {
                 if let Some(dir) = path {
-                    self.bulk_auto_tag.root = Some(dir);
-                    self.bulk_auto_tag.error = None;
+                    if self.allowed_directories.contains_path(&dir) {
+                        self.bulk_auto_tag.root = Some(dir);
+                        self.bulk_auto_tag.error = None;
+                    } else {
+                        self.bulk_auto_tag
+                            .set_error("Folder must be inside allowed directories.");
+                    }
                 }
                 Task::none()
             }
@@ -1417,8 +1442,15 @@ impl App {
                 let progress = bulk_auto_tag::BulkScanProgress::new();
                 progress.set_applying(accepted);
                 self.bulk_scan_progress = Some(progress.clone());
+                let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                self.bulk_scan_cancel = Some(Arc::clone(&cancel));
                 Task::perform(
-                    async move { (generation, bulk_auto_tag::apply_items(&items, Some(&progress))) },
+                    async move {
+                        (
+                            generation,
+                            bulk_auto_tag::apply_items(&items, Some(&progress), &cancel),
+                        )
+                    },
                     |(generation, summary)| Message::BulkAutoTagApplyCompleted { generation, summary },
                 )
             }

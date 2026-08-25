@@ -1,3 +1,4 @@
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 /// Strip Windows extended-length `\\?\` / `\\?\UNC\` prefixes so paths work with
@@ -95,4 +96,51 @@ pub fn find_beside(
         }
     }
     None
+}
+
+pub fn sidecar(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(suffix);
+    path.with_file_name(name)
+}
+
+pub fn replace_file(from: &Path, to: &Path) -> io::Result<()> {
+    match std::fs::rename(from, to) {
+        Ok(()) => Ok(()),
+        Err(_) if to.exists() => replace_existing(from, to),
+        Err(err) => Err(err),
+    }
+}
+
+fn replace_existing(from: &Path, to: &Path) -> io::Result<()> {
+    let aside = sidecar(to, ".tundra-replace-old");
+    let _ = std::fs::remove_file(&aside);
+    std::fs::rename(to, &aside)?;
+    match std::fs::rename(from, to) {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&aside);
+            Ok(())
+        }
+        Err(err) => {
+            let _ = std::fs::rename(&aside, to);
+            Err(err)
+        }
+    }
+}
+
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = sidecar(path, ".tmp");
+    {
+        let mut file = std::fs::File::create(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+    }
+    let result = replace_file(&tmp, path);
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }

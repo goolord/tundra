@@ -98,7 +98,7 @@ impl ClassifyCache {
             eprintln!("Failed to serialize classify cache");
             return;
         };
-        if let Err(err) = std::fs::write(path, bytes) {
+        if let Err(err) = path_util::write_atomic(&path, &bytes) {
             eprintln!("Failed to write classify cache: {err}");
             return;
         }

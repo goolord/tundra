@@ -21,6 +21,9 @@ const MAX_COLUMNS_FACTOR: f32 = 4.0;
 const SAMPLE_POINTS_MIN_PX: f32 = 1.0;
 const PAN_STEP: f32 = 0.08;
 const TIME_MARKER_HEIGHT: f32 = 16.0;
+const AMPLITUDE_GUTTER: f32 = 36.0;
+const AMPLITUDE_PAD_TOP: f32 = 11.0;
+const AMPLITUDE_TICKS: [f32; 5] = [1.0, 0.5, 0.0, -0.5, -1.0];
 const MAX_OVERSCROLL: f32 = 0.14;
 const OVERSCROLL_SPRING: f32 = 0.78;
 const OVERSCROLL_STOP: f32 = 0.002;
@@ -252,7 +255,8 @@ impl WaveFormView {
 
     fn content_translate_x(&self, width: f32) -> f32 {
         let overscroll = self.overscroll.clamp(-MAX_OVERSCROLL, MAX_OVERSCROLL);
-        overscroll * width * 0.55
+        // Pan step is `-dx`, so visual shift is opposite the overscroll sign.
+        -overscroll * width * 0.55
     }
 
     fn content_transform_active(&self) -> bool {
@@ -332,6 +336,36 @@ pub struct WaveForm {
     pan_active: bool,
     cache: Cache,
     content_cache_key: Cell<(u32, u32, u32, u32)>,
+}
+
+#[derive(Clone, Copy)]
+struct PlotArea {
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+}
+
+impl PlotArea {
+    fn from_size(size: Size) -> Self {
+        let x = AMPLITUDE_GUTTER;
+        let y = AMPLITUDE_PAD_TOP;
+        Self {
+            x,
+            y,
+            width: (size.width - x).max(1.0),
+            height: (size.height - y - TIME_MARKER_HEIGHT).max(1.0),
+        }
+    }
+
+    fn size(self) -> Size {
+        Size::new(self.width, self.height)
+    }
+
+    fn amplitude_y(self, amplitude: f32) -> f32 {
+        let half = self.height / 2.0;
+        self.y + half - amplitude.clamp(-1.0, 1.0) * half
+    }
 }
 
 struct ColumnSample {
@@ -466,8 +500,8 @@ impl WaveForm {
         self.playback_position.as_ref().map(|position| position.progress())
     }
 
-    fn playhead_content_x(&self, view: WaveFormView, width: f32, progress: f64) -> Option<f32> {
-        if self.samples.is_empty() || width <= 0.0 {
+    fn playhead_content_x(&self, view: WaveFormView, plot_width: f32, progress: f64) -> Option<f32> {
+        if self.samples.is_empty() || plot_width <= 0.0 {
             return None;
         }
 
@@ -488,14 +522,14 @@ impl WaveForm {
             return None;
         }
 
-        let px_per_sample = width / visible as f32;
+        let px_per_sample = plot_width / visible as f32;
         let sample_pos = progress_frame.saturating_sub(start) as f32 - phase;
         Some(sample_pos * px_per_sample)
     }
 
-    fn playhead_screen_x(&self, view: WaveFormView, width: f32, progress: f64) -> Option<f32> {
-        let x = self.playhead_content_x(view, width, progress)?;
-        Some(self.map_content_x(view, width, x))
+    fn playhead_screen_x(&self, view: WaveFormView, plot: PlotArea, progress: f64) -> Option<f32> {
+        let x = self.playhead_content_x(view, plot.width, progress)?;
+        Some(self.map_content_x(view, plot.width, x) + plot.x)
     }
 
     fn stroke_playhead(frame: &mut Frame, x: f32, height: f32, accent: Color) {
@@ -516,8 +550,8 @@ impl WaveForm {
         );
     }
 
-    fn progress_at_x(&self, view: WaveFormView, width: f32, x: f32) -> Option<f64> {
-        if self.samples.is_empty() || width <= 0.0 {
+    fn progress_at_x(&self, view: WaveFormView, plot: PlotArea, x: f32) -> Option<f64> {
+        if self.samples.is_empty() || plot.width <= 0.0 {
             return None;
         }
 
@@ -536,8 +570,8 @@ impl WaveForm {
             return None;
         }
 
-        let px_per_sample = width / visible as f32;
-        let content_x = self.unmap_content_x(view, width, x);
+        let px_per_sample = plot.width / visible as f32;
+        let content_x = self.unmap_content_x(view, plot.width, x - plot.x);
         let sample_pos = (content_x / px_per_sample + phase).clamp(0.0, visible as f32);
         let progress_frame = (start as f32 + sample_pos).round() as usize;
         Some(progress_frame.min(frame_count.saturating_sub(1)) as f64 / frame_count as f64)
@@ -566,7 +600,8 @@ impl WaveForm {
         progress: f64,
         view: WaveFormView,
     ) -> Option<Geometry> {
-        let x = self.playhead_screen_x(view, size.width, progress)?;
+        let plot = PlotArea::from_size(size);
+        let x = self.playhead_screen_x(view, plot, progress)?;
         let accent = theme.extended_palette().primary.base.color;
         let mut frame = Frame::new(renderer, size);
         Self::stroke_playhead(&mut frame, x, size.height, accent);
@@ -686,9 +721,84 @@ impl WaveForm {
         frame.fill(&background, palette.background);
     }
 
-    fn draw_waveform_content(&self, frame: &mut Frame, theme: &Theme, view: WaveFormView) {
+    fn format_amplitude(value: f32) -> String {
+        if value.abs() < 1e-6 {
+            "0".to_string()
+        } else {
+            format!("{value:.1}")
+        }
+    }
+
+    fn draw_amplitude_axis(&self, frame: &mut Frame, theme: &Theme, size: Size) {
         let palette = WaveformPalette::from_theme(theme);
-        let size = frame.size();
+        let plot = PlotArea::from_size(size);
+        if plot.width <= 0.0 || plot.height <= 0.0 {
+            return;
+        }
+
+        for &amplitude in &AMPLITUDE_TICKS {
+            let y = plot.amplitude_y(amplitude);
+            let is_zero = amplitude.abs() < 1e-6;
+            let grid = Path::line(
+                Point::new(plot.x, y),
+                Point::new(plot.x + plot.width, y),
+            );
+            frame.stroke(
+                &grid,
+                Stroke::default()
+                    .with_color(if is_zero {
+                        palette.axis
+                    } else {
+                        palette.marker.scale_alpha(0.22)
+                    })
+                    .with_width(1.0),
+            );
+
+            let tick = Path::line(
+                Point::new(plot.x - 4.0, y),
+                Point::new(plot.x + 4.0, y),
+            );
+            frame.stroke(
+                &tick,
+                Stroke::default()
+                    .with_color(palette.marker)
+                    .with_width(1.0),
+            );
+
+            let (align_y, label_y) = if amplitude >= 0.999 {
+                (alignment::Vertical::Top, plot.y)
+            } else if amplitude <= -0.999 {
+                (alignment::Vertical::Bottom, plot.y + plot.height)
+            } else {
+                (alignment::Vertical::Center, y)
+            };
+            frame.fill_text(Text {
+                content: Self::format_amplitude(amplitude),
+                position: Point::new(plot.x - 6.0, label_y),
+                color: palette.marker_label,
+                size: Pixels(10.0),
+                align_x: iced::alignment::Horizontal::Right.into(),
+                align_y,
+                ..Default::default()
+            });
+        }
+    }
+
+    fn with_plot_origin(frame: &mut Frame, plot: PlotArea, draw: impl FnOnce(&mut Frame)) {
+        frame.push_transform();
+        frame.translate(Vector::new(plot.x, plot.y));
+        draw(frame);
+        frame.pop_transform();
+    }
+
+    fn draw_waveform_content(
+        &self,
+        frame: &mut Frame,
+        theme: &Theme,
+        view: WaveFormView,
+        size: Size,
+    ) {
+        let palette = WaveformPalette::from_theme(theme);
         let center = size.height / 2.0;
 
         if self.samples.is_empty() || size.width <= 0.0 || size.height <= 0.0 {
@@ -700,17 +810,6 @@ impl WaveForm {
         if visible_count == 0 {
             return;
         }
-
-        let axis = Path::line(
-            Point::new(0.0, center),
-            Point::new(size.width, center),
-        );
-        frame.stroke(
-            &axis,
-            Stroke::default()
-                .with_color(palette.axis)
-                .with_width(1.0),
-        );
 
         if view.sample_point_mode(size.width, visible_count) {
             self.draw_sample_points(frame, &palette, size, start, end, phase, center);
@@ -929,8 +1028,8 @@ impl WaveForm {
         let visible_secs = visible_samples as f64 / sample_rate;
         let major_step = Self::nice_time_step(visible_secs);
         let end_secs = start_secs + visible_secs;
-        let label_y = size.height - 2.0;
-        let line_bottom = size.height - TIME_MARKER_HEIGHT;
+        let label_y = size.height + TIME_MARKER_HEIGHT - 2.0;
+        let line_bottom = size.height;
         let sample_point_mode = view.sample_point_mode(size.width, visible_samples);
 
         let tick_x = |tick_secs: f64| -> f32 {
@@ -1026,12 +1125,13 @@ impl WaveForm {
                     view.apply_pan_delta(pan_delta * PAN_STEP);
                     return true;
                 }
-                if bounds.width <= 0.0 {
+                let plot = PlotArea::from_size(bounds.size());
+                if plot.width <= 0.0 {
                     return false;
                 }
                 let anchor_x = cursor
                     .position_in(bounds)
-                    .map(|point| (point.x / bounds.width).clamp(0.0, 1.0))
+                    .map(|point| ((point.x - plot.x) / plot.width).clamp(0.0, 1.0))
                     .unwrap_or(0.5);
                 let lines = WaveFormView::wheel_lines(*delta);
                 view.accumulate_wheel(lines, anchor_x, self.samples.len(), &mut state.wheel_lines)
@@ -1056,47 +1156,58 @@ impl Program<Message> for WaveForm {
         let progress = self.playback_progress();
         let view = state.last_pan_view.unwrap_or(self.view);
         let live = state.last_pan_view.is_some() || view.content_transform_active();
-        let clip_bounds = Rectangle::new(Point::ORIGIN, size);
+
+        let plot = PlotArea::from_size(size);
+        let plot_size = plot.size();
+        let plot_clip = Rectangle::new(
+            Point::new(plot.x, plot.y),
+            Size::new(plot.width, plot.height + TIME_MARKER_HEIGHT),
+        );
 
         let mut bg_frame = Frame::new(renderer, size);
         self.draw_background(&mut bg_frame, theme, size);
+        self.draw_amplitude_axis(&mut bg_frame, theme, size);
         let mut layers = vec![bg_frame.into_geometry()];
 
         if live {
             let mut frame = Frame::new(renderer, size);
-            frame.with_clip(clip_bounds, |frame| {
-                let draw_content = |frame: &mut Frame| {
-                    self.draw_waveform_content(frame, theme, view);
-                };
-                if view.content_transform_active() {
-                    Self::with_content_transform(
-                        frame,
-                        view,
-                        size.width,
-                        size.height,
-                        |frame| {
-                            draw_content(frame);
-                            if let Some(progress) = progress {
-                                self.draw_playhead_on_frame(
-                                    frame,
-                                    theme,
-                                    size,
-                                    progress,
-                                    view,
-                                );
-                            }
-                        },
-                    );
-                } else {
-                    draw_content(frame);
-                }
+            frame.with_clip(plot_clip, |frame| {
+                Self::with_plot_origin(frame, plot, |frame| {
+                    let draw_content = |frame: &mut Frame| {
+                        self.draw_waveform_content(frame, theme, view, plot_size);
+                    };
+                    if view.content_transform_active() {
+                        Self::with_content_transform(
+                            frame,
+                            view,
+                            plot.width,
+                            plot.height,
+                            |frame| {
+                                draw_content(frame);
+                                if let Some(progress) = progress {
+                                    self.draw_playhead_on_frame(
+                                        frame,
+                                        theme,
+                                        plot_size,
+                                        progress,
+                                        view,
+                                    );
+                                }
+                            },
+                        );
+                    } else {
+                        draw_content(frame);
+                    }
+                });
             });
             layers.push(frame.into_geometry());
         } else {
             self.sync_content_cache(theme);
             layers.push(self.cache.draw(renderer, size, |frame| {
-                frame.with_clip(clip_bounds, |frame| {
-                    self.draw_waveform_content(frame, theme, view);
+                frame.with_clip(plot_clip, |frame| {
+                    Self::with_plot_origin(frame, plot, |frame| {
+                        self.draw_waveform_content(frame, theme, view, plot_size);
+                    });
                 });
             }));
         }
@@ -1149,7 +1260,7 @@ impl Program<Message> for WaveForm {
                 return Some(Action::publish(Message::WaveformPanStarted).and_capture());
             } else if let Some(progress) = self.progress_at_x(
                 state.last_pan_view.unwrap_or(self.view),
-                bounds.width,
+                PlotArea::from_size(bounds.size()),
                 position.x,
             ) {
                 return Some(Action::publish(Message::WaveformSeek(progress)).and_capture());
@@ -1163,7 +1274,8 @@ impl Program<Message> for WaveForm {
         {
             let visible = self.view.visible_fraction();
             let last_x = state.last_pan_x.unwrap_or(position.x);
-            let step = -(position.x - last_x) / bounds.width * visible;
+            let plot = PlotArea::from_size(bounds.size());
+            let step = -(position.x - last_x) / plot.width * visible;
             state.last_pan_x = Some(position.x);
 
             let mut view = state.last_pan_view.unwrap_or(WaveFormView {
