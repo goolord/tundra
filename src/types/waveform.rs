@@ -472,18 +472,92 @@ impl WaveForm {
         } else {
             10.0
         };
-        nice * magnitude
+        (nice * magnitude).max(0.001)
     }
 
-    fn format_time(secs: f64) -> String {
-        let total = secs.max(0.0).round() as u64;
-        let hours = total / 3600;
-        let minutes = (total % 3600) / 60;
-        let seconds = total % 60;
-        if hours > 0 {
-            format!("{hours}:{minutes:02}:{seconds:02}")
+    fn minor_time_step(major_step: f64) -> Option<f64> {
+        if major_step >= 1.0 {
+            Some(0.1)
+        } else if major_step >= 0.2 {
+            Some(0.05)
+        } else if major_step >= 0.05 {
+            Some(0.01)
         } else {
-            format!("{minutes}:{seconds:02}")
+            None
+        }
+    }
+
+    fn format_time(secs: f64, step: f64) -> String {
+        let secs = secs.max(0.0);
+        let decimals = if step >= 1.0 {
+            0
+        } else if step >= 0.1 {
+            1
+        } else if step >= 0.01 {
+            2
+        } else {
+            3
+        };
+
+        let hours = (secs / 3600.0).floor() as u32;
+        let minutes = ((secs % 3600.0) / 60.0).floor() as u32;
+        let seconds = secs % 60.0;
+
+        if hours > 0 {
+            return match decimals {
+                0 => format!("{hours}:{minutes:02}:{seconds:02.0}"),
+                1 => format!("{hours}:{minutes:02}:{seconds:04.1}"),
+                2 => format!("{hours}:{minutes:02}:{seconds:05.2}"),
+                _ => format!("{hours}:{minutes:02}:{seconds:06.3}"),
+            };
+        }
+        if minutes > 0 {
+            return match decimals {
+                0 => format!("{minutes}:{seconds:02.0}"),
+                1 => format!("{minutes}:{seconds:04.1}"),
+                2 => format!("{minutes}:{seconds:05.2}"),
+                _ => format!("{minutes}:{seconds:06.3}"),
+            };
+        }
+        match decimals {
+            0 => format!("{seconds:.0}s"),
+            1 => format!("{seconds:.1}s"),
+            2 => format!("{seconds:.2}s"),
+            _ => format!("{seconds:.3}s"),
+        }
+    }
+
+    fn draw_time_tick(
+        frame: &mut Frame,
+        palette: &WaveformPalette,
+        x: f32,
+        line_bottom: f32,
+        label_y: f32,
+        label: Option<&str>,
+        minor: bool,
+    ) {
+        let line = Path::line(Point::new(x, 0.0), Point::new(x, line_bottom));
+        frame.stroke(
+            &line,
+            Stroke::default()
+                .with_color(if minor {
+                    palette.marker.scale_alpha(0.22)
+                } else {
+                    palette.marker
+                })
+                .with_width(1.0),
+        );
+
+        if let Some(text) = label {
+            frame.fill_text(Text {
+                content: text.to_owned(),
+                position: Point::new(x, label_y),
+                color: palette.marker_label,
+                size: Pixels(10.0),
+                align_x: iced::alignment::Horizontal::Center.into(),
+                align_y: alignment::Vertical::Bottom,
+                ..Default::default()
+            });
         }
     }
 
@@ -502,37 +576,48 @@ impl WaveForm {
         let start_secs = start as f64 / sample_rate;
         let visible_secs = visible_samples as f64 / sample_rate;
         let step = Self::nice_time_step(visible_secs);
-        let mut tick = (start_secs / step).ceil() * step;
         let end_secs = start_secs + visible_secs;
         let label_y = size.height - 2.0;
         let line_bottom = size.height - TIME_MARKER_HEIGHT;
 
+        if let Some(minor_step) = Self::minor_time_step(step) {
+            let mut tick = ((start_secs / minor_step).ceil() * minor_step).max(0.0);
+            while tick <= end_secs + minor_step * 0.001 {
+                let remainder = tick % step;
+                let on_major =
+                    remainder < minor_step * 0.05 || (step - remainder) < minor_step * 0.05;
+                if !on_major {
+                    let fraction = ((tick - start_secs) / visible_secs) as f32;
+                    if (0.0..=1.0).contains(&fraction) {
+                        Self::draw_time_tick(
+                            frame,
+                            palette,
+                            fraction * size.width,
+                            line_bottom,
+                            label_y,
+                            None,
+                            true,
+                        );
+                    }
+                }
+                tick += minor_step;
+            }
+        }
+
+        let mut tick = (start_secs / step).ceil() * step;
         while tick <= end_secs + step * 0.001 {
             let fraction = ((tick - start_secs) / visible_secs) as f32;
-            if !(0.0..=1.0).contains(&fraction) {
-                tick += step;
-                continue;
+            if (0.0..=1.0).contains(&fraction) {
+                Self::draw_time_tick(
+                    frame,
+                    palette,
+                    fraction * size.width,
+                    line_bottom,
+                    label_y,
+                    Some(&Self::format_time(tick, step)),
+                    false,
+                );
             }
-
-            let x = fraction * size.width;
-            let line = Path::line(Point::new(x, 0.0), Point::new(x, line_bottom));
-            frame.stroke(
-                &line,
-                Stroke::default()
-                    .with_color(palette.marker)
-                    .with_width(1.0),
-            );
-
-            frame.fill_text(Text {
-                content: Self::format_time(tick),
-                position: Point::new(x, label_y),
-                color: palette.marker_label,
-                size: Pixels(10.0),
-                align_x: iced::alignment::Horizontal::Center.into(),
-                align_y: alignment::Vertical::Bottom,
-                ..Default::default()
-            });
-
             tick += step;
         }
     }
@@ -566,7 +651,7 @@ impl WaveForm {
                         return false;
                     }
                     let (x, y) = Self::scroll_lines(*delta);
-                    let pan_delta = if x.abs() > y.abs() { -x } else { y };
+                    let pan_delta = if x.abs() > y.abs() { -x } else { -y };
                     if pan_delta == 0.0 {
                         return false;
                     }
