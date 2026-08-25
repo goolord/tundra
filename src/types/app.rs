@@ -1,7 +1,7 @@
 use super::*;
 use super::common::debounce;
 use crate::drag_out::NativeDrag;
-use crate::metadata::file_matches_search;
+use crate::metadata::{file_matches_search, index_paths, CachedMetadata, MetadataLookup, SearchResult};
 use futures::future::{AbortHandle, Abortable};
 use futures::*;
 use fuzzy_matcher::skim::SkimMatcherV2;
@@ -87,7 +87,7 @@ pub struct App {
 
 pub struct DirCache(HashMap<PathBuf, Vec<PathBuf>>);
 
-pub struct MetadataCache(HashMap<PathBuf, String>);
+pub struct MetadataCache(HashMap<PathBuf, CachedMetadata>);
 
 impl DirCache {
     fn new() -> DirCache {
@@ -159,13 +159,13 @@ impl MetadataCache {
     }
 
     fn get_path() -> Option<std::path::PathBuf> {
-        cache_file("metadata_cache.bin")
+        cache_file("metadata_cache_v2.bin")
     }
 
     fn load() -> Self {
         match MetadataCache::get_path() {
             Some(path) => match std::fs::read(path) {
-                Ok(bytes) => bincode::deserialize::<HashMap<PathBuf, String>>(&bytes)
+                Ok(bytes) => bincode::deserialize::<HashMap<PathBuf, CachedMetadata>>(&bytes)
                     .map(MetadataCache)
                     .unwrap_or_else(|_| MetadataCache::new()),
                 Err(_) => MetadataCache::new(),
@@ -187,7 +187,11 @@ impl MetadataCache {
         }
     }
 
-    fn merge(&mut self, entries: HashMap<PathBuf, String>) {
+    fn snapshot(&self) -> Arc<HashMap<PathBuf, CachedMetadata>> {
+        Arc::new(self.0.clone())
+    }
+
+    fn merge(&mut self, entries: HashMap<PathBuf, CachedMetadata>) {
         if entries.is_empty() {
             return;
         }
@@ -677,10 +681,11 @@ impl App {
                         if search_str.len() > 2 {
                             let matcher = SkimMatcherV2::default();
                             let children_clone = children.clone();
-                            let mut metadata = self.metadata_cache.0.clone();
+                            let metadata = self.metadata_cache.snapshot();
                             let file_list = Abortable::new(
                                 async move {
                                     debounce(std::time::Duration::from_millis(200)).await;
+                                    let mut lookup = MetadataLookup::new(metadata);
                                     let paths: Vec<PathBuf> = children_clone
                                         .iter()
                                         .filter(|path| {
@@ -688,12 +693,15 @@ impl App {
                                                 &matcher,
                                                 path,
                                                 &search_str,
-                                                &mut metadata,
+                                                &mut lookup,
                                             )
                                         })
                                         .cloned()
                                         .collect();
-                                    (paths, metadata)
+                                    SearchResult {
+                                        paths,
+                                        new_metadata: lookup.into_new_entries(),
+                                    }
                                 },
                                 abort_reg,
                             );
@@ -713,10 +721,11 @@ impl App {
                         let current_dir = self.file_selector.current_dir.clone();
                         if search_str.len() > 2 {
                             let matcher = SkimMatcherV2::default();
-                            let mut metadata = self.metadata_cache.0.clone();
+                            let metadata = self.metadata_cache.snapshot();
                             let file_list = Abortable::new(
                                 async move {
                                     debounce(std::time::Duration::from_millis(300)).await;
+                                    let mut lookup = MetadataLookup::new(metadata);
                                     let paths: Vec<PathBuf> = WalkDir::new(&current_dir)
                                         .max_depth(100)
                                         .max_open(100)
@@ -732,11 +741,14 @@ impl App {
                                                 &matcher,
                                                 path,
                                                 &search_str,
-                                                &mut metadata,
+                                                &mut lookup,
                                             )
                                         })
                                         .collect();
-                                    (paths, metadata)
+                                    SearchResult {
+                                        paths,
+                                        new_metadata: lookup.into_new_entries(),
+                                    }
                                 },
                                 abort_reg,
                             );
@@ -758,13 +770,14 @@ impl App {
             }
 
             Message::SearchCompleted(file_list_res) => {
-                if let Ok((file_list, metadata)) = file_list_res {
-                    self.file_selector.file_list = file_list
+                if let Ok(result) = file_list_res {
+                    self.file_selector.file_list = result
+                        .paths
                         .iter()
                         .map(|x| FileButton::new(x.to_path_buf(), &self.file_selector.current_dir))
                         .collect();
                     self.file_selector.list_error = None;
-                    self.metadata_cache.merge(metadata);
+                    self.metadata_cache.merge(result.new_metadata);
                 }
                 Task::none()
             }
@@ -789,8 +802,17 @@ impl App {
             }
 
             Message::InsertDircache((parent_dir, children)) => {
-                self.dir_cache.insert(parent_dir, children);
+                self.dir_cache.insert(parent_dir, children.clone());
                 self.dir_cache.persist();
+                let metadata = self.metadata_cache.snapshot();
+                Task::perform(
+                    async move { index_paths(&children, metadata) },
+                    Message::MetadataIndexed,
+                )
+            }
+
+            Message::MetadataIndexed(new_metadata) => {
+                self.metadata_cache.merge(new_metadata);
                 Task::none()
             }
 

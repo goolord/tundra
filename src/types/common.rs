@@ -1,5 +1,6 @@
 use futures::channel::mpsc::UnboundedReceiver;
 use futures::future::Aborted;
+use crate::metadata::SearchResult;
 use iced::widget::button::{Status as ButtonStatus, Style as ButtonStyle};
 use iced::widget::{button, column, text, Button};
 use iced::{Border, Element, Length, Padding, Shadow, Theme, theme};
@@ -68,7 +69,8 @@ pub enum Message {
     ChangeDirectory(PathBuf),
     Search(String),
     SearchFocused(bool),
-    SearchCompleted(Result<(Vec<PathBuf>, HashMap<PathBuf, String>), Aborted>),
+    SearchCompleted(Result<SearchResult, Aborted>),
+    MetadataIndexed(std::collections::HashMap<std::path::PathBuf, crate::metadata::CachedMetadata>),
     InsertDircache((PathBuf, Vec<PathBuf>)),
     InvalidateDircache,
     Seek(f64),

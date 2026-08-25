@@ -15,10 +15,10 @@ use std::sync::Arc;
 use crate::source::arc_samples::PlaybackPosition;
 
 const MIN_ZOOM: f32 = 1.0;
-const MAX_ZOOM: f32 = 512.0;
+const MAX_ZOOM: f32 = 4096.0;
 const ZOOM_FACTOR: f32 = 1.25;
 const MAX_COLUMNS_FACTOR: f32 = 4.0;
-const SAMPLE_POINTS_MIN_PX: f32 = 1.25;
+const SAMPLE_POINTS_MIN_PX: f32 = 1.0;
 const PAN_STEP: f32 = 0.08;
 const TIME_MARKER_HEIGHT: f32 = 16.0;
 const MAX_OVERSCROLL: f32 = 0.14;
@@ -536,19 +536,19 @@ impl WaveForm {
             .clamp(0.0, 1.0)
     }
 
-    fn columns(&self, view: WaveFormView, size: Size) -> (f32, Vec<ColumnSample>) {
-        let height = size.height;
-        let width = size.width;
+    fn columns_from_window(
+        &self,
+        view: WaveFormView,
+        width: f32,
+        height: f32,
+        start: usize,
+        end: usize,
+        phase: f32,
+    ) -> Vec<ColumnSample> {
         let center = height / 2.0;
-
-        if self.samples.is_empty() || width <= 0.0 || height <= 0.0 {
-            return (center, Vec::new());
-        }
-
-        let (start, end, phase) = view.sample_window(self.samples.len());
         let visible_count = end.saturating_sub(start);
         if visible_count == 0 {
-            return (center, Vec::new());
+            return Vec::new();
         }
 
         let samples_per_col = view.samples_per_column(width, visible_count);
@@ -574,7 +574,7 @@ impl WaveForm {
             });
         }
 
-        (center, out)
+        out
     }
 
     fn envelope_path(columns: &[ColumnSample]) -> Path {
@@ -662,7 +662,7 @@ impl WaveForm {
         if view.sample_point_mode(size.width, visible_count) {
             self.draw_sample_points(frame, &palette, size, start, end, phase, center);
         } else {
-            let (_, columns) = self.columns(view, size);
+            let columns = self.columns_from_window(view, size.width, size.height, start, end, phase);
             if columns.is_empty() {
                 return;
             }
@@ -700,12 +700,20 @@ impl WaveForm {
         let px_per_sample = size.width / visible_count as f32;
         let x_shift = -phase * px_per_sample;
         let slice = &self.samples[start..end];
-        let point_radius = (px_per_sample * 0.35).clamp(0.6, 2.5);
-        let stroke = Stroke::default()
+
+        let stem_stroke = Stroke::default()
             .with_color(palette.stroke.scale_alpha(0.55))
             .with_width(1.0)
             .with_line_cap(LineCap::Round);
-        let fill = palette.stroke.scale_alpha(0.92);
+        let trace_stroke = Stroke::default()
+            .with_color(palette.stroke.scale_alpha(0.92))
+            .with_width(1.25)
+            .with_line_cap(LineCap::Round)
+            .with_line_join(LineJoin::Round);
+
+        let mut stem_builder = path::Builder::new();
+        let mut trace_builder = path::Builder::new();
+        let mut trace_started = false;
 
         for (index, sample) in slice.iter().enumerate() {
             let x = (index as f32 + 0.5) * px_per_sample + x_shift;
@@ -713,14 +721,21 @@ impl WaveForm {
             let y = center - sample * center;
 
             if (y - center).abs() > 0.35 {
-                let line = Path::line(Point::new(x, center), Point::new(x, y));
-                frame.stroke(&line, stroke);
+                stem_builder.move_to(Point::new(x, center));
+                stem_builder.line_to(Point::new(x, y));
             }
 
-            frame.fill(
-                &Path::circle(Point::new(x, y), point_radius),
-                fill,
-            );
+            if trace_started {
+                trace_builder.line_to(Point::new(x, y));
+            } else {
+                trace_builder.move_to(Point::new(x, y));
+                trace_started = true;
+            }
+        }
+
+        if trace_started {
+            frame.stroke(&stem_builder.build(), stem_stroke);
+            frame.stroke(&trace_builder.build(), trace_stroke);
         }
     }
 
