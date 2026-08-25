@@ -6,6 +6,7 @@ Fast sample browser GUI built with [iced](https://github.com/iced-rs/iced).
 
 - Rust 1.85+ (edition 2024)
 - Git LFS (for SVG icons in `resources/`)
+- Linux: GTK 3 (for the folder picker and X11 drag-out support via `rfd` / `x11rb`)
 
 ## Run
 

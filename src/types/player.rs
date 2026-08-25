@@ -8,12 +8,11 @@ use futures::channel::mpsc::UnboundedReceiver;
 use futures::channel::mpsc::UnboundedSender;
 use futures::executor::block_on;
 use futures::StreamExt;
-use iced::widget::button::{Status as ButtonStatus, Style as ButtonStyle};
 use iced::widget::{
-    button, column, mouse_area, row, text, Button, Canvas, Column, Container, Row, Slider,
-    Space, Svg, Text,
+    button, mouse_area, row, text, Button, Canvas, Column, Container, Row, Slider,
+    Space, Svg,
 };
-use iced::{Border, Element, Length, Padding, Shadow, Theme, theme};
+use iced::{Element, Length};
 use iced_aw::ContextMenu;
 use std::path::PathBuf;
 use rodio::Source;
@@ -25,54 +24,11 @@ use std::thread;
 
 const MAX_AUDIO_BYTES: u64 = 100 * 1024 * 1024;
 
-fn context_menu_button<'a>(label: &'a str, message: Message) -> Button<'a, Message> {
-    button(
-        text(label)
-            .size(14)
-            .width(Length::Fill)
-            .align_x(iced::alignment::Horizontal::Left),
-    )
-    .width(Length::Fill)
-    .padding([4, 12])
-    .style(|theme: &Theme, status| {
-        let palette = theme.extended_palette();
-        let base = ButtonStyle {
-            text_color: palette.background.base.text,
-            border: Border::default(),
-            shadow: Shadow::default(),
-            ..ButtonStyle::default()
-        };
-        match status {
-            ButtonStatus::Active | ButtonStatus::Disabled => {
-                base.with_background(palette.background.base.color)
-            }
-            ButtonStatus::Hovered => {
-                base.with_background(palette.primary.weak.color.scale_alpha(0.35))
-            }
-            ButtonStatus::Pressed => {
-                base.with_background(palette.primary.weak.color.scale_alpha(0.55))
-            }
-        }
-    })
-    .on_press(message)
-}
-
-fn waveform_context_menu_style(
-    theme: &theme::Theme,
-    _status: iced_aw::style::Status,
-) -> iced_aw::style::context_menu::Style {
-    let palette = theme.extended_palette();
-    iced_aw::style::context_menu::Style {
-        background: palette.background.base.color.into(),
-    }
-}
-
 pub struct Player {
     pub waveform: Option<WaveForm>,
     pub current_file: Option<PathBuf>,
     pub controls: Controls,
     cmd_sender: UnboundedSender<PlayerCommand>,
-    pub error: Option<String>,
 }
 
 enum PlayerCommand {
@@ -208,7 +164,6 @@ impl Player {
                     scrubbing: false,
                 },
                 cmd_sender,
-                error: None,
             },
             msg_receiver,
         )
@@ -226,7 +181,7 @@ impl Player {
                     button(text("+").size(16))
                         .padding([2, 8])
                         .on_press(Message::WaveformZoomIn),
-                    text("Click to seek · scroll to zoom · Shift+scroll to pan")
+                    text("Click to seek · scroll to zoom · Shift+scroll/drag to pan")
                         .size(11)
                         .color(iced::Color::from_rgb(0.55, 0.58, 0.62)),
                 ]
@@ -247,20 +202,13 @@ impl Player {
                     .spacing(4);
 
                 ContextMenu::new(underlay, || {
-                    column![
-                        context_menu_button("Copy", Message::WaveformCopyName),
-                        context_menu_button("Copy full path", Message::WaveformCopyPath),
-                        context_menu_button(
-                            file_manager_label(),
-                            Message::WaveformRevealInFileManager,
-                        ),
-                    ]
-                    .spacing(2)
-                    .padding(Padding::from([4, 0]))
-                    .width(220)
-                    .into()
+                    file_context_menu(
+                        Message::WaveformCopyName,
+                        Message::WaveformCopyPath,
+                        Message::WaveformRevealInFileManager,
+                    )
                 })
-                .style(waveform_context_menu_style)
+                .style(context_menu_style)
                 .into()
             }
             None => Space::new()
@@ -279,22 +227,6 @@ impl Player {
                     .padding(2),
             );
 
-        if let Some(error) = &self.error {
-            column = column.push(
-                Container::new(
-                    Row::new()
-                        .push(Text::new(error).size(14))
-                        .push(
-                            Button::new(Text::new("Dismiss"))
-                                .on_press(Message::DismissError),
-                        )
-                        .spacing(8),
-                )
-                .padding(4)
-                .width(Length::Fill),
-            );
-        }
-
         column = column.push(Controls::view(&self.controls));
         Container::new(column)
             .width(Length::Fill)
@@ -306,7 +238,6 @@ impl Player {
     pub fn play_file(&mut self, file_path: &Path) -> Result<(), String> {
         self.stop();
         let mut loaded = load_audio(file_path)?;
-        self.error = None;
 
         let total_frames = loaded.playback.total_frames;
         let playback_position = PlaybackPosition::new(total_frames);
@@ -393,7 +324,7 @@ impl Player {
         true
     }
 
-    pub fn set_error(&mut self, message: String) {
+    pub fn reset_on_error(&mut self) {
         send_command(&self.cmd_sender, PlayerCommand::Stop);
         self.controls.is_playing.store(false, Ordering::SeqCst);
         if let Some(position) = &self.controls.playback_position {
@@ -404,7 +335,6 @@ impl Player {
         self.controls.playback_position = None;
         self.current_file = None;
         self.waveform = None;
-        self.error = Some(message);
     }
 
     pub fn clear_waveform(&mut self) {

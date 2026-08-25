@@ -8,7 +8,7 @@ use iced::border::Radius;
 use iced::keyboard::Modifiers;
 use iced::alignment;
 use iced::widget::canvas::Text;
-use iced::{Color, Pixels, Point, Rectangle, Renderer, Size, Theme};
+use iced::{Color, Pixels, Point, Rectangle, Renderer, Size, Theme, Vector};
 use std::sync::Arc;
 
 use crate::source::arc_samples::PlaybackPosition;
@@ -19,11 +19,15 @@ const ZOOM_FACTOR: f32 = 1.25;
 const MAX_COLUMNS_FACTOR: f32 = 4.0;
 const PAN_STEP: f32 = 0.08;
 const TIME_MARKER_HEIGHT: f32 = 16.0;
+const MAX_OVERSCROLL: f32 = 0.14;
+const OVERSCROLL_SPRING: f32 = 0.78;
+const OVERSCROLL_STOP: f32 = 0.002;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WaveFormView {
     pub zoom: f32,
     pub offset: f32,
+    pub overscroll: f32,
 }
 
 impl Default for WaveFormView {
@@ -31,6 +35,7 @@ impl Default for WaveFormView {
         Self {
             zoom: 1.0,
             offset: 0.0,
+            overscroll: 0.0,
         }
     }
 }
@@ -57,19 +62,59 @@ impl WaveFormView {
     }
 
     pub fn pan(&mut self, delta: f32) {
-        if self.zoom <= 1.0 {
-            return;
+        self.apply_pan_delta(delta * self.visible_fraction());
+    }
+
+    pub fn apply_pan_delta(&mut self, offset_delta: f32) {
+        let visible = self.visible_fraction();
+        let max = self.max_offset();
+        let target = self.offset + offset_delta;
+
+        if target < 0.0 {
+            self.offset = 0.0;
+            let overflow = -target / visible.max(1e-6);
+            self.overscroll = Self::rubber_band(self.overscroll, -overflow * 0.18);
+        } else if target > max {
+            self.offset = max;
+            let overflow = (target - max) / visible.max(1e-6);
+            self.overscroll = Self::rubber_band(self.overscroll, overflow * 0.18);
+        } else {
+            self.offset = target;
+            if self.overscroll != 0.0
+                && offset_delta.signum() as i8 != self.overscroll.signum() as i8
+            {
+                self.overscroll =
+                    Self::rubber_band(self.overscroll, offset_delta.signum() * 0.03);
+            }
         }
-        self.offset = (self.offset + delta * self.visible_fraction()).clamp(0.0, self.max_offset());
+    }
+
+    pub fn spring_overscroll(&mut self) -> bool {
+        if self.overscroll.abs() < OVERSCROLL_STOP {
+            self.overscroll = 0.0;
+            return false;
+        }
+        self.overscroll *= OVERSCROLL_SPRING;
+        true
+    }
+
+    pub fn overscroll_active(&self) -> bool {
+        self.overscroll.abs() > OVERSCROLL_STOP
+    }
+
+    fn rubber_band(current: f32, additional: f32) -> f32 {
+        let resistance = 1.0 + (current.abs() / MAX_OVERSCROLL) * 2.5;
+        (current + additional / resistance).clamp(-MAX_OVERSCROLL, MAX_OVERSCROLL)
     }
 
     fn apply_zoom(&mut self, factor: f32) {
         let center = self.center_fraction();
         self.zoom = (self.zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
         self.offset = (center - self.visible_fraction() / 2.0).clamp(0.0, self.max_offset());
+        self.overscroll = 0.0;
     }
 
-    fn visible_fraction(&self) -> f32 {
+    pub(crate) fn visible_fraction(&self) -> f32 {
         if self.zoom >= 1.0 {
             1.0 / self.zoom
         } else {
@@ -77,7 +122,7 @@ impl WaveFormView {
         }
     }
 
-    fn max_offset(&self) -> f32 {
+    pub(crate) fn max_offset(&self) -> f32 {
         (1.0 - self.visible_fraction()).max(0.0)
     }
 
@@ -138,12 +183,17 @@ impl WaveFormView {
     }
 }
 
-pub struct WaveFormState;
+#[derive(Default)]
+pub struct WaveFormState {
+    pan_anchor: Option<PanAnchor>,
+    last_pan_view: Option<WaveFormView>,
+}
 
-impl Default for WaveFormState {
-    fn default() -> Self {
-        WaveFormState
-    }
+#[derive(Clone, Copy)]
+struct PanAnchor {
+    cursor_x: f32,
+    view_offset: f32,
+    overscroll: f32,
 }
 
 pub struct WaveForm {
@@ -153,6 +203,7 @@ pub struct WaveForm {
     playback_position: Option<Arc<PlaybackPosition>>,
     scrub_progress: Option<f64>,
     modifiers: Modifiers,
+    pan_active: bool,
     cache: Cache,
 }
 
@@ -195,6 +246,7 @@ impl WaveForm {
             playback_position: None,
             scrub_progress: None,
             modifiers: Modifiers::default(),
+            pan_active: false,
             cache: Cache::new(),
         }
     }
@@ -215,6 +267,33 @@ impl WaveForm {
 
     pub fn set_modifiers(&mut self, modifiers: Modifiers) {
         self.modifiers = modifiers;
+    }
+
+    pub fn set_pan_active(&mut self, active: bool) {
+        self.pan_active = active;
+    }
+
+    pub fn pan_active(&self) -> bool {
+        self.pan_active
+    }
+
+    fn with_overscroll_transform(
+        frame: &mut Frame,
+        overscroll: f32,
+        width: f32,
+        height: f32,
+        draw: impl FnOnce(&mut Frame),
+    ) {
+        let stretch = overscroll.clamp(-MAX_OVERSCROLL, MAX_OVERSCROLL);
+        let scale_x = 1.0 + stretch.abs() * 1.35;
+        let scale_y = 1.0 - stretch.abs() * 0.12;
+        frame.push_transform();
+        frame.translate(Vector::new(stretch * width * 0.55, 0.0));
+        frame.translate(Vector::new(width / 2.0, height / 2.0));
+        frame.scale_nonuniform(Vector::new(scale_x, scale_y));
+        frame.translate(Vector::new(-width / 2.0, -height / 2.0));
+        draw(frame);
+        frame.pop_transform();
     }
 
     fn scroll_lines(delta: ScrollDelta) -> (f32, f32) {
@@ -254,7 +333,8 @@ impl WaveForm {
         }
 
         let fraction = (progress_frame.saturating_sub(start)) as f32 / visible as f32;
-        Some(fraction.clamp(0.0, 1.0) * width)
+        let stretch = self.view.overscroll.clamp(-MAX_OVERSCROLL, MAX_OVERSCROLL);
+        Some((fraction.clamp(0.0, 1.0) * width) + stretch * width * 0.55)
     }
 
     fn progress_at_x(&self, width: f32, x: f32) -> Option<f64> {
@@ -320,8 +400,10 @@ impl WaveForm {
     }
 
     pub fn set_view(&mut self, view: WaveFormView) {
-        if self.view != view {
-            self.view = view;
+        // Overscroll is drawn outside the cache; only offset/zoom affect cached geometry.
+        let cache_key_changed = self.view.offset != view.offset || self.view.zoom != view.zoom;
+        self.view = view;
+        if cache_key_changed {
             self.cache.clear();
         }
     }
@@ -647,15 +729,12 @@ impl WaveForm {
         match event {
             Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
                 if self.modifiers.shift() {
-                    if view.zoom <= 1.0 {
-                        return false;
-                    }
                     let (x, y) = Self::scroll_lines(*delta);
                     let pan_delta = if x.abs() > y.abs() { -x } else { -y };
                     if pan_delta == 0.0 {
                         return false;
                     }
-                    view.pan(pan_delta * PAN_STEP);
+                    view.apply_pan_delta(pan_delta * PAN_STEP);
                 } else {
                     view.apply_wheel(*delta);
                 }
@@ -677,12 +756,27 @@ impl Program<Message> for WaveForm {
         bounds: Rectangle,
         _cursor: Cursor,
     ) -> Vec<Geometry> {
-        let cache_bounds = Self::cache_bounds(bounds.size(), self.view, theme);
-        let mut layers = vec![self.cache.draw_with_bounds(renderer, cache_bounds, |frame| {
-            self.draw_waveform(frame, theme);
-        })];
+        let size = bounds.size();
+        let overscroll = self.view.overscroll;
+        let cache_bounds = Self::cache_bounds(size, self.view, theme);
+        let waveform = if overscroll.abs() < OVERSCROLL_STOP {
+            self.cache.draw_with_bounds(renderer, cache_bounds, |frame| {
+                self.draw_waveform(frame, theme);
+            })
+        } else {
+            let mut frame = Frame::new(renderer, size);
+            Self::with_overscroll_transform(
+                &mut frame,
+                overscroll,
+                size.width,
+                size.height,
+                |frame| self.draw_waveform(frame, theme),
+            );
+            frame.into_geometry()
+        };
+        let mut layers = vec![waveform];
         if let Some(progress) = self.playback_progress()
-            && let Some(playhead) = self.draw_playhead(renderer, bounds.size(), theme, progress)
+            && let Some(playhead) = self.draw_playhead(renderer, size, theme, progress)
         {
             layers.push(playhead);
         }
@@ -691,17 +785,52 @@ impl Program<Message> for WaveForm {
 
     fn update(
         &self,
-        _state: &mut Self::State,
+        state: &mut Self::State,
         event: &Event,
         bounds: Rectangle,
         cursor: Cursor,
     ) -> Option<Action<Message>> {
+        if let Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) = event
+            && state.pan_anchor.is_some()
+        {
+            let view = state.last_pan_view.take().unwrap_or(self.view);
+            state.pan_anchor = None;
+            return Some(
+                Action::publish(Message::WaveformPanEnded(view)).and_capture(),
+            );
+        }
+
         if let Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) = event
             && cursor.is_over(bounds)
             && let Some(position) = cursor.position_in(bounds)
-            && let Some(progress) = self.progress_at_x(bounds.width, position.x)
         {
-            return Some(Action::publish(Message::WaveformSeek(progress)).and_capture());
+            if self.modifiers.shift() {
+                state.pan_anchor = Some(PanAnchor {
+                    cursor_x: position.x,
+                    view_offset: self.view.offset,
+                    overscroll: self.view.overscroll,
+                });
+                return Some(Action::publish(Message::WaveformPanStarted).and_capture());
+            } else if let Some(progress) = self.progress_at_x(bounds.width, position.x) {
+                return Some(Action::publish(Message::WaveformSeek(progress)).and_capture());
+            }
+        }
+
+        if state.pan_anchor.is_some()
+            && let Event::Mouse(mouse::Event::CursorMoved { .. }) = event
+            && let Some(position) = cursor.position_in(bounds)
+            && let Some(anchor) = state.pan_anchor
+        {
+            let visible = self.view.visible_fraction();
+            let delta_x = position.x - anchor.cursor_x;
+            let mut view = WaveFormView {
+                zoom: self.view.zoom,
+                offset: anchor.view_offset,
+                overscroll: anchor.overscroll,
+            };
+            view.apply_pan_delta(-delta_x / bounds.width * visible);
+            state.last_pan_view = Some(view);
+            return Some(Action::publish(Message::WaveformViewChanged(view)).and_capture());
         }
 
         let mut view = self.view;
@@ -716,14 +845,19 @@ impl Program<Message> for WaveForm {
 
     fn mouse_interaction(
         &self,
-        _state: &Self::State,
-        _bounds: Rectangle,
+        state: &Self::State,
+        bounds: Rectangle,
         cursor: Cursor,
     ) -> iced::mouse::Interaction {
-        if cursor.is_over(_bounds) {
-            iced::mouse::Interaction::Pointer
-        } else {
-            iced::mouse::Interaction::default()
+        if cursor.is_over(bounds) {
+            if state.pan_anchor.is_some() {
+                return iced::mouse::Interaction::Grabbing;
+            }
+            if self.modifiers.shift() {
+                return iced::mouse::Interaction::Grab;
+            }
+            return iced::mouse::Interaction::Pointer;
         }
+        iced::mouse::Interaction::default()
     }
 }

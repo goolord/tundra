@@ -1,14 +1,17 @@
 use super::*;
 use super::common::debounce;
+use crate::drag_out::NativeDrag;
 use futures::future::{AbortHandle, Abortable};
 use futures::*;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 
-use iced::widget::{button, column, container, mouse_area, row, stack, text, Space};
-use iced::{Color, Element, Event, Length, Subscription, Task, Theme};
+use iced::widget::{button, center, column, container, mouse_area, operation, opaque, row, stack, text, Space};
+use iced::widget::operation::AbsoluteOffset;
+use iced::{Border, Color, Element, Event, Length, Point, Shadow, Subscription, Task, Theme};
 use iced::event;
 use iced::futures::stream;
+use iced::keyboard::Modifiers;
 use iced::mouse;
 use iced::window;
 use iced_aw::ICED_AW_FONT_BYTES;
@@ -24,6 +27,30 @@ const DEFAULT_SIDEBAR_WIDTH: f32 = 280.0;
 const MIN_SIDEBAR_WIDTH: f32 = 160.0;
 const MAX_SIDEBAR_WIDTH: f32 = 720.0;
 const SIDEBAR_RESIZER_WIDTH: f32 = 6.0;
+const FILE_DRAG_THRESHOLD: f32 = 8.0;
+
+async fn pick_folder(start_dir: PathBuf) -> Option<PathBuf> {
+    rfd::AsyncFileDialog::new()
+        .set_title("Select Folder")
+        .set_directory(&start_dir)
+        .pick_folder()
+        .await
+        .map(|folder| folder.path().to_path_buf())
+}
+
+enum FileDragKind {
+    File(PathBuf),
+    Scroll,
+}
+
+struct FileDragPending {
+    kind: FileDragKind,
+    origin: Point,
+    last: Point,
+    threshold_met: bool,
+    origin_locked: bool,
+    awaiting_x11: bool,
+}
 
 struct SidebarResize {
     origin_x: f32,
@@ -40,10 +67,15 @@ pub struct App {
     player_msgs: Option<futures::channel::mpsc::UnboundedReceiver<super::PlayerMsg>>,
     player_events_started: bool,
     drag_over: bool,
-    notice: Option<String>,
+    dialog: Option<Dialog>,
     waveform_hovered: bool,
     sidebar_width: f32,
     sidebar_resize: Option<SidebarResize>,
+    file_drag: Option<FileDragPending>,
+    native_drag: NativeDrag,
+    x11_drag_ready: bool,
+    last_cursor: Point,
+    modifiers: Modifiers,
 }
 
 pub struct DirCache(HashMap<PathBuf, Vec<PathBuf>>);
@@ -129,10 +161,15 @@ impl Default for App {
             player_msgs: Some(player_msgs),
             player_events_started: false,
             drag_over: false,
-            notice: None,
+            dialog: None,
             waveform_hovered: false,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             sidebar_resize: None,
+            file_drag: None,
+            native_drag: NativeDrag::new(),
+            x11_drag_ready: cfg!(any(windows, target_os = "macos")),
+            last_cursor: Point::ORIGIN,
+            modifiers: Modifiers::default(),
         }
     }
 }
@@ -145,6 +182,9 @@ impl App {
             Event::Window(window::Event::FilesHoveredLeft) => Some(Message::FilesHoverLeft),
             Event::Keyboard(iced::keyboard::Event::ModifiersChanged(modifiers)) => {
                 Some(Message::ModifiersChanged(modifiers))
+            }
+            Event::Mouse(mouse::Event::CursorMoved { position }) => {
+                Some(Message::CursorMoved(position))
             }
             _ => None,
         });
@@ -187,7 +227,55 @@ impl App {
             Subscription::none()
         };
 
-        Subscription::batch([file_events, playback_tick, waveform_keys, sidebar_resize])
+        let file_drag = if state.sidebar_resize.is_none()
+            && (state.file_drag.is_some() || state.native_drag.is_active())
+        {
+            event::listen_with(|event, _status, _window| match event {
+                Event::Mouse(mouse::Event::CursorMoved { position }) => {
+                    Some(Message::FileDragMove(position))
+                }
+                Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                    Some(Message::FileDragRelease)
+                }
+                _ => None,
+            })
+        } else {
+            Subscription::none()
+        };
+
+        let file_drag_tick = if state.native_drag.is_active() {
+            Subscription::run_with((), |_| {
+                stream::unfold((), |()| async {
+                    async_io::Timer::after(Duration::from_millis(16)).await;
+                    Some((Message::FileDragTick, ()))
+                })
+            })
+        } else {
+            Subscription::none()
+        };
+
+        let waveform_spring = if state.player.waveform.as_ref().is_some_and(|wf| {
+            wf.view_state().overscroll_active() && !wf.pan_active()
+        }) {
+            Subscription::run_with((), |_| {
+                stream::unfold((), |()| async {
+                    async_io::Timer::after(Duration::from_millis(16)).await;
+                    Some((Message::WaveformSpringTick, ()))
+                })
+            })
+        } else {
+            Subscription::none()
+        };
+
+        Subscription::batch([
+            file_events,
+            playback_tick,
+            waveform_keys,
+            waveform_spring,
+            sidebar_resize,
+            file_drag,
+            file_drag_tick,
+        ])
     }
 
     fn open_path(&mut self, path: &Path) -> Task<Message> {
@@ -212,11 +300,20 @@ impl App {
                 self.ensure_player_events()
             }
             Err(err) => {
-                self.player.set_error(err);
+                self.show_error(err);
                 self.file_selector.selected_file = None;
                 Task::none()
             }
         }
+    }
+
+    fn show_error(&mut self, message: String) {
+        self.player.reset_on_error();
+        self.dialog = Some(Dialog::error(message));
+    }
+
+    fn show_notice(&mut self, message: impl Into<String>) {
+        self.dialog = Some(Dialog::notice(message.into()));
     }
 
     fn ensure_player_events(&mut self) -> Task<Message> {
@@ -229,6 +326,57 @@ impl App {
             }
         }
         Task::none()
+    }
+
+    fn ensure_x11_drag() -> Task<Message> {
+        window::latest().then(|id| match id {
+            Some(id) => window::run(id, |window| crate::drag_out::x11_window_id(window))
+                .map(Message::X11WindowId),
+            None => Task::none(),
+        })
+    }
+
+    #[cfg(any(windows, target_os = "macos"))]
+    fn begin_platform_drag(path: PathBuf) -> Task<Message> {
+        window::latest().then(move |id| match id {
+            Some(id) => window::run(id, move |window| {
+                crate::drag_out::start_blocking(window, path)
+            })
+            .map(Message::FileDragCompleted),
+            None => Task::none(),
+        })
+    }
+
+    fn start_file_drag(&mut self, path: PathBuf) -> Task<Message> {
+        let canonical = match std::fs::canonicalize(&path) {
+            Ok(path) => path,
+            Err(err) => {
+                self.show_notice(drag_out_notice(format!(
+                    "Cannot drag {}: {err}.",
+                    path.display()
+                )));
+                self.file_drag = None;
+                return Task::none();
+            }
+        };
+
+        #[cfg(any(windows, target_os = "macos"))]
+        {
+            self.file_drag = None;
+            return Self::begin_platform_drag(canonical);
+        }
+
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            match self.native_drag.start(canonical) {
+                Ok(()) => Task::none(),
+                Err(err) => {
+                    self.show_notice(drag_out_notice(format!("Drag failed: {err}.")));
+                    self.file_drag = None;
+                    Task::none()
+                }
+            }
+        }
     }
 
     pub fn title(&self) -> String {
@@ -260,15 +408,10 @@ impl App {
                 Task::none()
             }
 
-            Message::OpenFolder => Task::perform(
-                async {
-                    rfd::AsyncFileDialog::new()
-                        .pick_folder()
-                        .await
-                        .map(|folder| folder.path().to_path_buf())
-                },
-                Message::FolderPicked,
-            ),
+            Message::OpenFolder => {
+                let start_dir = self.file_selector.current_dir.clone();
+                Task::perform(pick_folder(start_dir), Message::FolderPicked)
+            }
 
             Message::OpenFile => Task::perform(
                 async {
@@ -314,16 +457,17 @@ impl App {
             Message::Quit => iced::exit(),
 
             Message::About => {
-                self.notice = Some(format!(
+                self.dialog = Some(Dialog::about(format!(
                     "Tundra {} — browse and preview audio samples (FLAC, WAV, MP3, OGG). \
-                     Drag-and-drop works on Windows, macOS, and X11; on native Wayland use File → Open File.",
+                     Drag samples from the file list into your DAW. \
+                     Drop files into Tundra on Windows, macOS, and X11; on native Wayland use File → Open File.",
                     env!("CARGO_PKG_VERSION")
-                ));
+                )));
                 Task::none()
             }
 
-            Message::DismissNotice => {
-                self.notice = None;
+            Message::DismissDialog => {
+                self.dialog = None;
                 Task::none()
             }
 
@@ -486,9 +630,11 @@ impl App {
                 match msg {
                     Some(PlayerMsg::PlayingStored) => (),
                     Some(PlayerMsg::SinkEmpty) => self.player.pause(),
-                    Some(PlayerMsg::StreamFailed) => self.player.set_error(
-                        "Audio output unavailable. Check your sound device.".into(),
-                    ),
+                    Some(PlayerMsg::StreamFailed) => {
+                        self.show_error(
+                            "Audio output unavailable. Check your sound device.".into(),
+                        );
+                    }
                     None => return Task::none(),
                 }
                 match Arc::into_inner(recv) {
@@ -502,14 +648,35 @@ impl App {
                 }
             }
 
-            Message::DismissError => {
-                self.player.error = None;
-                Task::none()
-            }
-
             Message::WaveformViewChanged(view) => {
                 if let Some(waveform) = &mut self.player.waveform {
                     waveform.set_view(view);
+                }
+                Task::none()
+            }
+
+            Message::WaveformPanStarted => {
+                if let Some(waveform) = &mut self.player.waveform {
+                    waveform.set_pan_active(true);
+                }
+                Task::none()
+            }
+
+            Message::WaveformPanEnded(view) => {
+                if let Some(waveform) = &mut self.player.waveform {
+                    waveform.set_pan_active(false);
+                    waveform.set_view(view);
+                }
+                Task::none()
+            }
+
+            Message::WaveformSpringTick => {
+                if let Some(waveform) = &mut self.player.waveform {
+                    let mut view = waveform.view_state();
+                    if view.overscroll != 0.0 {
+                        view.spring_overscroll();
+                        waveform.set_view(view);
+                    }
                 }
                 Task::none()
             }
@@ -553,9 +720,176 @@ impl App {
             }
 
             Message::ModifiersChanged(modifiers) => {
+                self.modifiers = modifiers;
                 if let Some(waveform) = &mut self.player.waveform {
                     waveform.set_modifiers(modifiers);
                 }
+                Task::none()
+            }
+
+            Message::FileDragPress(path) => {
+                if self.modifiers.shift() {
+                    self.file_drag = Some(FileDragPending {
+                        kind: FileDragKind::Scroll,
+                        origin: self.last_cursor,
+                        last: self.last_cursor,
+                        threshold_met: true,
+                        origin_locked: true,
+                        awaiting_x11: false,
+                    });
+                    return Task::none();
+                }
+                self.file_drag = Some(FileDragPending {
+                    kind: FileDragKind::File(path),
+                    origin: self.last_cursor,
+                    last: self.last_cursor,
+                    threshold_met: false,
+                    origin_locked: false,
+                    awaiting_x11: false,
+                });
+                Task::none()
+            }
+
+            Message::FileDragMove(point) => {
+                let Some(drag) = &mut self.file_drag else {
+                    return Task::none();
+                };
+                if !drag.origin_locked {
+                    drag.origin = point;
+                    drag.last = point;
+                    drag.origin_locked = true;
+                    return Task::none();
+                }
+                match &drag.kind {
+                    FileDragKind::Scroll => {
+                        let dy = point.y - drag.last.y;
+                        drag.last = point;
+                        if dy.abs() < 0.5 {
+                            return Task::none();
+                        }
+                        operation::scroll_by(
+                            FILE_LIST_SCROLL_ID,
+                            AbsoluteOffset { x: 0.0, y: dy },
+                        )
+                    }
+                    FileDragKind::File(path) => {
+                        if drag.threshold_met || drag.awaiting_x11 {
+                            return Task::none();
+                        }
+                        let dx = point.x - drag.origin.x;
+                        let dy = point.y - drag.origin.y;
+                        if dx * dx + dy * dy < FILE_DRAG_THRESHOLD * FILE_DRAG_THRESHOLD {
+                            return Task::none();
+                        }
+                        let path = path.clone();
+                        if self.x11_drag_ready {
+                            drag.threshold_met = true;
+                            self.start_file_drag(path)
+                        } else {
+                            drag.awaiting_x11 = true;
+                            Self::ensure_x11_drag()
+                        }
+                    }
+                }
+            }
+
+            Message::FileDragRelease => {
+                let mut task = Task::none();
+                let click_to_open = self.file_drag.as_ref().and_then(|drag| {
+                    if self.native_drag.is_active() || drag.threshold_met || drag.awaiting_x11 {
+                        return None;
+                    }
+                    if let FileDragKind::File(path) = &drag.kind {
+                        Some(path.clone())
+                    } else {
+                        None
+                    }
+                });
+                if self.native_drag.is_active() {
+                    self.native_drag.update(true, true);
+                }
+                if !self.native_drag.is_active() {
+                    self.file_drag = None;
+                }
+                if let Some(path) = click_to_open {
+                    task = self.open_path(&path);
+                }
+                task
+            }
+
+            Message::FileDragTick => {
+                if self.native_drag.is_active() {
+                    self.native_drag.update(true, false);
+                    if !self.native_drag.is_active() {
+                        self.file_drag = None;
+                    }
+                }
+                Task::none()
+            }
+
+            Message::FileDragCompleted(result) => {
+                if let Err(err) = result {
+                    self.show_notice(drag_out_notice(format!("Drag failed: {err}.")));
+                }
+                self.file_drag = None;
+                Task::none()
+            }
+
+            Message::X11WindowId(window_id) => {
+                let Some(id) = window_id else {
+                    self.x11_drag_ready = false;
+                    self.show_notice(drag_out_notice(
+                        "Drag-out from the file list requires X11 and is unavailable on native Wayland.",
+                    ));
+                    self.file_drag = None;
+                    return Task::none();
+                };
+                match self.native_drag.init_with_window_id(id) {
+                    Ok(()) => {
+                        self.x11_drag_ready = true;
+                    }
+                    Err(err) => {
+                        self.x11_drag_ready = false;
+                        self.show_notice(drag_out_notice(format!(
+                            "Could not initialize drag-out: {err}."
+                        )));
+                        self.file_drag = None;
+                        return Task::none();
+                    }
+                }
+                let path = {
+                    let Some(drag) = &mut self.file_drag else {
+                        return Task::none();
+                    };
+                    if !drag.awaiting_x11 {
+                        return Task::none();
+                    }
+                    let path = match &drag.kind {
+                        FileDragKind::File(path) => path.clone(),
+                        FileDragKind::Scroll => {
+                            drag.awaiting_x11 = false;
+                            return Task::none();
+                        }
+                    };
+                    drag.awaiting_x11 = false;
+                    drag.threshold_met = true;
+                    path
+                };
+                self.start_file_drag(path)
+            }
+
+            Message::CursorMoved(point) => {
+                self.last_cursor = point;
+                Task::none()
+            }
+
+            Message::FileRowHover(index) => {
+                self.file_selector.hovered_file = Some(index);
+                Task::none()
+            }
+
+            Message::FileRowLeave => {
+                self.file_selector.hovered_file = None;
                 Task::none()
             }
 
@@ -596,6 +930,20 @@ impl App {
                 if let Some(path) = &self.player.current_file {
                     reveal_in_file_manager(path);
                 }
+                Task::none()
+            }
+
+            Message::FileCopyName(path) => {
+                if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
+                    return iced::clipboard::write(name.to_owned());
+                }
+                Task::none()
+            }
+
+            Message::FileCopyPath(path) => iced::clipboard::write(path.display().to_string()),
+
+            Message::FileRevealInFileManager(path) => {
+                reveal_in_file_manager(&path);
                 Task::none()
             }
 
@@ -660,26 +1008,68 @@ impl App {
         .into()
     }
 
+    fn dialog_view(dialog: &Dialog) -> Element<'_, Message> {
+        opaque(
+            container(
+                column![
+                    text(&dialog.title).size(18),
+                    text(&dialog.body)
+                        .size(14)
+                        .width(Length::Fill),
+                    row![
+                        Space::new().width(Length::Fill),
+                        button(text("OK")).on_press(Message::DismissDialog),
+                    ]
+                    .align_y(iced::Alignment::Center),
+                ]
+                .spacing(12)
+                .padding(16)
+                .width(Length::Fixed(440.0)),
+            )
+            .style(|theme: &Theme| {
+                let palette = theme.extended_palette();
+                container::Style {
+                    background: Some(palette.background.base.color.into()),
+                    border: Border {
+                        width: 1.0,
+                        color: palette.background.strong.color,
+                        radius: 8.0.into(),
+                    },
+                    shadow: Shadow {
+                        color: palette.background.base.text.scale_alpha(0.25),
+                        offset: iced::Vector::new(0.0, 4.0),
+                        blur_radius: 16.0,
+                    },
+                    ..Default::default()
+                }
+            }),
+        )
+    }
+
+    fn with_dialog<'a>(base: Element<'a, Message>, dialog: &'a Dialog) -> Element<'a, Message> {
+        stack![
+            base,
+            opaque(
+                mouse_area(
+                    center(Self::dialog_view(dialog)).style(|_theme| container::Style {
+                        background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.55).into()),
+                        ..Default::default()
+                    }),
+                )
+                .on_press(Message::DismissDialog)
+            )
+        ]
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+    }
+
     pub fn view(&self) -> Element<'_, Message> {
         let menu = self.menu.view();
-
-        let notice = self.notice.as_ref().map(|notice_text| {
-            container(
-                row![
-                    notice_text.as_str(),
-                    button(text("Dismiss")).on_press(Message::DismissNotice),
-                ]
-                .spacing(8)
-                .align_y(iced::Alignment::Center),
-            )
-            .padding(6)
-            .width(Length::Fill)
-        });
 
         let file_selector = container(self.file_selector.view())
             .width(Length::Fixed(self.sidebar_width))
             .height(Length::Fill)
-            .padding(4)
             .style(|theme| {
                 let base = theme.extended_palette().background.base.color;
                 container::Style {
@@ -725,10 +1115,14 @@ impl App {
             .height(Length::Fill)
             .width(Length::Fill);
 
-        let mut layout = column![menu].width(Length::Fill).height(Length::Fill);
-        if let Some(notice) = notice {
-            layout = layout.push(notice);
+        let layout = column![menu, workspace]
+            .width(Length::Fill)
+            .height(Length::Fill);
+
+        if let Some(dialog) = &self.dialog {
+            Self::with_dialog(layout.into(), dialog)
+        } else {
+            layout.into()
         }
-        layout.push(workspace).into()
     }
 }

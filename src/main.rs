@@ -1,3 +1,4 @@
+mod drag_out;
 mod source;
 mod types;
 
