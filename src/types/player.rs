@@ -495,7 +495,7 @@ impl Player {
                 button(text("+").size(16))
                     .padding([2, 8])
                     .on_press(Message::WaveformZoomIn),
-                text("Click to seek · scroll to zoom · Shift+scroll/drag to pan")
+                text("Click to seek. Scroll to zoom. Shift+scroll or drag to pan.")
                     .size(11)
                     .style(|theme: &Theme| text::Style {
                         color: Some(

@@ -555,9 +555,9 @@ impl App {
 
             Message::About => {
                 self.dialog = Some(Dialog::about(format!(
-                    "Tundra {} — browse and preview audio samples (FLAC, WAV, MP3, OGG). \
-                     Drag samples from the file list into your DAW. \
-                     Drop files into Tundra on Windows, macOS, and X11; on native Wayland use File → Open File.",
+                    "Tundra {}. FLAC, WAV, MP3, and OGG. \
+                     Drag samples from the file list into a DAW. \
+                     Drop onto the window on Windows, macOS, and X11. On Wayland, use File > Open File.",
                     env!("CARGO_PKG_VERSION")
                 )));
                 Task::none()

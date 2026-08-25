@@ -95,24 +95,40 @@ impl WaveFormView {
     pub fn apply_pan_delta(&mut self, offset_delta: f32) {
         let visible = self.visible_fraction();
         let max = self.max_offset();
-        let target = self.offset + offset_delta;
+        let edge_pull = offset_delta / visible.max(1e-6) * EDGE_RUBBER_BAND;
 
+        if self.overscroll > OVERSCROLL_STOP {
+            self.offset = max;
+            self.overscroll = Self::rubber_band(self.overscroll, edge_pull);
+            if self.overscroll <= OVERSCROLL_STOP {
+                self.overscroll = 0.0;
+                self.offset = (max + offset_delta).clamp(0.0, max);
+            }
+            return;
+        }
+
+        if self.overscroll < -OVERSCROLL_STOP {
+            self.offset = 0.0;
+            self.overscroll = Self::rubber_band(self.overscroll, edge_pull);
+            if self.overscroll >= -OVERSCROLL_STOP {
+                self.overscroll = 0.0;
+                self.offset = offset_delta.clamp(0.0, max);
+            }
+            return;
+        }
+
+        self.overscroll = 0.0;
+        let target = self.offset + offset_delta;
         if target < 0.0 {
             self.offset = 0.0;
             let overflow = -target / visible.max(1e-6);
-            self.overscroll = Self::rubber_band(self.overscroll, -overflow * EDGE_RUBBER_BAND);
+            self.overscroll = Self::rubber_band(0.0, -overflow * EDGE_RUBBER_BAND);
         } else if target > max {
             self.offset = max;
             let overflow = (target - max) / visible.max(1e-6);
-            self.overscroll = Self::rubber_band(self.overscroll, overflow * EDGE_RUBBER_BAND);
+            self.overscroll = Self::rubber_band(0.0, overflow * EDGE_RUBBER_BAND);
         } else {
             self.offset = target;
-            if self.overscroll != 0.0
-                && offset_delta.signum() as i8 != self.overscroll.signum() as i8
-            {
-                self.overscroll =
-                    Self::rubber_band(self.overscroll, offset_delta.signum() * 0.03);
-            }
         }
     }
 
