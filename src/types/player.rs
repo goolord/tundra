@@ -553,11 +553,6 @@ impl Player {
         Container::new(column)
             .width(Length::Fill)
             .height(Length::Fill)
-            .align_y(if self.waveform.is_none() {
-                Alignment::End
-            } else {
-                Alignment::Start
-            })
             .center_x(Length::Fill)
     }
 

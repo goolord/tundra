@@ -67,6 +67,7 @@ pub enum Message {
     SelectedFile(Option<PathBuf>),
     ChangeDirectory(PathBuf),
     Search(String),
+    SearchFocused(bool),
     SearchCompleted(Result<Vec<PathBuf>, Aborted>),
     InsertDircache((PathBuf, Vec<PathBuf>)),
     InvalidateDircache,

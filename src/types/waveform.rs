@@ -23,14 +23,28 @@ const TIME_MARKER_HEIGHT: f32 = 16.0;
 const MAX_OVERSCROLL: f32 = 0.14;
 const OVERSCROLL_SPRING: f32 = 0.78;
 const OVERSCROLL_STOP: f32 = 0.002;
-const WHEEL_ZOOM_STEP: f32 = 0.15;
 const WHEEL_ZOOM_TAIL: f32 = 0.01;
+const WHEEL_ZOOM_MAX: f32 = 0.35;
 const EDGE_RUBBER_BAND: f32 = 0.35;
 const WAVEFORM_CORNER_RADIUS: f32 = 8.0;
 
 fn theme_cache_key(theme: &Theme) -> u32 {
-    let primary = theme.extended_palette().primary.base.color;
-    primary.r.to_bits() ^ primary.g.to_bits() ^ primary.b.to_bits()
+    let palette = theme.extended_palette();
+    let primary = palette.primary.base.color;
+    let background = palette.background.base.color;
+    primary.r.to_bits()
+        ^ primary.g.to_bits()
+        ^ primary.b.to_bits()
+        ^ background.r.to_bits()
+        ^ background.g.to_bits()
+        ^ background.b.to_bits()
+}
+
+fn scroll_lines(delta: ScrollDelta) -> (f32, f32) {
+    match delta {
+        ScrollDelta::Lines { x, y } => (x, y),
+        ScrollDelta::Pixels { x, y } => (x / 48.0, y / 48.0),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -60,32 +74,18 @@ impl WaveFormView {
     }
 
     pub fn wheel_lines(delta: ScrollDelta) -> f32 {
-        match delta {
-            ScrollDelta::Lines { y, .. } => y,
-            ScrollDelta::Pixels { y, .. } => y / 48.0,
-        }
+        scroll_lines(delta).1
     }
 
-    /// Accumulate trackpad/mouse wheel delta; apply zoom in fixed steps.
     pub fn accumulate_wheel(&mut self, lines: f32, anchor_x: f32, pending: &mut f32) -> bool {
         *pending += lines;
-        let mut changed = false;
-        while *pending >= WHEEL_ZOOM_STEP {
-            self.apply_zoom_at(ZOOM_FACTOR.powf(WHEEL_ZOOM_STEP), anchor_x);
-            *pending -= WHEEL_ZOOM_STEP;
-            changed = true;
+        if pending.abs() < WHEEL_ZOOM_TAIL {
+            return false;
         }
-        while *pending <= -WHEEL_ZOOM_STEP {
-            self.apply_zoom_at((1.0 / ZOOM_FACTOR).powf(WHEEL_ZOOM_STEP), anchor_x);
-            *pending += WHEEL_ZOOM_STEP;
-            changed = true;
-        }
-        if pending.abs() >= WHEEL_ZOOM_TAIL {
-            self.apply_zoom_at(ZOOM_FACTOR.powf(*pending), anchor_x);
-            *pending = 0.0;
-            changed = true;
-        }
-        changed
+        let step = pending.clamp(-WHEEL_ZOOM_MAX, WHEEL_ZOOM_MAX);
+        self.apply_zoom_at(ZOOM_FACTOR.powf(step), anchor_x);
+        *pending -= step;
+        true
     }
 
     pub fn pan(&mut self, delta: f32) {
@@ -99,13 +99,11 @@ impl WaveFormView {
 
         if target < 0.0 {
             self.offset = 0.0;
-            let overflow = (-target / visible.max(1e-6))
-                .max(offset_delta.abs() / visible.max(1e-6));
+            let overflow = -target / visible.max(1e-6);
             self.overscroll = Self::rubber_band(self.overscroll, -overflow * EDGE_RUBBER_BAND);
         } else if target > max {
             self.offset = max;
-            let overflow = ((target - max) / visible.max(1e-6))
-                .max(offset_delta.abs() / visible.max(1e-6));
+            let overflow = (target - max) / visible.max(1e-6);
             self.overscroll = Self::rubber_band(self.overscroll, overflow * EDGE_RUBBER_BAND);
         } else {
             self.offset = target;
@@ -261,7 +259,6 @@ pub struct WaveForm {
     pan_active: bool,
     cache: Cache,
     content_cache_key: Cell<(u32, u32, u32, u32)>,
-    preview_view: Cell<Option<WaveFormView>>,
 }
 
 struct ColumnSample {
@@ -306,12 +303,7 @@ impl WaveForm {
             pan_active: false,
             cache: Cache::new(),
             content_cache_key: Cell::new((0, 0, 0, 0)),
-            preview_view: Cell::new(None),
         }
-    }
-
-    fn effective_view(&self) -> WaveFormView {
-        self.preview_view.get().unwrap_or(self.view)
     }
 
     fn sync_content_cache(&self, theme: &Theme) {
@@ -320,10 +312,6 @@ impl WaveForm {
             self.cache.clear();
             self.content_cache_key.set(key);
         }
-    }
-
-    pub fn set_preview_view(&self, view: Option<WaveFormView>) {
-        self.preview_view.set(view);
     }
 
     pub fn set_sample_rate(&mut self, sample_rate: u32) {
@@ -385,13 +373,6 @@ impl WaveForm {
         (x - translate_x - width / 2.0) / scale_x + width / 2.0
     }
 
-    fn scroll_lines(delta: ScrollDelta) -> (f32, f32) {
-        match delta {
-            ScrollDelta::Lines { x, y } => (x, y),
-            ScrollDelta::Pixels { x, y } => (x / 48.0, y / 48.0),
-        }
-    }
-
     fn playback_progress(&self) -> Option<f64> {
         if let Some(progress) = self.scrub_progress {
             return Some(progress);
@@ -449,28 +430,7 @@ impl WaveForm {
         );
     }
 
-    fn draw_playhead_on_frame(
-        &self,
-        frame: &mut Frame,
-        theme: &Theme,
-        size: Size,
-        progress: f64,
-        view: WaveFormView,
-        content_space: bool,
-    ) {
-        let x = if content_space {
-            self.playhead_content_x(view, size.width, progress)
-        } else {
-            self.playhead_screen_x(view, size.width, progress)
-        };
-        let Some(x) = x else {
-            return;
-        };
-        let accent = theme.extended_palette().primary.base.color;
-        Self::stroke_playhead(frame, x, size.height, accent);
-    }
-
-    fn progress_at_x(&self, width: f32, x: f32) -> Option<f64> {
+    fn progress_at_x(&self, view: WaveFormView, width: f32, x: f32) -> Option<f64> {
         if self.samples.is_empty() || width <= 0.0 {
             return None;
         }
@@ -484,7 +444,6 @@ impl WaveForm {
             return None;
         }
 
-        let view = self.view;
         let (start, end, phase) = view.sample_window(self.samples.len());
         let visible = end.saturating_sub(start);
         if visible == 0 {
@@ -496,6 +455,21 @@ impl WaveForm {
         let sample_pos = (content_x / px_per_sample + phase).clamp(0.0, visible as f32);
         let progress_frame = (start as f32 + sample_pos).round() as usize;
         Some(progress_frame.min(frame_count.saturating_sub(1)) as f64 / frame_count as f64)
+    }
+
+    fn draw_playhead_on_frame(
+        &self,
+        frame: &mut Frame,
+        theme: &Theme,
+        size: Size,
+        progress: f64,
+        view: WaveFormView,
+    ) {
+        let Some(x) = self.playhead_content_x(view, size.width, progress) else {
+            return;
+        };
+        let accent = theme.extended_palette().primary.base.color;
+        Self::stroke_playhead(frame, x, size.height, accent);
     }
 
     fn draw_playhead(
@@ -518,14 +492,7 @@ impl WaveForm {
     }
 
     pub fn set_view(&mut self, view: WaveFormView) {
-        let cache_key_changed =
-            self.view.view_cache_key(self.samples.len()) != view.view_cache_key(self.samples.len());
         self.view = view;
-        self.preview_view.set(None);
-        if cache_key_changed {
-            self.cache.clear();
-            self.content_cache_key.set((0, 0, 0, 0));
-        }
     }
 
     fn peak_amplitude(chunk: &[f32]) -> f32 {
@@ -634,53 +601,37 @@ impl WaveForm {
         frame.fill(&background, palette.background);
     }
 
-    fn draw_waveform_content(
-        &self,
-        frame: &mut Frame,
-        theme: &Theme,
-        view: WaveFormView,
-        clip: bool,
-    ) {
+    fn draw_waveform_content(&self, frame: &mut Frame, theme: &Theme, view: WaveFormView) {
         let palette = WaveformPalette::from_theme(theme);
         let size = frame.size();
-
-        let draw_inner = |frame: &mut Frame| {
-            let (center, columns) = self.columns(view, size);
-            if columns.is_empty() {
-                return;
-            }
-
-            let axis = Path::line(
-                Point::new(0.0, center),
-                Point::new(size.width, center),
-            );
-            frame.stroke(
-                &axis,
-                Stroke::default()
-                    .with_color(palette.axis)
-                    .with_width(1.0),
-            );
-
-            frame.fill(&Self::envelope_path(&columns), palette.fill);
-
-            let stroke = Stroke::default()
-                .with_color(palette.stroke)
-                .with_width(1.0)
-                .with_line_cap(LineCap::Round)
-                .with_line_join(LineJoin::Round);
-
-            frame.stroke(&Self::envelope_line_path(&columns, true), stroke);
-            frame.stroke(&Self::envelope_line_path(&columns, false), stroke);
-
-            self.draw_time_markers(frame, &palette, size, view);
-        };
-
-        if clip {
-            let clip_bounds = Rectangle::new(Point::ORIGIN, size);
-            frame.with_clip(clip_bounds, draw_inner);
-        } else {
-            draw_inner(frame);
+        let (center, columns) = self.columns(view, size);
+        if columns.is_empty() {
+            return;
         }
+
+        let axis = Path::line(
+            Point::new(0.0, center),
+            Point::new(size.width, center),
+        );
+        frame.stroke(
+            &axis,
+            Stroke::default()
+                .with_color(palette.axis)
+                .with_width(1.0),
+        );
+
+        frame.fill(&Self::envelope_path(&columns), palette.fill);
+
+        let stroke = Stroke::default()
+            .with_color(palette.stroke)
+            .with_width(1.0)
+            .with_line_cap(LineCap::Round)
+            .with_line_join(LineJoin::Round);
+
+        frame.stroke(&Self::envelope_line_path(&columns, true), stroke);
+        frame.stroke(&Self::envelope_line_path(&columns, false), stroke);
+
+        self.draw_time_markers(frame, &palette, size, view);
     }
 
     fn nice_time_step(visible_secs: f64) -> f64 {
@@ -876,7 +827,7 @@ impl WaveForm {
         match event {
             Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
                 if self.modifiers.shift() {
-                    let (x, y) = Self::scroll_lines(*delta);
+                    let (x, y) = scroll_lines(*delta);
                     let pan_delta = if x.abs() > y.abs() { -x } else { -y };
                     if pan_delta == 0.0 {
                         return false;
@@ -904,7 +855,7 @@ impl Program<Message> for WaveForm {
 
     fn draw(
         &self,
-        _state: &WaveFormState,
+        state: &WaveFormState,
         renderer: &Renderer,
         theme: &Theme,
         bounds: Rectangle,
@@ -912,49 +863,59 @@ impl Program<Message> for WaveForm {
     ) -> Vec<Geometry> {
         let size = bounds.size();
         let progress = self.playback_progress();
-        let view = self.effective_view();
-        let transform_active = view.content_transform_active();
+        let view = state.last_pan_view.unwrap_or(self.view);
+        let live = state.last_pan_view.is_some() || view.content_transform_active();
+        let clip_bounds = Rectangle::new(Point::ORIGIN, size);
 
         let mut bg_frame = Frame::new(renderer, size);
         self.draw_background(&mut bg_frame, theme, size);
         let mut layers = vec![bg_frame.into_geometry()];
 
-        if transform_active {
+        if live {
             let mut frame = Frame::new(renderer, size);
-            let clip_bounds = Rectangle::new(Point::ORIGIN, size);
             frame.with_clip(clip_bounds, |frame| {
-                Self::with_content_transform(
-                    frame,
-                    view,
-                    size.width,
-                    size.height,
-                    |frame| {
-                        self.draw_waveform_content(frame, theme, view, false);
-                        if let Some(progress) = progress {
-                            self.draw_playhead_on_frame(
-                                frame,
-                                theme,
-                                size,
-                                progress,
-                                view,
-                                true,
-                            );
-                        }
-                    },
-                );
+                let draw_content = |frame: &mut Frame| {
+                    self.draw_waveform_content(frame, theme, view);
+                };
+                if view.content_transform_active() {
+                    Self::with_content_transform(
+                        frame,
+                        view,
+                        size.width,
+                        size.height,
+                        |frame| {
+                            draw_content(frame);
+                            if let Some(progress) = progress {
+                                self.draw_playhead_on_frame(
+                                    frame,
+                                    theme,
+                                    size,
+                                    progress,
+                                    view,
+                                );
+                            }
+                        },
+                    );
+                } else {
+                    draw_content(frame);
+                }
             });
             layers.push(frame.into_geometry());
         } else {
             self.sync_content_cache(theme);
             layers.push(self.cache.draw(renderer, size, |frame| {
-                self.draw_waveform_content(frame, theme, view, true);
+                frame.with_clip(clip_bounds, |frame| {
+                    self.draw_waveform_content(frame, theme, view);
+                });
             }));
-            if let Some(progress) = progress
-                && let Some(playhead) =
-                    self.draw_playhead(renderer, size, theme, progress, view)
-            {
-                layers.push(playhead);
-            }
+        }
+
+        if let Some(progress) = progress
+            && !view.content_transform_active()
+            && let Some(playhead) =
+                self.draw_playhead(renderer, size, theme, progress, view)
+        {
+            layers.push(playhead);
         }
 
         layers
@@ -994,9 +955,12 @@ impl Program<Message> for WaveForm {
                 });
                 state.last_pan_x = Some(position.x);
                 state.last_pan_view = None;
-                self.preview_view.set(None);
                 return Some(Action::publish(Message::WaveformPanStarted).and_capture());
-            } else if let Some(progress) = self.progress_at_x(bounds.width, position.x) {
+            } else if let Some(progress) = self.progress_at_x(
+                state.last_pan_view.unwrap_or(self.view),
+                bounds.width,
+                position.x,
+            ) {
                 return Some(Action::publish(Message::WaveformSeek(progress)).and_capture());
             }
         }
@@ -1018,8 +982,7 @@ impl Program<Message> for WaveForm {
             });
             view.apply_pan_delta(step);
             state.last_pan_view = Some(view);
-            self.preview_view.set(Some(view));
-            return Some(Action::publish(Message::WaveformViewChanged(view)).and_capture());
+            return Some(Action::request_redraw().and_capture());
         }
 
         let mut view = self.view;

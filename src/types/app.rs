@@ -74,6 +74,7 @@ pub struct App {
     drag_over: bool,
     dialog: Option<Dialog>,
     waveform_hovered: bool,
+    search_focused: bool,
     sidebar_width: f32,
     sidebar_resize: Option<SidebarResize>,
     file_drag: Option<FileDragPending>,
@@ -208,6 +209,7 @@ impl Default for App {
             drag_over: false,
             dialog: None,
             waveform_hovered: false,
+            search_focused: false,
             sidebar_width: SidebarSettings::load(),
             sidebar_resize: None,
             file_drag: None,
@@ -247,7 +249,11 @@ impl App {
             Subscription::none()
         };
 
-        let transport_keys = if state.player.waveform.is_some() && state.dialog.is_none() {
+        let transport_keys = if state.player.waveform.is_some()
+            && state.dialog.is_none()
+            && !state.search_focused
+            && state.waveform_hovered
+        {
             event::listen_with(|event, status, _window| {
                 if status != event::Status::Ignored {
                     return None;
@@ -472,13 +478,16 @@ impl App {
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::SelectedFile(selected_file) => match &selected_file {
+            Message::SelectedFile(selected_file) => {
+                self.search_focused = false;
+                match &selected_file {
                 Some(file_path) => self.open_path(file_path),
                 None => {
                     self.player.clear_waveform();
                     Task::none()
                 }
-            },
+            }
+            }
 
             Message::FileDropped(path) => {
                 self.drag_over = false;
@@ -529,6 +538,7 @@ impl App {
             }
 
             Message::GoHome => {
+                self.search_focused = false;
                 if let Some(home) = dirs::home_dir() {
                     self.file_selector = FileSelector::new(&home);
                 }
@@ -559,6 +569,7 @@ impl App {
             }
 
             Message::ChangeDirectory(parent_dir) => {
+                self.search_focused = false;
                 self.file_selector = FileSelector::new(&parent_dir);
                 if !self.dir_cache.contains_key(&self.file_selector.current_dir) {
                     let walker = future::lazy(|_| {
@@ -582,6 +593,7 @@ impl App {
             }
 
             Message::Search(search_str) => {
+                self.search_focused = true;
                 self.search_thread.abort();
                 match self.dir_cache.get(&self.file_selector.current_dir) {
                     Some(children) => {
@@ -671,6 +683,11 @@ impl App {
                 }
             }
 
+            Message::SearchFocused(focused) => {
+                self.search_focused = focused;
+                Task::none()
+            }
+
             Message::SearchCompleted(file_list_res) => {
                 if let Ok(file_list) = file_list_res {
                     self.file_selector.file_list = file_list
@@ -737,11 +754,7 @@ impl App {
 
             Message::WaveformViewChanged(view) => {
                 if let Some(waveform) = &mut self.player.waveform {
-                    if waveform.pan_active() {
-                        waveform.set_preview_view(Some(view));
-                    } else {
-                        waveform.set_view(view);
-                    }
+                    waveform.set_view(view);
                 }
                 Task::none()
             }
@@ -792,6 +805,9 @@ impl App {
 
             Message::WaveformHoverChanged(hovered) => {
                 self.waveform_hovered = hovered;
+                if hovered {
+                    self.search_focused = false;
+                }
                 Task::none()
             }
 
@@ -975,6 +991,7 @@ impl App {
             }
 
             Message::FileRowHover(index) => {
+                self.search_focused = false;
                 self.file_selector.hovered_file = Some(index);
                 Task::none()
             }

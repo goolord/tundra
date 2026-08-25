@@ -276,19 +276,22 @@ impl FileSelector {
             .id(Id::new(FILE_LIST_SCROLL_ID))
             .height(Length::Fill);
 
-        let search = container(
-            TextInput::new("Search files…", &self.search_value)
-                .on_input(Message::Search)
-                .size(13)
-                .padding([8, 10])
-                .width(Length::Fill),
+        let search = mouse_area(
+            container(
+                TextInput::new("Search files…", &self.search_value)
+                    .on_input(Message::Search)
+                    .size(13)
+                    .padding([8, 10])
+                    .width(Length::Fill),
+            )
+            .width(Length::Fill)
+            .style(|theme| {
+                let mut style = section_divider(theme);
+                style.background = Some(sidebar_panel(theme).into());
+                style
+            }),
         )
-        .width(Length::Fill)
-        .style(|theme| {
-            let mut style = section_divider(theme);
-            style.background = Some(sidebar_panel(theme).into());
-            style
-        });
+        .on_press(Message::SearchFocused(true));
 
         column.push(fs).push(search)
     }
