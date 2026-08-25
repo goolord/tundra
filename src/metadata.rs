@@ -251,6 +251,14 @@ impl MetadataLookup {
             return cached.fields.clone();
         }
 
+        if !path.exists() {
+            return TagFields::default();
+        }
+
+        if let Some(cached) = self.cache.get(path) {
+            return cached.fields.clone();
+        }
+
         let Some(fields) = read_tag_fields(path) else {
             return TagFields::default();
         };
@@ -423,6 +431,7 @@ pub fn index_paths(
 }
 
 pub const FILE_SEARCH_MIN_QUERY_LEN: usize = 2;
+pub const TAG_SEARCH_DEBOUNCE_MS: u64 = 200;
 const FILE_SEARCH_DEBOUNCE_MS: u64 = 200;
 const FILE_SEARCH_DEBOUNCE_MS_SHORT: u64 = 450;
 const CONTAINS_NAME_MATCH_SCORE: i64 = 400;
@@ -790,6 +799,41 @@ fn tag_match_score(
         .unwrap_or(0)
 }
 
+fn collect_tag_matches(
+    paths: &[PathBuf],
+    tag_filters: &[TagFilter],
+    metadata: Arc<HashMap<PathBuf, CachedMetadata>>,
+) -> SearchResult {
+    let tag_matcher = tag_search_matcher();
+    let mut lookup = MetadataLookup::new(metadata);
+    let mut matches = Vec::new();
+
+    for path in paths.iter().filter(|path| is_audio(path)) {
+        let tag_score = tag_match_score(&tag_matcher, path, tag_filters, &mut lookup);
+        if tag_score > 0 {
+            matches.push(SearchRank::for_tag_search(path.clone(), tag_score));
+        }
+    }
+
+    matches.sort();
+    let paths = matches.into_iter().map(|entry| entry.path).collect();
+    SearchResult {
+        paths,
+        new_metadata: lookup.into_new_entries(),
+        cached_roots: HashMap::new(),
+    }
+}
+
+pub async fn filter_tag_paths(
+    debounce_ms: u64,
+    paths: Vec<PathBuf>,
+    tag_filters: Vec<TagFilter>,
+    metadata: Arc<HashMap<PathBuf, CachedMetadata>>,
+) -> SearchResult {
+    async_io::Timer::after(std::time::Duration::from_millis(debounce_ms)).await;
+    collect_tag_matches(&paths, &tag_filters, metadata)
+}
+
 pub async fn filter_search_paths(
     debounce_ms: u64,
     paths: Vec<PathBuf>,
@@ -800,10 +844,14 @@ pub async fn filter_search_paths(
     metadata: Arc<HashMap<PathBuf, CachedMetadata>>,
 ) -> SearchResult {
     async_io::Timer::after(std::time::Duration::from_millis(debounce_ms)).await;
-    let file_matcher = file_search_matcher(case_sensitive);
-    let tag_matcher = tag_search_matcher();
     let file_active = file_query.len() >= FILE_SEARCH_MIN_QUERY_LEN;
     let tag_active = !tag_filters.is_empty();
+    if tag_active && !file_active {
+        return collect_tag_matches(&paths, &tag_filters, metadata);
+    }
+
+    let file_matcher = file_search_matcher(case_sensitive);
+    let tag_matcher = tag_search_matcher();
     let mut lookup = MetadataLookup::new(metadata);
     let mut matches = Vec::new();
 
@@ -812,13 +860,9 @@ pub async fn filter_search_paths(
             continue;
         }
 
-        let (name_score, path_score) = if file_active {
-            path_match_scores(&file_matcher, &path, &file_query, case_sensitive)
-        } else {
-            (0, 0)
-        };
+        let (name_score, path_score) = path_match_scores(&file_matcher, &path, &file_query, case_sensitive);
 
-        if file_active && name_score == 0 && path_score == 0 {
+        if name_score == 0 && path_score == 0 {
             continue;
         }
 
@@ -832,11 +876,7 @@ pub async fn filter_search_paths(
             continue;
         }
 
-        if !file_active && !tag_active {
-            continue;
-        }
-
-        let rank = if file_active && tag_active {
+        let rank = if tag_active {
             SearchRank::for_combined_search(
                 path,
                 &file_query,
@@ -845,10 +885,8 @@ pub async fn filter_search_paths(
                 tag_score,
                 case_sensitive,
             )
-        } else if file_active {
-            SearchRank::for_file_search(path, &file_query, name_score, path_score, case_sensitive)
         } else {
-            SearchRank::for_tag_search(path, tag_score)
+            SearchRank::for_file_search(path, &file_query, name_score, path_score, case_sensitive)
         };
         matches.push(rank);
     }
@@ -992,6 +1030,53 @@ mod tests {
         assert!(both > 0);
         assert!(snare_only > 0);
         assert_eq!(missing, 0);
+    }
+
+    #[test]
+    fn tag_only_search_matches_metadata_on_audio_files() {
+        let dir = std::env::temp_dir().join("tundra_tag_search_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let audio = dir.join("kick.wav");
+        std::fs::write(&audio, b"RIFF").unwrap();
+        let mtime_secs = file_mtime_secs(&audio).expect("temp file mtime");
+        let paths = vec![dir.join("nested"), audio.clone()];
+        let mut cache = HashMap::new();
+        cache.insert(
+            audio.clone(),
+            CachedMetadata {
+                mtime_secs,
+                fields: TagFields {
+                    bpm: "120".into(),
+                    ..TagFields::default()
+                },
+            },
+        );
+        let filters = vec![TagFilter {
+            field: TagField::Bpm,
+            value: "120".into(),
+        }];
+        let result = collect_tag_matches(&paths, &filters, Arc::new(cache));
+        assert_eq!(result.paths, vec![audio.clone()]);
+        let _ = std::fs::remove_file(&audio);
+        let _ = std::fs::remove_dir(dir);
+    }
+
+    #[test]
+    fn tag_fields_ignore_cache_when_file_missing() {
+        let path = PathBuf::from(r"C:\missing\tundra-kick.wav");
+        let mut cache = HashMap::new();
+        cache.insert(
+            path.clone(),
+            CachedMetadata {
+                mtime_secs: 1,
+                fields: TagFields {
+                    bpm: "120".into(),
+                    ..TagFields::default()
+                },
+            },
+        );
+        let mut lookup = MetadataLookup::new(Arc::new(cache));
+        assert!(lookup.tag_fields(&path).bpm.is_empty());
     }
 
     #[test]

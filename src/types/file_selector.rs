@@ -23,8 +23,8 @@ pub const FILE_LIST_SCROLL_ID: &str = "file-list-scroll";
 pub const FILE_ROW_HEIGHT: f32 = 31.0;
 /// Extra rows rendered above and below the viewport to absorb fast scrolling.
 const FILE_ROW_OVERDRAW: usize = 12;
-/// Assumed viewport height until the first scroll event reports the real one.
-const FILE_LIST_DEFAULT_VIEWPORT: f32 = 2400.0;
+/// Fallback for windowed row rendering until the first scroll event reports height.
+const FILE_LIST_RENDER_VIEWPORT_FALLBACK: f32 = 2400.0;
 pub const FILE_LIST_SCROLLBAR_WIDTH: f32 = 10.0;
 pub const FILE_LIST_SCROLLBAR_MIN_THUMB: f32 = 36.0;
 pub const TAG_SEARCH_INPUT_ID: &str = "tag-search-input";
@@ -38,41 +38,70 @@ pub struct FileListScrollMetrics {
     pub scroll_range: f32,
 }
 
-pub fn file_list_viewport_height(list_viewport_height: f32) -> f32 {
+pub fn file_list_render_viewport_height(list_viewport_height: f32) -> f32 {
     if list_viewport_height > 0.0 {
         list_viewport_height
     } else {
-        FILE_LIST_DEFAULT_VIEWPORT
+        FILE_LIST_RENDER_VIEWPORT_FALLBACK
     }
 }
 
 pub fn file_list_scroll_metrics(
     total_rows: usize,
     scroll_offset: f32,
-    viewport_height: f32,
+    track_height: f32,
 ) -> FileListScrollMetrics {
+    if track_height <= 0.0 {
+        return FileListScrollMetrics {
+            max_scroll: 0.0,
+            thumb_height: 0.0,
+            thumb_top: 0.0,
+            scroll_range: 0.0,
+        };
+    }
+
     let content_height = total_rows as f32 * FILE_ROW_HEIGHT;
-    let track_height = viewport_height.max(0.0);
     let max_scroll = (content_height - track_height).max(0.0);
-    let ratio = if content_height > 0.0 {
-        track_height / content_height
-    } else {
-        1.0
-    };
-    let thumb_height = (track_height * ratio)
-        .max(FILE_LIST_SCROLLBAR_MIN_THUMB)
-        .min(track_height);
-    let scroll_range = (track_height - thumb_height).max(0.0);
-    let thumb_top = if max_scroll > 0.0 && scroll_range > 0.0 {
-        (scroll_offset / max_scroll) * scroll_range
-    } else {
-        0.0
-    };
+    if max_scroll <= 0.0 {
+        return FileListScrollMetrics {
+            max_scroll: 0.0,
+            thumb_height: track_height,
+            thumb_top: 0.0,
+            scroll_range: 0.0,
+        };
+    }
+
+    let ratio = track_height / content_height;
+    let min_thumb = FILE_LIST_SCROLLBAR_MIN_THUMB.min(track_height * 0.9);
+    let mut thumb_height = (track_height * ratio).clamp(min_thumb, track_height);
+    let mut scroll_range = track_height - thumb_height;
+    if scroll_range <= 0.0 {
+        thumb_height = track_height * 0.25;
+        scroll_range = track_height - thumb_height;
+    }
+    let thumb_top = (scroll_offset / max_scroll) * scroll_range;
     FileListScrollMetrics {
         max_scroll,
         thumb_height,
         thumb_top,
         scroll_range,
+    }
+}
+
+pub fn file_list_scroll_metrics_for(selector: &FileSelector) -> FileListScrollMetrics {
+    let track_height = selector.list_viewport_height.max(0.0);
+    file_list_scroll_metrics(
+        selector.file_list.len(),
+        selector.list_scroll_offset,
+        track_height,
+    )
+}
+
+pub fn file_list_scrollbar_grab_offset(metrics: &FileListScrollMetrics, track_y: f32) -> f32 {
+    if track_y >= metrics.thumb_top && track_y <= metrics.thumb_top + metrics.thumb_height {
+        track_y - metrics.thumb_top
+    } else {
+        metrics.thumb_height / 2.0
     }
 }
 
@@ -92,12 +121,16 @@ pub fn file_list_scroll_offset_for_track_y(
 struct FileListScrollbar {
     total_rows: usize,
     scroll_offset: f32,
-    viewport_height: f32,
+    list_viewport_height: f32,
 }
 
 impl FileListScrollbar {
     fn metrics(&self) -> FileListScrollMetrics {
-        file_list_scroll_metrics(self.total_rows, self.scroll_offset, self.viewport_height)
+        file_list_scroll_metrics(
+            self.total_rows,
+            self.scroll_offset,
+            self.list_viewport_height.max(0.0),
+        )
     }
 }
 
@@ -111,7 +144,8 @@ impl Program<Message> for FileListScrollbar {
         bounds: Rectangle,
         cursor: Cursor,
     ) -> Option<Action<Message>> {
-        if self.metrics().max_scroll <= 0.0 {
+        let metrics = self.metrics();
+        if metrics.max_scroll <= 0.0 {
             return None;
         }
         match event {
@@ -168,14 +202,15 @@ impl Program<Message> for FileListScrollbar {
         bounds: Rectangle,
         cursor: Cursor,
     ) -> mouse::Interaction {
-        if self.metrics().max_scroll <= 0.0 {
+        let metrics = self.metrics();
+        if metrics.max_scroll <= 0.0 {
             return mouse::Interaction::default();
         }
         let Some(point) = cursor.position_in(bounds) else {
             return mouse::Interaction::default();
         };
-        let metrics = self.metrics();
-        let on_thumb = point.y >= metrics.thumb_top && point.y <= metrics.thumb_top + metrics.thumb_height;
+        let on_thumb =
+            point.y >= metrics.thumb_top && point.y <= metrics.thumb_top + metrics.thumb_height;
         if on_thumb {
             mouse::Interaction::Grab
         } else {
@@ -187,12 +222,12 @@ impl Program<Message> for FileListScrollbar {
 fn file_list_scrollbar(
     total_rows: usize,
     scroll_offset: f32,
-    viewport_height: f32,
+    list_viewport_height: f32,
 ) -> Element<'static, Message> {
     iced::widget::canvas(FileListScrollbar {
         total_rows,
         scroll_offset,
-        viewport_height,
+        list_viewport_height,
     })
     .width(Length::Fixed(FILE_LIST_SCROLLBAR_WIDTH))
     .height(Length::Fill)
@@ -1038,6 +1073,11 @@ impl FileSelector {
             || !self.tag_filters.is_empty()
     }
 
+    pub fn tag_only_search(&self) -> bool {
+        !self.tag_filters.is_empty()
+            && self.search_value.len() < crate::metadata::FILE_SEARCH_MIN_QUERY_LEN
+    }
+
     pub fn selected_audio_path(&self) -> Option<PathBuf> {
         self.selected_file
             .and_then(|index| self.file_list.get(index))
@@ -1095,7 +1135,7 @@ impl FileSelector {
         // Windowed rendering: only build widgets for rows near the viewport;
         // spacers stand in for the rest so scrollbar geometry stays correct.
         let total = self.file_list.len();
-        let viewport_height = file_list_viewport_height(self.list_viewport_height);
+        let viewport_height = file_list_render_viewport_height(self.list_viewport_height);
         let rows_in_view = (viewport_height / FILE_ROW_HEIGHT).ceil() as usize + 1;
         let first_in_view = ((self.list_scroll_offset / FILE_ROW_HEIGHT).floor() as usize)
             .min(total.saturating_sub(rows_in_view));
@@ -1135,7 +1175,7 @@ impl FileSelector {
 
         let list_with_scrollbar = row![
             fs.width(Length::Fill),
-            file_list_scrollbar(total, self.list_scroll_offset, viewport_height),
+            file_list_scrollbar(total, self.list_scroll_offset, self.list_viewport_height),
         ]
         .spacing(0)
         .height(Length::Fill);
