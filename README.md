@@ -18,7 +18,8 @@ cargo run --release
 ## Features
 
 - Browse directories for audio samples (FLAC, WAV, MP3, OGG)
-- Fuzzy search with directory caching, including audio tags and metadata
+- Fuzzy file search with directory caching
+- Separate tag filters (`title:value`, `artist:value`, etc.) with autocomplete
 - Waveform preview with playback controls; zoom in to see individual sample points
 
 Some icons from https://fontawesome.com/license

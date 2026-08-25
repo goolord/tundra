@@ -1,10 +1,10 @@
 use super::*;
-use super::common::debounce;
 use crate::drag_out::NativeDrag;
-use crate::metadata::{file_matches_search, index_paths, CachedMetadata, MetadataLookup, SearchResult};
+use crate::metadata::{
+    filter_search_paths, index_paths, parse_tag_filter, tag_parse_message, CachedMetadata,
+};
 use futures::future::{AbortHandle, Abortable};
 use futures::*;
-use fuzzy_matcher::skim::SkimMatcherV2;
 
 use iced::widget::{button, center, column, container, mouse_area, operation, opaque, row, stack, text, Space};
 use iced::widget::operation::AbsoluteOffset;
@@ -76,6 +76,7 @@ pub struct App {
     dialog: Option<Dialog>,
     waveform_hovered: bool,
     search_focused: bool,
+    tag_search_focused: bool,
     sidebar_width: f32,
     sidebar_resize: Option<SidebarResize>,
     file_drag: Option<FileDragPending>,
@@ -159,7 +160,7 @@ impl MetadataCache {
     }
 
     fn get_path() -> Option<std::path::PathBuf> {
-        cache_file("metadata_cache_v2.bin")
+        cache_file("metadata_cache_v3.bin")
     }
 
     fn load() -> Self {
@@ -178,7 +179,13 @@ impl MetadataCache {
         let Some(path) = MetadataCache::get_path() else {
             return;
         };
-        let Ok(bytes) = bincode::serialize(&self.0) else {
+        let persistable: HashMap<PathBuf, CachedMetadata> = self
+            .0
+            .iter()
+            .filter(|(_, cached)| cached.mtime_secs != 0)
+            .map(|(path, cached)| (path.clone(), cached.clone()))
+            .collect();
+        let Ok(bytes) = bincode::serialize(&persistable) else {
             eprintln!("Failed to serialize metadata cache");
             return;
         };
@@ -288,6 +295,7 @@ impl Default for App {
             dialog: None,
             waveform_hovered: false,
             search_focused: false,
+            tag_search_focused: false,
             sidebar_width: SidebarSettings::load(),
             sidebar_resize: None,
             file_drag: None,
@@ -330,6 +338,7 @@ impl App {
         let transport_keys = if state.player.waveform.is_some()
             && state.dialog.is_none()
             && !state.search_focused
+            && !state.tag_search_focused
             && state.waveform_hovered
         {
             event::listen_with(|event, status, _window| {
@@ -451,12 +460,40 @@ impl App {
 
     fn open_path(&mut self, path: &Path) -> Task<Message> {
         if path.is_dir() {
-            self.file_selector = FileSelector::new(path);
-            Task::none()
+            return self.navigate_directory(path.to_path_buf());
         } else if is_audio(path) {
             self.play_audio(path)
         } else {
             Task::none()
+        }
+    }
+
+    fn walk_directory(dir: &Path) -> Vec<PathBuf> {
+        WalkDir::new(dir)
+            .max_depth(100)
+            .max_open(100)
+            .follow_links(true)
+            .into_iter()
+            .filter_entry(|e| FileList::file_filter(e.path()))
+            .filter_map(|e| match e {
+                Ok(e) => Some(e.path().to_path_buf()),
+                Err(_) => None,
+            })
+            .collect()
+    }
+
+    fn navigate_directory(&mut self, dir: PathBuf) -> Task<Message> {
+        self.search_focused = false;
+        self.tag_search_focused = false;
+        self.file_selector.reload_directory(&dir);
+        if self.dir_cache.contains_key(&dir) {
+            self.start_file_search()
+        } else {
+            let walker = future::lazy(move |_| {
+                let children = Self::walk_directory(&dir);
+                (dir, children)
+            });
+            Task::perform(walker, Message::InsertDircache)
         }
     }
 
@@ -554,6 +591,73 @@ impl App {
         String::from("Tundra Sample Browser")
     }
 
+    fn reset_file_list(&mut self) {
+        let (file_list, list_error) = FileList::list_buttons(&self.file_selector.current_dir);
+        self.file_selector.file_list = file_list;
+        self.file_selector.list_error = list_error;
+    }
+
+    fn start_file_search(&mut self) -> Task<Message> {
+        self.search_thread.abort();
+        let file_query = self.file_selector.search_value.clone();
+        let tag_filters = self.file_selector.tag_filters.clone();
+
+        if file_query.len() <= 2 && tag_filters.is_empty() {
+            self.reset_file_list();
+            return Task::none();
+        }
+
+        let current_dir = self.file_selector.current_dir.clone();
+        let (abort_handle, abort_reg) = AbortHandle::new_pair();
+        self.search_thread = abort_handle;
+        let metadata = self.metadata_cache.snapshot();
+
+        let paths_source = match self.dir_cache.get(&current_dir) {
+            Some(children) => {
+                let debounce_ms = 200;
+                let paths = children.clone();
+                Task::perform(
+                    Abortable::new(
+                        async move {
+                            filter_search_paths(
+                                debounce_ms,
+                                paths,
+                                file_query,
+                                tag_filters,
+                                metadata,
+                            )
+                            .await
+                        },
+                        abort_reg,
+                    ),
+                    Message::SearchCompleted,
+                )
+            }
+            None => Task::perform(
+                Abortable::new(
+                    async move {
+                        let paths: Vec<PathBuf> = WalkDir::new(&current_dir)
+                            .max_depth(100)
+                            .max_open(100)
+                            .follow_links(true)
+                            .into_iter()
+                            .filter_entry(|e| FileList::file_filter(e.path()))
+                            .filter_map(|e| match e {
+                                Ok(entry) => Some(entry.path().to_path_buf()),
+                                Err(_) => None,
+                            })
+                            .collect();
+                        filter_search_paths(300, paths, file_query, tag_filters, metadata).await
+                    },
+                    abort_reg,
+                ),
+                Message::SearchCompleted,
+            ),
+        };
+
+        paths_source
+    }
+
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::SelectedFile(selected_file) => {
@@ -610,23 +714,22 @@ impl App {
 
             Message::FolderPicked(folder) => {
                 if let Some(path) = folder {
-                    self.file_selector = FileSelector::new(&path);
+                    return self.navigate_directory(path);
                 }
                 Task::none()
             }
 
             Message::GoHome => {
-                self.search_focused = false;
                 if let Some(home) = dirs::home_dir() {
-                    self.file_selector = FileSelector::new(&home);
+                    return self.navigate_directory(home);
                 }
                 Task::none()
             }
 
             Message::RefreshDirectory => {
                 let current_dir = self.file_selector.current_dir.clone();
-                self.file_selector = FileSelector::new(&current_dir);
-                Task::none()
+                self.file_selector.reload_directory(&current_dir);
+                self.start_file_search()
             }
 
             Message::Quit => iced::exit(),
@@ -646,126 +749,70 @@ impl App {
                 Task::none()
             }
 
-            Message::ChangeDirectory(parent_dir) => {
-                self.search_focused = false;
-                self.file_selector = FileSelector::new(&parent_dir);
-                if !self.dir_cache.contains_key(&self.file_selector.current_dir) {
-                    let walker = future::lazy(|_| {
-                        let children: Vec<PathBuf> = WalkDir::new(&parent_dir)
-                            .max_depth(100)
-                            .max_open(100)
-                            .follow_links(true)
-                            .into_iter()
-                            .filter_entry(|e| FileList::file_filter(e.path()))
-                            .filter_map(|e| match e {
-                                Ok(e) => Some(e.path().to_path_buf()),
-                                Err(_) => None,
-                            })
-                            .collect();
-                        (parent_dir, children)
-                    });
-                    Task::perform(walker, Message::InsertDircache)
-                } else {
-                    Task::none()
-                }
-            }
+            Message::ChangeDirectory(parent_dir) => self.navigate_directory(parent_dir),
 
             Message::Search(search_str) => {
                 self.search_focused = true;
-                self.search_thread.abort();
-                match self.dir_cache.get(&self.file_selector.current_dir) {
-                    Some(children) => {
-                        let (abort_handle, abort_reg) = AbortHandle::new_pair();
-                        self.search_thread = abort_handle;
-                        self.file_selector.search_value = search_str.clone();
-                        if search_str.len() > 2 {
-                            let matcher = SkimMatcherV2::default();
-                            let children_clone = children.clone();
-                            let metadata = self.metadata_cache.snapshot();
-                            let file_list = Abortable::new(
-                                async move {
-                                    debounce(std::time::Duration::from_millis(200)).await;
-                                    let mut lookup = MetadataLookup::new(metadata);
-                                    let paths: Vec<PathBuf> = children_clone
-                                        .iter()
-                                        .filter(|path| {
-                                            file_matches_search(
-                                                &matcher,
-                                                path,
-                                                &search_str,
-                                                &mut lookup,
-                                            )
-                                        })
-                                        .cloned()
-                                        .collect();
-                                    SearchResult {
-                                        paths,
-                                        new_metadata: lookup.into_new_entries(),
-                                    }
-                                },
-                                abort_reg,
-                            );
-                            Task::perform(file_list, Message::SearchCompleted)
-                        } else {
-                            let (file_list, list_error) =
-                                FileList::list_buttons(&self.file_selector.current_dir);
-                            self.file_selector.file_list = file_list;
-                            self.file_selector.list_error = list_error;
-                            Task::none()
-                        }
-                    }
-                    None => {
-                        let (abort_handle, abort_reg) = AbortHandle::new_pair();
-                        self.search_thread = abort_handle;
-                        self.file_selector.search_value = search_str.clone();
-                        let current_dir = self.file_selector.current_dir.clone();
-                        if search_str.len() > 2 {
-                            let matcher = SkimMatcherV2::default();
-                            let metadata = self.metadata_cache.snapshot();
-                            let file_list = Abortable::new(
-                                async move {
-                                    debounce(std::time::Duration::from_millis(300)).await;
-                                    let mut lookup = MetadataLookup::new(metadata);
-                                    let paths: Vec<PathBuf> = WalkDir::new(&current_dir)
-                                        .max_depth(100)
-                                        .max_open(100)
-                                        .follow_links(true)
-                                        .into_iter()
-                                        .filter_entry(|e| FileList::file_filter(e.path()))
-                                        .filter_map(|e| match e {
-                                            Ok(entry) => Some(entry.path().to_path_buf()),
-                                            Err(_) => None,
-                                        })
-                                        .filter(|path| {
-                                            file_matches_search(
-                                                &matcher,
-                                                path,
-                                                &search_str,
-                                                &mut lookup,
-                                            )
-                                        })
-                                        .collect();
-                                    SearchResult {
-                                        paths,
-                                        new_metadata: lookup.into_new_entries(),
-                                    }
-                                },
-                                abort_reg,
-                            );
-                            Task::perform(file_list, Message::SearchCompleted)
-                        } else {
-                            let (file_list, list_error) =
-                                FileList::list_buttons(&self.file_selector.current_dir);
-                            self.file_selector.file_list = file_list;
-                            self.file_selector.list_error = list_error;
-                            Task::none()
-                        }
-                    }
-                }
+                self.tag_search_focused = false;
+                self.file_selector.search_value = search_str;
+                self.start_file_search()
             }
 
             Message::SearchFocused(focused) => {
                 self.search_focused = focused;
+                if focused {
+                    self.tag_search_focused = false;
+                }
+                Task::none()
+            }
+
+            Message::TagSearchInput(input) => {
+                self.tag_search_focused = true;
+                self.search_focused = false;
+                self.file_selector.tag_search_error = None;
+                self.file_selector.tag_search_value = input;
+                Task::none()
+            }
+
+            Message::TagSearchSubmit => {
+                self.tag_search_focused = true;
+                self.search_focused = false;
+                let input = self.file_selector.tag_search_value.clone();
+                match parse_tag_filter(&input) {
+                    Ok(filter) => {
+                        self.file_selector.tag_search_error = None;
+                        self.file_selector.add_tag_filter(filter);
+                        self.file_selector.tag_search_value.clear();
+                        self.start_file_search()
+                    }
+                    Err(err) => {
+                        self.file_selector.tag_search_error =
+                            Some(tag_parse_message(err).into());
+                        Task::none()
+                    }
+                }
+            }
+
+            Message::TagSearchFocused(focused) => {
+                self.tag_search_focused = focused;
+                if focused {
+                    self.search_focused = false;
+                }
+                Task::none()
+            }
+
+            Message::TagFilterRemove(field) => {
+                self.file_selector
+                    .tag_filters
+                    .retain(|filter| filter.field != field);
+                self.start_file_search()
+            }
+
+            Message::TagSuggestionSelect(field) => {
+                self.tag_search_focused = true;
+                self.search_focused = false;
+                self.file_selector.tag_search_error = None;
+                self.file_selector.tag_search_value = format!("{}:", field.as_str());
                 Task::none()
             }
 
@@ -805,10 +852,18 @@ impl App {
                 self.dir_cache.insert(parent_dir, children.clone());
                 self.dir_cache.persist();
                 let metadata = self.metadata_cache.snapshot();
-                Task::perform(
-                    async move { index_paths(&children, metadata) },
-                    Message::MetadataIndexed,
-                )
+                let search_task = if self.file_selector.search_active() {
+                    self.start_file_search()
+                } else {
+                    Task::none()
+                };
+                Task::batch([
+                    Task::perform(
+                        async move { index_paths(&children, metadata) },
+                        Message::MetadataIndexed,
+                    ),
+                    search_task,
+                ])
             }
 
             Message::MetadataIndexed(new_metadata) => {

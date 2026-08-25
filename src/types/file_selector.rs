@@ -1,6 +1,7 @@
 pub use super::common::*;
+use crate::metadata::{tag_field_suggestions, TagField, TagFilter};
 use iced::widget::button::{Status as ButtonStatus, Style as ButtonStyle};
-use iced::widget::{container, mouse_area, row, scrollable, text, Button, Column, Row, Space, Svg, TextInput};
+use iced::widget::{button, container, mouse_area, row, scrollable, text, Button, Column, Row, Space, Svg, TextInput};
 use iced::widget::Id;
 use iced::{Alignment, Border, Color, Element, Length, Shadow, theme};
 use iced_aw::ContextMenu;
@@ -10,6 +11,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const TUNDRA_ACCENT: Color = Color::from_rgb8(0x50, 0x7a, 0xe0);
+const TAG_PANEL_TOP_RADIUS: f32 = 12.0;
+const TAG_CHIP_RADIUS: f32 = 16.0;
+const TAG_INPUT_RADIUS: f32 = 8.0;
 pub const FILE_LIST_SCROLL_ID: &str = "file-list-scroll";
 
 #[derive(Debug, Clone)]
@@ -19,6 +23,9 @@ pub struct FileSelector {
     pub selected_file: Option<usize>,
     pub hovered_file: Option<usize>,
     pub search_value: String,
+    pub tag_search_value: String,
+    pub tag_filters: Vec<TagFilter>,
+    pub tag_search_error: Option<String>,
     pub list_error: Option<String>,
 }
 
@@ -140,6 +147,280 @@ fn file_tree_row(content: Element<'_, Message>, selected: bool) -> Element<'_, M
         .into()
 }
 
+fn tag_field_accent(field: TagField) -> Color {
+    match field {
+        TagField::Title => Color::from_rgb8(0x50, 0x7a, 0xe0),
+        TagField::Artist => Color::from_rgb8(0x66, 0x72, 0xe8),
+        TagField::Album => Color::from_rgb8(0x48, 0x96, 0xc8),
+        TagField::Genre => Color::from_rgb8(0x52, 0xa8, 0x86),
+        TagField::Comment => Color::from_rgb8(0x78, 0x82, 0x98),
+        TagField::AlbumArtist => Color::from_rgb8(0x62, 0x66, 0xd8),
+        TagField::Composer => Color::from_rgb8(0x86, 0x70, 0xc0),
+        TagField::Label => Color::from_rgb8(0x6a, 0x88, 0xb4),
+    }
+}
+
+fn tag_chip_close_style(theme: &theme::Theme, status: ButtonStatus) -> ButtonStyle {
+    let palette = theme.extended_palette();
+    let mut style = ButtonStyle {
+        text_color: palette.background.base.text.scale_alpha(0.55),
+        border: Border {
+            radius: 8.0.into(),
+            ..Default::default()
+        },
+        shadow: Shadow::default(),
+        ..ButtonStyle::default()
+    };
+    match status {
+        ButtonStatus::Active | ButtonStatus::Disabled => {
+            style.background = Some(Color::TRANSPARENT.into());
+        }
+        ButtonStatus::Hovered => {
+            style.text_color = palette.background.base.text;
+            style.background = Some(Color::from_rgb8(0xff, 0x66, 0x66).scale_alpha(0.22).into());
+        }
+        ButtonStatus::Pressed => {
+            style.text_color = palette.background.base.text;
+            style.background = Some(Color::from_rgb8(0xff, 0x66, 0x66).scale_alpha(0.38).into());
+        }
+    }
+    style
+}
+
+fn tag_chip(filter: &TagFilter) -> Element<'static, Message> {
+    let field = filter.field;
+    let accent = tag_field_accent(field);
+    let value = filter.value.clone();
+
+    container(
+        row![
+            container(
+                text(field.as_str())
+                    .size(10)
+                    .font(iced::Font {
+                        weight: iced::font::Weight::Semibold,
+                        ..iced::Font::default()
+                    })
+                    .style(move |theme: &theme::Theme| {
+                        let palette = theme.extended_palette();
+                        iced::widget::text::Style {
+                            color: Some(palette.background.base.text.scale_alpha(0.95)),
+                        }
+                    }),
+            )
+            .padding([3, 7])
+            .style(move |_theme| container::Style {
+                background: Some(accent.scale_alpha(0.55).into()),
+                border: Border {
+                    radius: 6.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            text(value)
+                .size(12)
+                .font(iced::Font {
+                    weight: iced::font::Weight::Medium,
+                    ..iced::Font::default()
+                })
+                .style(|theme: &theme::Theme| iced::widget::text::Style {
+                    color: Some(theme.extended_palette().background.base.text),
+                }),
+            button(text("×").size(13))
+                .on_press(Message::TagFilterRemove(field))
+                .padding([2, 4])
+                .style(tag_chip_close_style),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center),
+    )
+    .padding([5, 8])
+    .style(move |theme| {
+        let palette = theme.extended_palette();
+        container::Style {
+            background: Some(palette.background.base.color.scale_alpha(0.55).into()),
+            border: Border {
+                radius: TAG_CHIP_RADIUS.into(),
+                width: 1.0,
+                color: accent.scale_alpha(0.35),
+            },
+            shadow: Shadow {
+                color: palette.background.base.color.scale_alpha(0.35),
+                offset: iced::Vector::new(0.0, 2.0),
+                blur_radius: 6.0,
+            },
+            ..Default::default()
+        }
+    })
+    .into()
+}
+
+fn tag_count_badge(count: usize) -> Element<'static, Message> {
+    container(
+        text(format!("{count}"))
+            .size(10)
+            .font(iced::Font {
+                weight: iced::font::Weight::Semibold,
+                ..iced::Font::default()
+            })
+            .style(|_theme: &theme::Theme| iced::widget::text::Style {
+                color: Some(TUNDRA_ACCENT.scale_alpha(0.95)),
+            }),
+    )
+    .padding([2, 6])
+    .style(|_theme| container::Style {
+        background: Some(TUNDRA_ACCENT.scale_alpha(0.18).into()),
+        border: Border {
+            radius: 8.0.into(),
+            width: 1.0,
+            color: TUNDRA_ACCENT.scale_alpha(0.28),
+        },
+        ..Default::default()
+    })
+    .into()
+}
+
+fn tag_section_header(filter_count: usize) -> Element<'static, Message> {
+    let mut header = Row::new()
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .push(
+            Svg::from_path(resource_path("music-solid.svg"))
+                .width(Length::Fixed(12.0))
+                .height(Length::Fixed(12.0))
+                .style(|_theme, _status| iced::widget::svg::Style {
+                    color: Some(TUNDRA_ACCENT.scale_alpha(0.85)),
+                }),
+        )
+        .push(
+            text("Tag filters")
+                .size(11)
+                .font(iced::Font {
+                    weight: iced::font::Weight::Semibold,
+                    ..iced::Font::default()
+                })
+                .style(|theme: &theme::Theme| iced::widget::text::Style {
+                    color: Some(muted_text(theme)),
+                }),
+        );
+
+    if filter_count > 0 {
+        header = header.push(tag_count_badge(filter_count));
+    }
+
+    header.push(Space::new().width(Length::Fill)).into()
+}
+
+fn tag_input_shell(content: Element<'_, Message>) -> Element<'_, Message> {
+    container(content)
+        .width(Length::Fill)
+        .padding([2, 2])
+        .style(|theme| {
+            let palette = theme.extended_palette();
+            container::Style {
+                background: Some(palette.background.weak.color.scale_alpha(0.45).into()),
+                border: Border {
+                    radius: TAG_INPUT_RADIUS.into(),
+                    width: 1.0,
+                    color: TUNDRA_ACCENT.scale_alpha(0.22),
+                },
+                ..Default::default()
+            }
+        })
+        .into()
+}
+
+fn tag_suggestion_row(field: TagField) -> Element<'static, Message> {
+    let name = field.as_str().to_owned();
+    let hint = field.label().to_owned();
+    button(
+        row![
+            container(
+                text(name)
+                    .size(11)
+                    .font(iced::Font {
+                        weight: iced::font::Weight::Semibold,
+                        ..iced::Font::default()
+                    })
+                    .style(move |_theme: &theme::Theme| iced::widget::text::Style {
+                        color: Some(tag_field_accent(field).scale_alpha(0.95)),
+                    }),
+            )
+            .padding([2, 0]),
+            text(":")
+                .size(11)
+                .style(|theme: &theme::Theme| iced::widget::text::Style {
+                    color: Some(muted_text(theme)),
+                }),
+            Space::new().width(Length::Fill),
+            text(hint)
+                .size(10)
+                .style(|theme: &theme::Theme| iced::widget::text::Style {
+                    color: Some(muted_text(theme)),
+                }),
+        ]
+        .spacing(4)
+        .align_y(Alignment::Center)
+        .width(Length::Fill),
+    )
+    .on_press(Message::TagSuggestionSelect(field))
+    .width(Length::Fill)
+    .padding([6, 10])
+    .style(|theme, status| file_tree_button_style(theme, status, false))
+    .into()
+}
+
+fn tag_suggestions_panel(suggestions: Vec<Element<'static, Message>>) -> Element<'static, Message> {
+    container(
+        Column::with_children(suggestions)
+            .spacing(0)
+            .padding([4, 0]),
+    )
+    .width(Length::Fill)
+    .style(|theme| {
+        let palette = theme.extended_palette();
+        container::Style {
+            background: Some(palette.background.base.color.scale_alpha(0.92).into()),
+            border: Border {
+                radius: TAG_INPUT_RADIUS.into(),
+                width: 1.0,
+                color: palette.background.strong.color.scale_alpha(0.45),
+            },
+            shadow: Shadow {
+                color: Color::BLACK.scale_alpha(0.22),
+                offset: iced::Vector::new(0.0, 4.0),
+                blur_radius: 10.0,
+            },
+            ..Default::default()
+        }
+    })
+    .into()
+}
+
+fn tag_panel_style(theme: &theme::Theme) -> container::Style {
+    let palette = theme.extended_palette();
+    container::Style {
+        background: Some(sidebar_panel(theme).scale_alpha(0.92).into()),
+        border: Border {
+            width: 1.0,
+            color: palette.background.strong.color.scale_alpha(0.28),
+            radius: iced::border::Radius {
+                top_left: TAG_PANEL_TOP_RADIUS,
+                top_right: TAG_PANEL_TOP_RADIUS,
+                bottom_right: 0.0,
+                bottom_left: 0.0,
+            },
+        },
+        ..Default::default()
+    }
+}
+
+fn search_panel(theme: &theme::Theme) -> container::Style {
+    let mut style = section_divider(theme);
+    style.background = Some(sidebar_panel(theme).into());
+    style
+}
+
 fn section_divider(theme: &theme::Theme) -> container::Style {
     container::Style {
         border: Border {
@@ -237,8 +518,51 @@ impl FileSelector {
             selected_file: None,
             hovered_file: None,
             search_value: String::new(),
+            tag_search_value: String::new(),
+            tag_filters: Vec::new(),
+            tag_search_error: None,
             list_error,
         }
+    }
+
+    pub fn reload_directory(&mut self, dir: &Path) {
+        let search_value = self.search_value.clone();
+        let tag_search_value = self.tag_search_value.clone();
+        let tag_filters = self.tag_filters.clone();
+        let tag_search_error = self.tag_search_error.clone();
+        let (file_list, list_error) = FileList::list_buttons(dir);
+        self.current_dir = dir.to_owned();
+        self.file_list = file_list;
+        self.selected_file = None;
+        self.hovered_file = None;
+        self.list_error = list_error;
+        self.search_value = search_value;
+        self.tag_search_value = tag_search_value;
+        self.tag_filters = tag_filters;
+        self.tag_search_error = tag_search_error;
+    }
+
+    pub fn search_active(&self) -> bool {
+        self.search_value.len() > 2 || !self.tag_filters.is_empty()
+    }
+
+    pub fn add_tag_filter(&mut self, filter: TagFilter) {
+        if let Some(existing) = self
+            .tag_filters
+            .iter()
+            .position(|entry| entry.field == filter.field)
+        {
+            self.tag_filters[existing] = filter;
+        } else {
+            self.tag_filters.push(filter);
+        }
+    }
+
+    fn tag_suggestions(&self) -> Vec<Element<'static, Message>> {
+        tag_field_suggestions(&self.tag_search_value)
+            .into_iter()
+            .map(tag_suggestion_row)
+            .collect()
     }
 
     pub fn view(&self) -> Column<'_, Message> {
@@ -276,24 +600,94 @@ impl FileSelector {
             .id(Id::new(FILE_LIST_SCROLL_ID))
             .height(Length::Fill);
 
-        let search = mouse_area(
+        let file_search = mouse_area(
             container(
-                TextInput::new("Search files and tags…", &self.search_value)
+                TextInput::new("Search files…", &self.search_value)
                     .on_input(Message::Search)
                     .size(13)
                     .padding([8, 10])
                     .width(Length::Fill),
             )
             .width(Length::Fill)
-            .style(|theme| {
-                let mut style = section_divider(theme);
-                style.background = Some(sidebar_panel(theme).into());
-                style
-            }),
+            .style(search_panel),
         )
         .on_press(Message::SearchFocused(true));
 
-        column.push(fs).push(search)
+        let mut tag_section = Column::new()
+            .spacing(8)
+            .padding([10, 10])
+            .push(tag_section_header(self.tag_filters.len()));
+
+        if !self.tag_filters.is_empty() {
+            let chips: Vec<Element<Message>> = self
+                .tag_filters
+                .iter()
+                .map(tag_chip)
+                .collect();
+            tag_section = tag_section.push(
+                scrollable(Row::with_children(chips).spacing(8))
+                    .width(Length::Fill)
+                    .direction(iced::widget::scrollable::Direction::Horizontal(
+                        iced::widget::scrollable::Scrollbar::default().width(5).scroller_width(5),
+                    )),
+            );
+        }
+
+        tag_section = tag_section.push(
+            text("Add filters like title:Kick or genre:Electronic")
+                .size(10)
+                .style(|theme: &theme::Theme| iced::widget::text::Style {
+                    color: Some(muted_text(theme).scale_alpha(0.85)),
+                }),
+        );
+
+        let tag_input = mouse_area(tag_input_shell(
+            TextInput::new("title:value — press Enter", &self.tag_search_value)
+                .on_input(Message::TagSearchInput)
+                .on_submit(Message::TagSearchSubmit)
+                .size(12)
+                .padding([8, 10])
+                .width(Length::Fill)
+                .into(),
+        ))
+        .on_press(Message::TagSearchFocused(true));
+        tag_section = tag_section.push(tag_input);
+
+        if !self.tag_search_value.is_empty() && !self.tag_search_value.contains(':') {
+            let suggestions = self.tag_suggestions();
+            if !suggestions.is_empty() {
+                tag_section = tag_section.push(tag_suggestions_panel(suggestions));
+            }
+        }
+
+        if let Some(error) = &self.tag_search_error {
+            tag_section = tag_section.push(
+                container(
+                    text(error)
+                        .size(11)
+                        .style(|_theme: &theme::Theme| iced::widget::text::Style {
+                            color: Some(Color::from_rgb(0.95, 0.62, 0.62)),
+                        }),
+                )
+                .padding([6, 8])
+                .width(Length::Fill)
+                .style(|_theme| container::Style {
+                    background: Some(Color::from_rgb8(0xff, 0x66, 0x66).scale_alpha(0.12).into()),
+                    border: Border {
+                        radius: 6.0.into(),
+                        width: 1.0,
+                        color: Color::from_rgb8(0xff, 0x66, 0x66).scale_alpha(0.28),
+                    },
+                    ..Default::default()
+                }),
+            );
+        }
+
+        let tag_panel = container(tag_section)
+            .width(Length::Fill)
+            .style(tag_panel_style);
+
+        column.push(fs).push(file_search).push(tag_panel)
     }
 }
 

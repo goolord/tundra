@@ -69,6 +69,11 @@ pub enum Message {
     ChangeDirectory(PathBuf),
     Search(String),
     SearchFocused(bool),
+    TagSearchInput(String),
+    TagSearchSubmit,
+    TagSearchFocused(bool),
+    TagFilterRemove(crate::metadata::TagField),
+    TagSuggestionSelect(crate::metadata::TagField),
     SearchCompleted(Result<SearchResult, Aborted>),
     MetadataIndexed(std::collections::HashMap<std::path::PathBuf, crate::metadata::CachedMetadata>),
     InsertDircache((PathBuf, Vec<PathBuf>)),
@@ -146,10 +151,6 @@ pub fn startup_directory() -> PathBuf {
         eprintln!("Could not read current directory: {err}");
         dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"))
     })
-}
-
-pub(crate) async fn debounce(duration: std::time::Duration) {
-    async_io::Timer::after(duration).await;
 }
 
 pub fn truncate_path(path: &Path, max_chars: usize) -> String {
