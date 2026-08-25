@@ -3,9 +3,10 @@ use crate::auto_tag;
 use crate::bulk_auto_tag;
 use crate::drag_out::NativeDrag;
 use crate::metadata::{
-    filter_search_paths, file_search_debounce_ms, index_paths, instrument_tag, parse_tag_filter,
-    refresh_cached_metadata, tag_field_best_match, tag_parse_message,
+    filter_search_paths, filter_tag_paths, file_search_debounce_ms, index_paths, instrument_tag,
+    parse_tag_filter, refresh_cached_metadata, tag_field_best_match, tag_parse_message,
     write_instrument_tag_if_untagged, CachedMetadata, TagParseError, FILE_SEARCH_MIN_QUERY_LEN,
+    TAG_SEARCH_DEBOUNCE_MS,
 };
 use super::auto_tag::{auto_tag_view, AutoTagState};
 use super::bulk_auto_tag::{bulk_auto_tag_view, BulkAutoTagPhase, BulkAutoTagState};
@@ -806,6 +807,7 @@ impl App {
         let tag_filters = self.file_selector.tag_filters.clone();
         let case_sensitive = self.file_selector.search_case_sensitive;
         let show_directories = self.file_selector.search_show_directories;
+        let tag_only = self.file_selector.tag_only_search();
 
         if file_query.len() < FILE_SEARCH_MIN_QUERY_LEN && tag_filters.is_empty() {
             self.reset_file_list();
@@ -821,21 +823,35 @@ impl App {
         let (abort_handle, abort_reg) = AbortHandle::new_pair();
         self.search_thread = abort_handle;
         let metadata = self.metadata_cache.snapshot();
+        let debounce_ms = if tag_only {
+            TAG_SEARCH_DEBOUNCE_MS
+        } else {
+            file_search_debounce_ms(file_query.len())
+        };
 
         if missing_roots.is_empty() {
+            let paths = if tag_only {
+                paths.into_iter().filter(|path| is_audio(path)).collect()
+            } else {
+                paths
+            };
             return Task::perform(
                 Abortable::new(
                     async move {
-                        filter_search_paths(
-                            file_search_debounce_ms(file_query.len()),
-                            paths,
-                            file_query,
-                            tag_filters,
-                            case_sensitive,
-                            show_directories,
-                            metadata,
-                        )
-                        .await
+                        if tag_only {
+                            filter_tag_paths(debounce_ms, paths, tag_filters, metadata).await
+                        } else {
+                            filter_search_paths(
+                                debounce_ms,
+                                paths,
+                                file_query,
+                                tag_filters,
+                                case_sensitive,
+                                show_directories,
+                                metadata,
+                            )
+                            .await
+                        }
                     },
                     abort_reg,
                 ),
@@ -855,16 +871,23 @@ impl App {
                     }
                     paths.sort();
                     paths.dedup();
-                    let mut result = filter_search_paths(
-                        file_search_debounce_ms(file_query.len()).max(300),
-                        paths,
-                        file_query,
-                        tag_filters,
-                        case_sensitive,
-                        show_directories,
-                        metadata,
-                    )
-                    .await;
+                    if tag_only {
+                        paths.retain(|path| is_audio(path));
+                    }
+                    let mut result = if tag_only {
+                        filter_tag_paths(debounce_ms.max(300), paths, tag_filters, metadata).await
+                    } else {
+                        filter_search_paths(
+                            debounce_ms.max(300),
+                            paths,
+                            file_query,
+                            tag_filters,
+                            case_sensitive,
+                            show_directories,
+                            metadata,
+                        )
+                        .await
+                    };
                     result.cached_roots = cached_roots;
                     result
                 },
@@ -1665,23 +1688,19 @@ impl App {
                 self.dir_cache.insert(parent_dir, children.clone());
                 self.dir_cache.persist();
                 let metadata = self.metadata_cache.snapshot();
-                let search_task = if self.file_selector.search_active() {
-                    self.start_file_search()
-                } else {
-                    Task::none()
-                };
-                Task::batch([
-                    Task::perform(
-                        async move { index_paths(&children, metadata) },
-                        Message::MetadataIndexed,
-                    ),
-                    search_task,
-                ])
+                Task::perform(
+                    async move { index_paths(&children, metadata) },
+                    Message::MetadataIndexed,
+                )
             }
 
             Message::MetadataIndexed(new_metadata) => {
                 self.metadata_cache.merge(new_metadata);
-                Task::none()
+                if self.file_selector.search_active() {
+                    self.start_file_search()
+                } else {
+                    Task::none()
+                }
             }
 
             Message::InvalidateDircache => {
@@ -1984,24 +2003,11 @@ impl App {
                 track_top,
                 track_height,
             } => {
-                let total = self.file_selector.file_list.len();
-                let viewport_height =
-                    file_list_viewport_height(self.file_selector.list_viewport_height);
-                let metrics = file_list_scroll_metrics(
-                    total,
-                    self.file_selector.list_scroll_offset,
-                    viewport_height,
-                );
+                let metrics = file_list_scroll_metrics_for(&self.file_selector);
                 if metrics.max_scroll <= 0.0 {
                     return Task::none();
                 }
-                let grab_offset = if track_y >= metrics.thumb_top
-                    && track_y <= metrics.thumb_top + metrics.thumb_height
-                {
-                    track_y - metrics.thumb_top
-                } else {
-                    metrics.thumb_height / 2.0
-                };
+                let grab_offset = file_list_scrollbar_grab_offset(&metrics, track_y);
                 self.file_list_scrollbar_drag = Some(FileListScrollbarDrag {
                     track_top,
                     track_height,
@@ -2021,14 +2027,10 @@ impl App {
                 let Some(drag) = self.file_list_scrollbar_drag.as_ref() else {
                     return Task::none();
                 };
-                let total = self.file_selector.file_list.len();
-                let viewport_height =
-                    file_list_viewport_height(self.file_selector.list_viewport_height);
-                let metrics = file_list_scroll_metrics(
-                    total,
-                    self.file_selector.list_scroll_offset,
-                    viewport_height,
-                );
+                let metrics = file_list_scroll_metrics_for(&self.file_selector);
+                if metrics.max_scroll <= 0.0 {
+                    return Task::none();
+                }
                 let track_y = (point.y - drag.track_top).clamp(0.0, drag.track_height);
                 let offset =
                     file_list_scroll_offset_for_track_y(&metrics, track_y, drag.grab_offset);
