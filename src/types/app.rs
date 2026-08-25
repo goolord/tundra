@@ -3,9 +3,9 @@ use crate::auto_tag;
 use crate::bulk_auto_tag;
 use crate::drag_out::NativeDrag;
 use crate::metadata::{
-    filter_search_paths, index_paths, instrument_tag, parse_tag_filter, refresh_cached_metadata,
-    tag_field_best_match, tag_parse_message, write_instrument_tag_if_untagged, CachedMetadata,
-    TagParseError,
+    filter_search_paths, file_search_debounce_ms, index_paths, instrument_tag, parse_tag_filter,
+    refresh_cached_metadata, tag_field_best_match, tag_parse_message,
+    write_instrument_tag_if_untagged, CachedMetadata, TagParseError, FILE_SEARCH_MIN_QUERY_LEN,
 };
 use super::auto_tag::{auto_tag_view, AutoTagState};
 use super::bulk_auto_tag::{bulk_auto_tag_view, BulkAutoTagPhase, BulkAutoTagState};
@@ -783,7 +783,7 @@ impl App {
         let case_sensitive = self.file_selector.search_case_sensitive;
         let show_directories = self.file_selector.search_show_directories;
 
-        if file_query.len() <= 2 && tag_filters.is_empty() {
+        if file_query.len() < FILE_SEARCH_MIN_QUERY_LEN && tag_filters.is_empty() {
             self.reset_file_list();
             return Task::none();
         }
@@ -803,7 +803,7 @@ impl App {
                 Abortable::new(
                     async move {
                         filter_search_paths(
-                            200,
+                            file_search_debounce_ms(file_query.len()),
                             paths,
                             file_query,
                             tag_filters,
@@ -832,7 +832,7 @@ impl App {
                     paths.sort();
                     paths.dedup();
                     let mut result = filter_search_paths(
-                        300,
+                        file_search_debounce_ms(file_query.len()).max(300),
                         paths,
                         file_query,
                         tag_filters,
@@ -1118,8 +1118,17 @@ impl App {
             Message::Search(search_str) => {
                 self.search_focused = true;
                 self.tag_search_focused = false;
+                let clear = search_str.is_empty();
                 self.file_selector.search_value = search_str;
-                self.start_file_search()
+                let search_task = self.start_file_search();
+                if clear {
+                    Task::batch([
+                        search_task,
+                        operation::focus(Id::new(FILE_SEARCH_INPUT_ID)),
+                    ])
+                } else {
+                    search_task
+                }
             }
 
             Message::ToggleSearchCaseSensitive => {
