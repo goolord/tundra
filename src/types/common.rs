@@ -138,6 +138,15 @@ pub enum Message {
     AllowedDirectoryPicked(Option<PathBuf>),
     RemoveAllowedDirectory(PathBuf),
     ToggleSearchCaseSensitive,
+    ToggleSearchShowDirectories,
+    OpenAutoTag,
+    CloseAutoTag,
+    AutoTagPickFile,
+    AutoTagFilePicked(Option<PathBuf>),
+    AutoTagRun,
+    AutoTagCompleted(Result<crate::auto_tag::ClassificationResult, crate::auto_tag::ClassifyError>),
+    AutoTagApply,
+    ToggleAutoTagDetails,
 }
 
 pub fn is_audio(path: &Path) -> bool {

@@ -1,9 +1,12 @@
 use super::*;
+use crate::auto_tag;
 use crate::drag_out::NativeDrag;
 use crate::metadata::{
-    filter_search_paths, index_paths, parse_tag_filter, tag_field_best_match, tag_parse_message,
-    CachedMetadata, TagParseError,
+    filter_search_paths, index_paths, instrument_tag, parse_tag_filter, refresh_cached_metadata,
+    tag_field_best_match, tag_parse_message, write_instrument_tag_if_untagged, CachedMetadata,
+    TagParseError,
 };
+use super::auto_tag::{auto_tag_view, AutoTagState};
 use super::settings::{self, AddDirectoryResult, AllowedDirectories};
 use futures::future::{AbortHandle, Abortable};
 use futures::*;
@@ -60,6 +63,16 @@ async fn pick_folder(start_dir: PathBuf) -> Option<PathBuf> {
         .map(|folder| folder.path().to_path_buf())
 }
 
+async fn pick_audio_file(start_dir: PathBuf) -> Option<PathBuf> {
+    rfd::AsyncFileDialog::new()
+        .set_title("Select audio file")
+        .set_directory(&start_dir)
+        .add_filter("Audio", &["flac", "wav", "mp3", "ogg"])
+        .pick_file()
+        .await
+        .map(|file| file.path().to_path_buf())
+}
+
 enum FileDragKind {
     File(PathBuf),
     Scroll,
@@ -95,6 +108,8 @@ pub struct App {
     settings_open: bool,
     settings_first_run: bool,
     settings_error: Option<String>,
+    auto_tag_open: bool,
+    auto_tag: AutoTagState,
     waveform_hovered: bool,
     search_focused: bool,
     tag_search_focused: bool,
@@ -332,6 +347,8 @@ impl Default for App {
             settings_open,
             settings_first_run,
             settings_error: None,
+            auto_tag_open: false,
+            auto_tag: AutoTagState::default(),
             waveform_hovered: false,
             search_focused: false,
             tag_search_focused: false,
@@ -387,6 +404,7 @@ impl App {
         let transport_keys = if state.player.waveform.is_some()
             && state.dialog.is_none()
             && !state.settings_open
+            && !state.auto_tag_open
             && !state.search_focused
             && !state.tag_search_focused
             && state.waveform_hovered
@@ -730,6 +748,7 @@ impl App {
         let file_query = self.file_selector.search_value.clone();
         let tag_filters = self.file_selector.tag_filters.clone();
         let case_sensitive = self.file_selector.search_case_sensitive;
+        let show_directories = self.file_selector.search_show_directories;
 
         if file_query.len() <= 2 && tag_filters.is_empty() {
             self.reset_file_list();
@@ -756,6 +775,7 @@ impl App {
                             file_query,
                             tag_filters,
                             case_sensitive,
+                            show_directories,
                             metadata,
                         )
                         .await
@@ -784,6 +804,7 @@ impl App {
                         file_query,
                         tag_filters,
                         case_sensitive,
+                        show_directories,
                         metadata,
                     )
                     .await;
@@ -892,6 +913,7 @@ impl App {
 
             Message::OpenSettings => {
                 self.dialog = None;
+                self.auto_tag_open = false;
                 self.settings_open = true;
                 self.settings_error = None;
                 Task::none()
@@ -990,6 +1012,151 @@ impl App {
                 self.file_selector.search_case_sensitive =
                     !self.file_selector.search_case_sensitive;
                 self.start_file_search()
+            }
+
+            Message::ToggleSearchShowDirectories => {
+                self.file_selector.search_show_directories =
+                    !self.file_selector.search_show_directories;
+                self.start_file_search()
+            }
+
+            Message::OpenAutoTag => {
+                self.dialog = None;
+                self.auto_tag_open = true;
+                let target = self.file_selector.selected_audio_path();
+                let existing = target.as_ref().and_then(|path| instrument_tag(path));
+                self.auto_tag.reset_for_target(target, existing);
+                Task::none()
+            }
+
+            Message::CloseAutoTag => {
+                self.auto_tag_open = false;
+                Task::none()
+            }
+
+            Message::AutoTagPickFile => {
+                let start_dir = self
+                    .auto_tag
+                    .target
+                    .as_ref()
+                    .and_then(|path| path.parent().map(Path::to_path_buf))
+                    .unwrap_or_else(|| self.file_selector.current_dir.clone());
+                Task::perform(pick_audio_file(start_dir), Message::AutoTagFilePicked)
+            }
+
+            Message::AutoTagFilePicked(path) => {
+                match path {
+                    Some(candidate) if is_audio(&candidate) => {
+                        let existing = instrument_tag(&candidate);
+                        self.auto_tag.reset_for_target(Some(candidate), existing);
+                    }
+                    Some(_) => {
+                        self.auto_tag.set_error("Choose a FLAC, WAV, MP3, or OGG file.");
+                    }
+                    None => {}
+                }
+                Task::none()
+            }
+
+            Message::AutoTagRun => {
+                let Some(path) = self.auto_tag.target.clone() else {
+                    self.auto_tag.set_error("Select an audio file first.");
+                    return Task::none();
+                };
+                if let Some(existing) = instrument_tag(&path) {
+                    self.auto_tag.existing_instrument = Some(existing);
+                    self.auto_tag.set_error(
+                        "This file already has an instrument tag. Auto Tag only fills untagged files.",
+                    );
+                    return Task::none();
+                }
+                if !self.auto_tag.is_untagged() {
+                    self.auto_tag.set_error(
+                        "This file already has an instrument tag. Auto Tag only fills untagged files.",
+                    );
+                    return Task::none();
+                }
+                self.auto_tag.running = true;
+                self.auto_tag.error = None;
+                self.auto_tag.error_details = None;
+                self.auto_tag.result = None;
+                self.auto_tag.applied = false;
+                Task::perform(
+                    async move {
+                        let (tx, rx) = futures::channel::oneshot::channel();
+                        std::thread::spawn(move || {
+                            let _ = tx.send(auto_tag::classify_file_blocking(path));
+                        });
+                        rx.await.unwrap_or_else(|_| {
+                            Err(auto_tag::ClassifyError {
+                                message: "Couldn't analyze this file.".into(),
+                                details: "Classifier thread stopped unexpectedly.".into(),
+                            })
+                        })
+                    },
+                    Message::AutoTagCompleted,
+                )
+            }
+
+            Message::AutoTagCompleted(result) => {
+                self.auto_tag.running = false;
+                match result {
+                    Ok(classification) => {
+                        self.auto_tag.error = None;
+                        self.auto_tag.error_details = None;
+                        self.auto_tag.result = Some(classification);
+                    }
+                    Err(err) => {
+                        self.auto_tag.result = None;
+                        self.auto_tag.error = Some(err.message);
+                        self.auto_tag.error_details = Some(err.details);
+                    }
+                }
+                Task::none()
+            }
+
+            Message::ToggleAutoTagDetails => {
+                self.auto_tag.details_open = !self.auto_tag.details_open;
+                Task::none()
+            }
+
+            Message::AutoTagApply => {
+                let Some(path) = self.auto_tag.target.clone() else {
+                    self.auto_tag.set_error("Select an audio file first.");
+                    return Task::none();
+                };
+                if !self.auto_tag.is_untagged() {
+                    self.auto_tag.set_error(
+                        "This file already has an instrument tag. Auto Tag only fills untagged files.",
+                    );
+                    return Task::none();
+                }
+                let Some(result) = self.auto_tag.result.clone() else {
+                    self.auto_tag
+                        .set_error("Detect an instrument before applying a tag.");
+                    return Task::none();
+                };
+                match write_instrument_tag_if_untagged(&path, &result.instrument) {
+                    Ok(()) => {
+                        self.auto_tag.existing_instrument = Some(result.instrument.clone());
+                        if let Some(cached) = refresh_cached_metadata(&path) {
+                            self.metadata_cache
+                                .merge(HashMap::from([(path.clone(), cached)]));
+                        }
+                        self.auto_tag.applied = true;
+                        self.auto_tag.result = None;
+                        self.auto_tag.error_details = None;
+                        self.auto_tag.status =
+                            format!("Applied instrument tag: {}", result.instrument);
+                        self.auto_tag.error = None;
+                        self.start_file_search()
+                    }
+                    Err(err) => {
+                        self.auto_tag.applied = false;
+                        self.auto_tag.set_error(err);
+                        Task::none()
+                    }
+                }
             }
 
             Message::SearchFocused(focused) => {
@@ -1640,6 +1807,23 @@ impl App {
         .into()
     }
 
+    fn with_auto_tag<'a>(base: Element<'a, Message>, state: &'a AutoTagState) -> Element<'a, Message> {
+        stack![
+            base,
+            opaque(
+                container(center(auto_tag_view(state))).style(|_theme| {
+                    container::Style {
+                        background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.55).into()),
+                        ..Default::default()
+                    }
+                }),
+            ),
+        ]
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+    }
+
     fn with_dialog<'a>(base: Element<'a, Message>, dialog: &'a Dialog) -> Element<'a, Message> {
         stack![
             base,
@@ -1732,6 +1916,8 @@ impl App {
                 self.settings_first_run,
                 self.settings_error.clone(),
             )
+        } else if self.auto_tag_open {
+            Self::with_auto_tag(layout.into(), &self.auto_tag)
         } else if let Some(dialog) = &self.dialog {
             Self::with_dialog(layout.into(), dialog)
         } else {

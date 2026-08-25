@@ -284,6 +284,17 @@ fn file_mtime_secs(path: &Path) -> Option<u64> {
 }
 
 fn push_instrument_field(fields: &mut TagFields, tag: &Tag) {
+    if let Some(value) = explicit_instrument_from_tag(tag) {
+        push_field(&mut fields.instrument, Some(&value));
+    }
+
+    if fields.instrument.is_empty() {
+        push_field(&mut fields.instrument, tag.get_string(ItemKey::ContentGroup));
+        push_field(&mut fields.instrument, tag.get_string(ItemKey::Description));
+    }
+}
+
+fn explicit_instrument_from_tag(tag: &Tag) -> Option<String> {
     for item in tag.items() {
         let description = item.description();
         if description.eq_ignore_ascii_case("instrument")
@@ -291,15 +302,14 @@ fn push_instrument_field(fields: &mut TagFields, tag: &Tag) {
             || description.eq_ignore_ascii_case("instrument type")
         {
             if let ItemValue::Text(text) = item.value() {
-                push_field(&mut fields.instrument, Some(text.as_str()));
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    return Some(trimmed.to_string());
+                }
             }
         }
     }
-
-    if fields.instrument.is_empty() {
-        push_field(&mut fields.instrument, tag.get_string(ItemKey::ContentGroup));
-        push_field(&mut fields.instrument, tag.get_string(ItemKey::Description));
-    }
+    None
 }
 
 /// Returns `None` when metadata cannot be read (do not cache).
@@ -729,6 +739,7 @@ pub async fn filter_search_paths(
     file_query: String,
     tag_filters: Vec<TagFilter>,
     case_sensitive: bool,
+    show_directories: bool,
     metadata: Arc<HashMap<PathBuf, CachedMetadata>>,
 ) -> SearchResult {
     async_io::Timer::after(std::time::Duration::from_millis(debounce_ms)).await;
@@ -740,6 +751,10 @@ pub async fn filter_search_paths(
     let mut matches = Vec::new();
 
     for path in paths {
+        if !show_directories && !is_audio(&path) {
+            continue;
+        }
+
         let (name_score, path_score) = if file_active {
             path_match_scores(&file_matcher, &path, &file_query)
         } else {
@@ -788,4 +803,79 @@ pub async fn filter_search_paths(
         new_metadata: lookup.into_new_entries(),
         cached_roots: HashMap::new(),
     }
+}
+
+pub fn instrument_tag(path: &Path) -> Option<String> {
+    if !is_audio(path) {
+        return None;
+    }
+
+    let tagged_file = read_from_path(path).ok()?;
+    let tag = tagged_file.primary_tag().or_else(|| tagged_file.first_tag())?;
+    explicit_instrument_from_tag(tag)
+}
+
+pub fn write_instrument_tag_if_untagged(path: &Path, instrument: &str) -> Result<(), String> {
+    if let Some(existing) = instrument_tag(path) {
+        return Err(format!(
+            "This file already has an instrument tag ({existing}). Auto Tag only fills untagged files."
+        ));
+    }
+    write_instrument_tag(path, instrument)
+}
+
+pub fn write_instrument_tag(path: &Path, instrument: &str) -> Result<(), String> {
+    use lofty::config::WriteOptions;
+    use lofty::file::TaggedFileExt;
+    use lofty::probe::Probe;
+    use lofty::tag::{ItemKey, ItemValue, Tag, TagExt, TagItem};
+
+    let trimmed = instrument.trim();
+    if trimmed.is_empty() {
+        return Err("Instrument label cannot be empty".into());
+    }
+
+    let mut tagged_file = Probe::open(path)
+        .map_err(|err| format!("Failed to open {}: {err}", path.display()))?
+        .read()
+        .map_err(|err| format!("Failed to read {}: {err}", path.display()))?;
+
+    let tag = if let Some(primary_tag) = tagged_file.primary_tag_mut() {
+        primary_tag
+    } else if let Some(first_tag) = tagged_file.first_tag_mut() {
+        first_tag
+    } else {
+        let tag_type = tagged_file.primary_tag_type();
+        tagged_file.insert_tag(Tag::new(tag_type));
+        tagged_file
+            .primary_tag_mut()
+            .ok_or_else(|| "Failed to create tag".to_string())?
+    };
+
+    tag.retain(|item| {
+        !item.description().eq_ignore_ascii_case("instrument")
+            && !item.description().eq_ignore_ascii_case("instrumentname")
+            && !item.description().eq_ignore_ascii_case("instrument type")
+    });
+
+    let mut item = TagItem::new(
+        ItemKey::Comment,
+        ItemValue::Text(trimmed.to_string()),
+    );
+    item.set_description("INSTRUMENT".to_string());
+    tag.push(item);
+
+    tag.save_to_path(path, WriteOptions::default())
+        .map_err(|err| format!("Failed to write tags to {}: {err}", path.display()))?;
+
+    Ok(())
+}
+
+pub fn refresh_cached_metadata(path: &Path) -> Option<CachedMetadata> {
+    let mtime_secs = file_mtime_secs(path)?;
+    let fields = read_tag_fields(path)?;
+    Some(CachedMetadata {
+        mtime_secs,
+        fields,
+    })
 }

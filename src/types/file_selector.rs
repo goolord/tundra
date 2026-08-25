@@ -11,6 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const TUNDRA_ACCENT: Color = Color::from_rgb8(0x50, 0x7a, 0xe0);
+const TUNDRA_MUTED_ICON: Color = Color::from_rgb8(0x52, 0x56, 0x5c);
 const TAG_CHIP_RADIUS: f32 = 16.0;
 const FILTER_INPUT_RADIUS: f32 = 0.0;
 pub const FILE_LIST_SCROLL_ID: &str = "file-list-scroll";
@@ -25,6 +26,7 @@ pub struct FileSelector {
     pub hovered_file: Option<usize>,
     pub search_value: String,
     pub search_case_sensitive: bool,
+    pub search_show_directories: bool,
     pub tag_search_value: String,
     pub tag_filters: Vec<TagFilter>,
     pub tag_search_error: Option<String>,
@@ -341,7 +343,11 @@ fn filter_section_divider() -> Element<'static, Message> {
     .into()
 }
 
-fn file_search_header(active: bool, case_sensitive: bool) -> Element<'static, Message> {
+fn file_search_header(
+    active: bool,
+    case_sensitive: bool,
+    show_directories: bool,
+) -> Element<'static, Message> {
     let mut header = Row::new()
         .spacing(8)
         .align_y(Alignment::Center)
@@ -393,8 +399,62 @@ fn file_search_header(active: bool, case_sensitive: bool) -> Element<'static, Me
 
     header
         .push(Space::new().width(Length::Fill))
+        .push(file_search_directories_button(show_directories))
         .push(file_search_case_button(case_sensitive))
         .into()
+}
+
+fn file_search_directories_button(show_directories: bool) -> Element<'static, Message> {
+    button(
+        Svg::from_path(resource_path("folder-solid.svg"))
+            .width(Length::Fixed(12.0))
+            .height(Length::Fixed(12.0))
+            .style(move |_theme, _status| iced::widget::svg::Style {
+                color: Some(if show_directories {
+                    TUNDRA_ACCENT.scale_alpha(0.95)
+                } else {
+                    TUNDRA_MUTED_ICON
+                }),
+            }),
+    )
+    .padding([2, 6])
+    .on_press(Message::ToggleSearchShowDirectories)
+    .style(move |theme: &theme::Theme, status| {
+        let palette = theme.extended_palette();
+        let mut style = ButtonStyle {
+            text_color: palette.background.base.text,
+            border: Border {
+                radius: 6.0.into(),
+                width: 1.0,
+                color: if show_directories {
+                    TUNDRA_ACCENT.scale_alpha(0.35)
+                } else {
+                    palette.background.strong.color.scale_alpha(0.24)
+                },
+            },
+            ..ButtonStyle::default()
+        };
+        match status {
+            ButtonStatus::Active | ButtonStatus::Disabled => {
+                style.background = Some(
+                    if show_directories {
+                        TUNDRA_ACCENT.scale_alpha(0.14)
+                    } else {
+                        Color::TRANSPARENT
+                    }
+                    .into(),
+                );
+            }
+            ButtonStatus::Hovered => {
+                style.background = Some(TUNDRA_ACCENT.scale_alpha(0.18).into());
+            }
+            ButtonStatus::Pressed => {
+                style.background = Some(TUNDRA_ACCENT.scale_alpha(0.26).into());
+            }
+        }
+        style
+    })
+    .into()
 }
 
 fn file_search_case_button(case_sensitive: bool) -> Element<'static, Message> {
@@ -724,6 +784,7 @@ impl FileSelector {
             hovered_file: None,
             search_value: String::new(),
             search_case_sensitive: false,
+            search_show_directories: true,
             tag_search_value: String::new(),
             tag_filters: Vec::new(),
             tag_search_error: None,
@@ -734,6 +795,7 @@ impl FileSelector {
     pub fn reload_directory(&mut self, dir: &Path) {
         let search_value = self.search_value.clone();
         let search_case_sensitive = self.search_case_sensitive;
+        let search_show_directories = self.search_show_directories;
         let tag_search_value = self.tag_search_value.clone();
         let tag_filters = self.tag_filters.clone();
         let tag_search_error = self.tag_search_error.clone();
@@ -745,6 +807,7 @@ impl FileSelector {
         self.list_error = list_error;
         self.search_value = search_value;
         self.search_case_sensitive = search_case_sensitive;
+        self.search_show_directories = search_show_directories;
         self.tag_search_value = tag_search_value;
         self.tag_filters = tag_filters;
         self.tag_search_error = tag_search_error;
@@ -752,6 +815,13 @@ impl FileSelector {
 
     pub fn search_active(&self) -> bool {
         self.search_value.len() > 2 || !self.tag_filters.is_empty()
+    }
+
+    pub fn selected_audio_path(&self) -> Option<PathBuf> {
+        self.selected_file
+            .and_then(|index| self.file_list.get(index))
+            .filter(|entry| !entry.is_dir && is_audio(&entry.file_path))
+            .map(|entry| entry.file_path.clone())
     }
 
     pub fn add_tag_filter(&mut self, filter: TagFilter) {
@@ -825,6 +895,7 @@ impl FileSelector {
             .push(filter_label_row(file_search_header(
                 file_search_active,
                 self.search_case_sensitive,
+                self.search_show_directories,
             )))
             .push(file_search_input(&self.search_value))
             .push(filter_section_divider())
