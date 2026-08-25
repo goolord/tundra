@@ -8,11 +8,13 @@ use futures::channel::mpsc::UnboundedReceiver;
 use futures::channel::mpsc::UnboundedSender;
 use futures::executor::block_on;
 use futures::StreamExt;
+use iced::widget::button::{Status as ButtonStatus, Style as ButtonStyle};
+use iced::widget::slider::{Handle, HandleShape, Rail, Status as SliderStatus, Style as SliderStyle};
 use iced::widget::{
-    button, mouse_area, row, text, Button, Canvas, Column, Container, Row, Slider,
+    button, container, mouse_area, row, text, Button, Canvas, Column, Container, Slider,
     Space, Svg,
 };
-use iced::{Element, Length};
+use iced::{Alignment, Border, Color, Element, Length, Shadow, Theme, theme};
 use iced_aw::ContextMenu;
 use std::path::PathBuf;
 use rodio::Source;
@@ -23,6 +25,192 @@ use std::sync::atomic::Ordering;
 use std::thread;
 
 const MAX_AUDIO_BYTES: u64 = 100 * 1024 * 1024;
+const SEEKBAR_HEIGHT: f32 = 22.0;
+const TRANSPORT_BUTTON: f32 = 42.0;
+const TRANSPORT_ICON: f32 = 18.0;
+
+fn accent_color(theme: &Theme) -> Color {
+    theme.extended_palette().primary.base.color
+}
+
+fn controls_panel_style(theme: &Theme) -> container::Style {
+    let palette = theme.extended_palette();
+    container::Style {
+        background: Some(palette.background.weak.color.scale_alpha(0.55).into()),
+        border: Border {
+            width: 1.0,
+            color: palette.background.strong.color.scale_alpha(0.35),
+            radius: 0.0.into(),
+        },
+        ..Default::default()
+    }
+}
+
+fn transport_button_style(
+    theme: &Theme,
+    status: ButtonStatus,
+    primary: bool,
+    active: bool,
+) -> ButtonStyle {
+    let palette = theme.extended_palette();
+    let accent = accent_color(theme);
+    let mut style = ButtonStyle {
+        text_color: palette.background.base.text,
+        border: Border {
+            radius: (TRANSPORT_BUTTON / 2.0).into(),
+            width: if primary && active { 0.0 } else { 1.0 },
+            color: if primary {
+                accent.scale_alpha(0.55)
+            } else {
+                palette.background.strong.color.scale_alpha(0.35)
+            },
+        },
+        shadow: Shadow::default(),
+        ..ButtonStyle::default()
+    };
+
+    match status {
+        ButtonStatus::Active | ButtonStatus::Disabled => {
+            style.background = Some(
+                if primary && active {
+                    accent.into()
+                } else {
+                    palette.background.weak.color.scale_alpha(0.35).into()
+                },
+            );
+        }
+        ButtonStatus::Hovered => {
+            style.background = Some(
+                if primary {
+                    if active {
+                        accent.scale_alpha(0.92).into()
+                    } else {
+                        accent.scale_alpha(0.22).into()
+                    }
+                } else {
+                    palette.background.strong.color.scale_alpha(0.28).into()
+                },
+            );
+        }
+        ButtonStatus::Pressed => {
+            style.background = Some(
+                if primary {
+                    accent.scale_alpha(0.78).into()
+                } else {
+                    palette.background.strong.color.scale_alpha(0.42).into()
+                },
+            );
+        }
+    }
+
+    style
+}
+
+fn transport_icon_color(primary: bool, active: bool, theme: &Theme) -> Color {
+    if primary && active {
+        Color::WHITE
+    } else if primary {
+        accent_color(theme)
+    } else {
+        theme
+            .extended_palette()
+            .background
+            .base
+            .text
+            .scale_alpha(0.78)
+    }
+}
+
+fn track_name_label(name: String) -> Element<'static, Message> {
+    container(
+        row![
+            Svg::from_path(resource_path("music-solid.svg"))
+                .width(Length::Fixed(14.0))
+                .height(Length::Fixed(14.0))
+                .style(|theme: &Theme, _| iced::widget::svg::Style {
+                    color: Some(accent_color(theme).scale_alpha(0.85)),
+                }),
+            text(name)
+                .size(12)
+                .style(|theme: &Theme| iced::widget::text::Style {
+                    color: Some(
+                        theme
+                            .extended_palette()
+                            .background
+                            .base
+                            .text
+                            .scale_alpha(0.72),
+                    ),
+                }),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center),
+    )
+    .into()
+}
+
+fn format_time(secs: f64) -> String {
+    let total = secs.max(0.0).floor() as u64;
+    let hours = total / 3600;
+    let minutes = (total % 3600) / 60;
+    let seconds = total % 60;
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
+    }
+}
+
+fn seekbar_style(theme: &Theme, status: SliderStatus) -> SliderStyle {
+    let palette = theme.extended_palette();
+    let accent = accent_color(theme);
+    let track = palette.background.strong.color.scale_alpha(0.42);
+    let fill = match status {
+        SliderStatus::Active => accent.scale_alpha(0.72),
+        SliderStatus::Hovered => accent.scale_alpha(0.92),
+        SliderStatus::Dragged => accent,
+    };
+    let handle_radius = match status {
+        SliderStatus::Dragged => 9.0,
+        SliderStatus::Hovered => 8.0,
+        SliderStatus::Active => 7.0,
+    };
+    SliderStyle {
+        rail: Rail {
+            backgrounds: (fill.into(), track.into()),
+            width: 5.0,
+            border: Border {
+                radius: 2.5.into(),
+                width: 0.0,
+                color: Color::TRANSPARENT,
+            },
+        },
+        handle: Handle {
+            shape: HandleShape::Circle { radius: handle_radius },
+            background: palette.background.base.color.into(),
+            border_width: 2.0,
+            border_color: fill,
+        },
+    }
+}
+
+fn time_label(content: String, emphasized: bool, align: iced::alignment::Horizontal) -> Element<'static, Message> {
+    container(
+        text(content)
+            .size(12)
+            .font(iced::Font::MONOSPACE)
+            .style(move |theme: &Theme| iced::widget::text::Style {
+                color: Some(if emphasized {
+                    theme.extended_palette().background.base.text.scale_alpha(0.88)
+                } else {
+                    theme.extended_palette().background.base.text.scale_alpha(0.52)
+                }),
+            }),
+    )
+    .width(Length::Fixed(44.0))
+    .align_x(align)
+    .into()
+}
 
 pub struct Player {
     pub waveform: Option<WaveForm>,
@@ -36,7 +224,7 @@ enum PlayerCommand {
     Play,
     Pause,
     Stop,
-    Seek(f64),
+    Seek(f64, bool),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -50,6 +238,7 @@ pub struct Controls {
     pub is_playing: sync::Arc<sync::atomic::AtomicBool>,
     pub seekbar: Option<Seekbar>,
     pub playback_position: Option<sync::Arc<PlaybackPosition>>,
+    pub track_duration: Option<f64>,
     pub scrubbing: bool,
 }
 
@@ -70,38 +259,140 @@ struct LoadedAudio {
 }
 
 impl Seekbar {
-    pub fn view(&self, progress: f64) -> Element<'_, Message> {
-        Slider::new(0.0..=1.0, progress, Message::Seek)
-            .step(0.01)
-            .on_release(Message::SeekCommit)
-            .into()
+    fn seek_row(
+        progress: f64,
+        current_label: String,
+        total_label: String,
+        scrubbing: bool,
+        enabled: bool,
+    ) -> Element<'static, Message> {
+        if enabled {
+            row![
+                time_label(current_label, scrubbing, iced::alignment::Horizontal::Right),
+                Slider::new(0.0..=1.0, progress, Message::Seek)
+                    .step(0.001)
+                    .height(SEEKBAR_HEIGHT)
+                    .on_release(Message::SeekCommit)
+                    .style(seekbar_style)
+                    .width(Length::Fill),
+                time_label(total_label, false, iced::alignment::Horizontal::Left),
+            ]
+        } else {
+            row![
+                time_label(current_label, scrubbing, iced::alignment::Horizontal::Right),
+                container(
+                    Space::new()
+                        .width(Length::Fill)
+                        .height(Length::Fixed(5.0)),
+                )
+                .height(SEEKBAR_HEIGHT)
+                .center_y(Length::Fill)
+                .width(Length::Fill)
+                .style(|theme: &Theme| {
+                    let track = theme
+                        .extended_palette()
+                        .background
+                        .strong
+                        .color
+                        .scale_alpha(0.28);
+                    container::Style {
+                        background: Some(track.into()),
+                        border: Border {
+                            radius: 2.5.into(),
+                            width: 0.0,
+                            color: Color::TRANSPARENT,
+                        },
+                        ..Default::default()
+                    }
+                }),
+                time_label(total_label, false, iced::alignment::Horizontal::Left),
+            ]
+        }
+        .spacing(10)
+        .align_y(Alignment::Center)
+        .width(Length::Fill)
+        .into()
+    }
+
+    pub fn view(&self, progress: f64, duration: Option<f64>, scrubbing: bool) -> Element<'_, Message> {
+        let current_secs = duration.map(|duration| progress.clamp(0.0, 1.0) * duration);
+        let current_label = current_secs
+            .map(format_time)
+            .unwrap_or_else(|| "0:00".into());
+        let total_label = duration
+            .map(format_time)
+            .unwrap_or_else(|| "0:00".into());
+        Self::seek_row(progress, current_label, total_label, scrubbing, true)
     }
 }
 
 impl Controls {
-    pub fn play_button(&self) -> Button<'_, Message> {
+    fn play_button(&self) -> Button<'_, Message> {
         let playing = self.is_playing.load(Ordering::SeqCst);
-        let label = if playing {
-            Svg::from_path(resource_path("pause.svg"))
+        let icon_path = if playing {
+            resource_path("pause.svg")
         } else {
-            Svg::from_path(resource_path("play.svg"))
-        }
-        .width(Length::Fixed(24.0))
-        .height(Length::Fixed(24.0));
-        Button::new(label)
-            .on_press(Message::TogglePlaying)
-            .width(Length::Fixed(50.0))
-            .height(Length::Fixed(48.0))
+            resource_path("play.svg")
+        };
+        let is_playing = sync::Arc::clone(&self.is_playing);
+        Button::new(
+            Svg::from_path(icon_path)
+                .width(Length::Fixed(TRANSPORT_ICON))
+                .height(Length::Fixed(TRANSPORT_ICON))
+                .style(move |theme: &Theme, _| {
+                    let playing = is_playing.load(Ordering::SeqCst);
+                    iced::widget::svg::Style {
+                        color: Some(transport_icon_color(true, playing, theme)),
+                    }
+                }),
+        )
+        .on_press(Message::TogglePlaying)
+        .width(Length::Fixed(TRANSPORT_BUTTON))
+        .height(Length::Fixed(TRANSPORT_BUTTON))
+        .style({
+            let is_playing = sync::Arc::clone(&self.is_playing);
+            move |theme: &Theme, status| {
+                let playing = is_playing.load(Ordering::SeqCst);
+                transport_button_style(theme, status, true, playing)
+            }
+        })
     }
 
-    pub fn stop_button(&self) -> Button<'_, Message> {
-        let label = Svg::from_path(resource_path("stop.svg"))
-            .width(Length::Fixed(24.0))
-            .height(Length::Fixed(24.0));
-        Button::new(label)
-            .on_press(Message::StopPlayback)
-            .width(Length::Fixed(50.0))
-            .height(Length::Fixed(48.0))
+    fn stop_button(&self) -> Button<'_, Message> {
+        Button::new(
+            Svg::from_path(resource_path("stop.svg"))
+                .width(Length::Fixed(TRANSPORT_ICON))
+                .height(Length::Fixed(TRANSPORT_ICON))
+                .style(|theme: &Theme, _| iced::widget::svg::Style {
+                    color: Some(transport_icon_color(false, false, theme)),
+                }),
+        )
+        .on_press(Message::StopPlayback)
+        .width(Length::Fixed(TRANSPORT_BUTTON))
+        .height(Length::Fixed(TRANSPORT_BUTTON))
+        .style(|theme: &Theme, status| transport_button_style(theme, status, false, false))
+    }
+
+    fn transport_cluster(&self) -> Element<'_, Message> {
+        container(
+            row![self.play_button(), self.stop_button()]
+                .spacing(6)
+                .align_y(Alignment::Center),
+        )
+        .padding(4)
+        .style(|theme: &theme::Theme| {
+            let palette = theme.extended_palette();
+            container::Style {
+                background: Some(palette.background.base.color.scale_alpha(0.35).into()),
+                border: Border {
+                    width: 1.0,
+                    color: palette.background.strong.color.scale_alpha(0.3),
+                    radius: 999.0.into(),
+                },
+                ..Default::default()
+            }
+        })
+        .into()
     }
 
     pub fn seek_bar(&self) -> Element<'_, Message> {
@@ -119,27 +410,46 @@ impl Controls {
             }
         };
         match &self.seekbar {
-            None => Slider::new(0.0..=0.0, 0.0, Message::Seek).into(),
-            Some(seekbar) => seekbar.view(progress),
+            None => Seekbar::seek_row(
+                0.0,
+                "--:--".into(),
+                "--:--".into(),
+                false,
+                false,
+            ),
+            Some(seekbar) => seekbar.view(progress, self.track_duration, self.scrubbing),
         }
     }
 
-    pub fn view(&self) -> Container<'_, Message> {
-        let c_row = Row::new()
-            .push(self.play_button())
-            .push(self.stop_button())
-            .spacing(6)
-            .padding(2);
+    pub fn view(&self, track_name: Option<&str>) -> Container<'_, Message> {
+        let transport = self.transport_cluster();
+        let footer: Element<Message> = if let Some(name) = track_name {
+            row![
+                track_name_label(name.to_owned()),
+                Space::new().width(Length::Fill),
+                transport,
+            ]
+            .align_y(Alignment::Center)
+            .width(Length::Fill)
+            .into()
+        } else {
+            row![Space::new().width(Length::Fill), transport]
+                .align_y(Alignment::Center)
+                .width(Length::Fill)
+                .into()
+        };
+
         Container::new(
             Column::new()
                 .push(self.seek_bar())
-                .push(c_row)
-                .width(Length::Fill)
-                .align_x(iced::Alignment::Center),
+                .push(footer)
+                .spacing(8)
+                .width(Length::Fill),
         )
-        .align_x(iced::alignment::Horizontal::Center)
-        .align_y(iced::alignment::Vertical::Center)
+        .padding([6, 8])
         .width(Length::Fill)
+        .height(Length::Shrink)
+        .style(controls_panel_style)
     }
 }
 
@@ -161,6 +471,7 @@ impl Player {
                     is_playing,
                     seekbar: None,
                     playback_position: None,
+                    track_duration: None,
                     scrubbing: false,
                 },
                 cmd_sender,
@@ -170,73 +481,88 @@ impl Player {
     }
 
     pub fn view(&self) -> Container<'_, Message> {
-        let waveform_area: Element<Message> = match &self.waveform {
-            Some(wf) => {
-                let zoom = wf.view_state().zoom;
-                let toolbar = row![
-                    text(format!("Zoom {zoom:.1}×")).size(12),
-                    button(text("−").size(16))
-                        .padding([2, 8])
-                        .on_press(Message::WaveformZoomOut),
-                    button(text("+").size(16))
-                        .padding([2, 8])
-                        .on_press(Message::WaveformZoomIn),
-                    text("Click to seek · scroll to zoom · Shift+scroll/drag to pan")
-                        .size(11)
-                        .color(iced::Color::from_rgb(0.55, 0.58, 0.62)),
-                ]
-                .spacing(6)
-                .align_y(iced::Alignment::Center);
-
-                let underlay = Column::new()
-                    .push(toolbar)
-                    .push(
-                        mouse_area(
-                            Canvas::new(wf)
-                                .width(Length::Fill)
-                                .height(Length::Fill),
-                        )
-                        .on_enter(Message::WaveformHoverChanged(true))
-                        .on_exit(Message::WaveformHoverChanged(false)),
-                    )
-                    .spacing(4);
-
-                ContextMenu::new(underlay, || {
-                    file_context_menu(
-                        Message::WaveformCopyName,
-                        Message::WaveformCopyPath,
-                        Message::WaveformRevealInFileManager,
-                    )
-                })
-                .style(context_menu_style)
-                .into()
-            }
-            None => Space::new()
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .into(),
-        };
-
         let mut column = Column::new()
             .width(Length::Fill)
-            .height(Length::Fill)
-            .push(
+            .height(Length::Fill);
+
+        if let Some(wf) = &self.waveform {
+            let zoom = wf.view_state().zoom;
+            let toolbar = row![
+                text(format!("Zoom {zoom:.1}×")).size(12),
+                button(text("−").size(16))
+                    .padding([2, 8])
+                    .on_press(Message::WaveformZoomOut),
+                button(text("+").size(16))
+                    .padding([2, 8])
+                    .on_press(Message::WaveformZoomIn),
+                text("Click to seek · scroll to zoom · Shift+scroll/drag to pan")
+                    .size(11)
+                    .style(|theme: &Theme| text::Style {
+                        color: Some(
+                            theme
+                                .extended_palette()
+                                .background
+                                .base
+                                .text
+                                .scale_alpha(0.72),
+                        ),
+                    }),
+            ]
+            .spacing(6)
+            .align_y(iced::Alignment::Center);
+
+            let underlay = Column::new()
+                .push(toolbar)
+                .push(
+                    mouse_area(
+                        Canvas::new(wf)
+                            .width(Length::Fill)
+                            .height(Length::Fill),
+                    )
+                    .on_enter(Message::WaveformHoverChanged(true))
+                    .on_exit(Message::WaveformHoverChanged(false)),
+                )
+                .spacing(4);
+
+            let waveform_area = ContextMenu::new(underlay, || {
+                file_context_menu(
+                    Message::WaveformCopyName,
+                    Message::WaveformCopyPath,
+                    Message::WaveformRevealInFileManager,
+                )
+            })
+            .style(context_menu_style);
+
+            column = column.push(
                 Container::new(waveform_area)
                     .width(Length::Fill)
                     .height(Length::Fill)
                     .padding(2),
             );
+        } else {
+            column = column.push(Space::new().width(Length::Fill).height(Length::Fill));
+        }
 
-        column = column.push(Controls::view(&self.controls));
+        column = column.push(Controls::view(
+            &self.controls,
+            self.current_file
+                .as_ref()
+                .and_then(|path| path.file_name())
+                .and_then(|name| name.to_str()),
+        ));
         Container::new(column)
             .width(Length::Fill)
             .height(Length::Fill)
-            .padding(1)
+            .align_y(if self.waveform.is_none() {
+                Alignment::End
+            } else {
+                Alignment::Start
+            })
             .center_x(Length::Fill)
     }
 
     pub fn play_file(&mut self, file_path: &Path) -> Result<(), String> {
-        self.stop();
+        send_command(&self.cmd_sender, PlayerCommand::Stop);
         let mut loaded = load_audio(file_path)?;
 
         let total_frames = loaded.playback.total_frames;
@@ -246,6 +572,7 @@ impl Player {
             .set_playback_position(sync::Arc::clone(&playback_position));
         loaded.waveform.set_sample_rate(loaded.playback.sample_rate);
         self.controls.playback_position = Some(sync::Arc::clone(&playback_position));
+        self.controls.track_duration = Some(total_frames as f64 / f64::from(loaded.playback.sample_rate));
         self.controls.scrubbing = false;
         self.controls.seekbar = Some(Seekbar { seeking: 0.0 });
         self.current_file = Some(file_path.to_path_buf());
@@ -283,13 +610,14 @@ impl Player {
 
     pub fn seek(&mut self, p: f64) {
         self.controls.scrubbing = false;
+        let resume = self.controls.is_playing.load(Ordering::SeqCst);
         if let Some(seekbar) = &mut self.controls.seekbar {
             seekbar.seeking = p;
         }
         if let Some(waveform) = &mut self.waveform {
             waveform.set_scrub_progress(None);
         }
-        send_command(&self.cmd_sender, PlayerCommand::Seek(p));
+        send_command(&self.cmd_sender, PlayerCommand::Seek(p, resume));
     }
 
     pub fn begin_scrub(&mut self, p: f64) {
@@ -333,6 +661,7 @@ impl Player {
         self.controls.scrubbing = false;
         self.controls.seekbar = None;
         self.controls.playback_position = None;
+        self.controls.track_duration = None;
         self.current_file = None;
         self.waveform = None;
     }
@@ -398,6 +727,9 @@ fn run_audio_worker(
                     is_playing.store(true, Ordering::SeqCst);
                 }
                 PlayerCommand::Pause => {
+                    if let Some(position) = &playback_position {
+                        play_offset = position.progress();
+                    }
                     let _ = msg_sender.unbounded_send(PlayerMsg::PlayingStored);
                     sink.pause();
                     is_playing.store(false, Ordering::SeqCst);
@@ -411,7 +743,7 @@ fn run_audio_worker(
                     sink.clear();
                     is_playing.store(false, Ordering::SeqCst);
                 }
-                PlayerCommand::Seek(p) => {
+                PlayerCommand::Seek(p, resume) => {
                     let Some(data) = playback.as_ref() else {
                         continue;
                     };
@@ -430,8 +762,12 @@ fn run_audio_worker(
                         playback_position.as_ref(),
                         &msg_sender,
                     );
-                    sink.play();
-                    is_playing.store(true, Ordering::SeqCst);
+                    if resume {
+                        sink.play();
+                    } else {
+                        sink.pause();
+                    }
+                    is_playing.store(resume, Ordering::SeqCst);
                 }
             }
         }

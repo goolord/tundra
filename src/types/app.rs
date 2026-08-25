@@ -11,7 +11,7 @@ use iced::widget::operation::AbsoluteOffset;
 use iced::{Border, Color, Element, Event, Length, Point, Shadow, Subscription, Task, Theme};
 use iced::event;
 use iced::futures::stream;
-use iced::keyboard::Modifiers;
+use iced::keyboard::{Key, Modifiers};
 use iced::mouse;
 use iced::window;
 use iced_aw::ICED_AW_FONT_BYTES;
@@ -26,8 +26,13 @@ use walkdir::WalkDir;
 const DEFAULT_SIDEBAR_WIDTH: f32 = 280.0;
 const MIN_SIDEBAR_WIDTH: f32 = 160.0;
 const MAX_SIDEBAR_WIDTH: f32 = 720.0;
-const SIDEBAR_RESIZER_WIDTH: f32 = 6.0;
+const SIDEBAR_RESIZER_HIT_WIDTH: f32 = 10.0;
+const SIDEBAR_RESIZER_LINE_WIDTH: f32 = 2.0;
 const FILE_DRAG_THRESHOLD: f32 = 8.0;
+
+fn transport_shortcut_allowed(modifiers: Modifiers) -> bool {
+    !modifiers.shift() && !modifiers.control() && !modifiers.alt() && !modifiers.logo()
+}
 
 async fn pick_folder(start_dir: PathBuf) -> Option<PathBuf> {
     rfd::AsyncFileDialog::new()
@@ -98,16 +103,11 @@ impl DirCache {
     }
 
     fn get_path() -> Option<std::path::PathBuf> {
-        match dirs::cache_dir() {
-            Some(mut cache_dir) => {
-                cache_dir.push("tundra");
-                let _ = std::fs::create_dir(&cache_dir);
-                cache_dir.push("dir_cache");
-                cache_dir.set_extension("bin");
-                Some(cache_dir)
-            }
-            None => None,
-        }
+        tundra_cache_dir().map(|mut cache_dir| {
+            cache_dir.push("dir_cache");
+            cache_dir.set_extension("bin");
+            cache_dir
+        })
     }
 
     fn get_dir_cache() -> DirCache {
@@ -130,6 +130,51 @@ impl DirCache {
         };
         if let Err(err) = std::fs::write(dir_cache, bytes) {
             eprintln!("Failed to write directory cache: {err}");
+        }
+    }
+}
+
+fn tundra_cache_dir() -> Option<PathBuf> {
+    dirs::cache_dir().map(|mut cache_dir| {
+        cache_dir.push("tundra");
+        let _ = std::fs::create_dir_all(&cache_dir);
+        cache_dir
+    })
+}
+
+struct SidebarSettings;
+
+impl SidebarSettings {
+    fn path() -> Option<PathBuf> {
+        tundra_cache_dir().map(|mut path| {
+            path.push("sidebar_width.bin");
+            path
+        })
+    }
+
+    fn load() -> f32 {
+        let Some(path) = Self::path() else {
+            return DEFAULT_SIDEBAR_WIDTH;
+        };
+        match std::fs::read(path) {
+            Ok(bytes) => bincode::deserialize::<f32>(&bytes)
+                .unwrap_or(DEFAULT_SIDEBAR_WIDTH)
+                .clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH),
+            Err(_) => DEFAULT_SIDEBAR_WIDTH,
+        }
+    }
+
+    fn persist(width: f32) {
+        let Some(path) = Self::path() else {
+            return;
+        };
+        let width = width.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
+        let Ok(bytes) = bincode::serialize(&width) else {
+            eprintln!("Failed to serialize sidebar width");
+            return;
+        };
+        if let Err(err) = std::fs::write(path, bytes) {
+            eprintln!("Failed to write sidebar width: {err}");
         }
     }
 }
@@ -163,7 +208,7 @@ impl Default for App {
             drag_over: false,
             dialog: None,
             waveform_hovered: false,
-            sidebar_width: DEFAULT_SIDEBAR_WIDTH,
+            sidebar_width: SidebarSettings::load(),
             sidebar_resize: None,
             file_drag: None,
             native_drag: NativeDrag::new(),
@@ -202,12 +247,53 @@ impl App {
             Subscription::none()
         };
 
-        let waveform_keys = if state.waveform_hovered && state.player.waveform.is_some() {
-            event::listen_with(|event, _status, _window| match event {
-                Event::Keyboard(iced::keyboard::Event::KeyPressed { key, .. }) => {
-                    Some(Message::WaveformKey(key))
+        let transport_keys = if state.player.waveform.is_some() && state.dialog.is_none() {
+            event::listen_with(|event, status, _window| {
+                if status != event::Status::Ignored {
+                    return None;
                 }
-                _ => None,
+                match event {
+                    Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                        key,
+                        modifiers,
+                        repeat,
+                        ..
+                    }) => {
+                        if repeat || !transport_shortcut_allowed(modifiers) {
+                            return None;
+                        }
+                        if key == Key::Named(iced::keyboard::key::Named::Space) {
+                            Some(Message::TogglePlaying)
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                }
+            })
+        } else {
+            Subscription::none()
+        };
+
+        let waveform_keys = if state.waveform_hovered && state.player.waveform.is_some() {
+            event::listen_with(|event, status, _window| {
+                if status != event::Status::Ignored {
+                    return None;
+                }
+                match event {
+                    Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                        key,
+                        modifiers,
+                        repeat,
+                        ..
+                    }) => {
+                        if repeat || modifiers.control() || modifiers.logo() || modifiers.alt() {
+                            return None;
+                        }
+                        Some(Message::WaveformKey(key))
+                    }
+                    _ => None,
+                }
             })
         } else {
             Subscription::none()
@@ -271,6 +357,7 @@ impl App {
             file_events,
             playback_tick,
             waveform_keys,
+            transport_keys,
             waveform_spring,
             sidebar_resize,
             file_drag,
@@ -650,7 +737,11 @@ impl App {
 
             Message::WaveformViewChanged(view) => {
                 if let Some(waveform) = &mut self.player.waveform {
-                    waveform.set_view(view);
+                    if waveform.pan_active() {
+                        waveform.set_preview_view(Some(view));
+                    } else {
+                        waveform.set_view(view);
+                    }
                 }
                 Task::none()
             }
@@ -972,39 +1063,71 @@ impl App {
 
             Message::SidebarResizeEnd => {
                 self.sidebar_resize = None;
+                SidebarSettings::persist(self.sidebar_width);
                 Task::none()
             }
         }
     }
 
     fn sidebar_resizer(resizing: bool) -> Element<'static, Message> {
-        mouse_area(
-            container(
+        let gutter = (SIDEBAR_RESIZER_HIT_WIDTH - SIDEBAR_RESIZER_LINE_WIDTH) / 2.0;
+        let line = container(
+            Space::new()
+                .width(Length::Fill)
+                .height(Length::Fill),
+        )
+        .width(Length::Fixed(SIDEBAR_RESIZER_LINE_WIDTH))
+        .height(Length::Fill)
+        .style(move |theme: &Theme| {
+            let palette = theme.extended_palette();
+            let alpha = if resizing { 0.85 } else { 0.45 };
+            container::Style {
+                background: Some(
+                    palette
+                        .background
+                        .strong
+                        .color
+                        .scale_alpha(alpha)
+                        .into(),
+                ),
+                ..Default::default()
+            }
+        });
+
+        // Visual line underneath; transparent mouse_area on top receives hover/cursor.
+        stack![
+            row![
+                Space::new().width(Length::Fixed(gutter)),
+                line,
+                Space::new().width(Length::Fixed(gutter)),
+            ]
+            .width(Length::Fixed(SIDEBAR_RESIZER_HIT_WIDTH))
+            .height(Length::Fill),
+            mouse_area(
                 Space::new()
-                    .width(Length::Fill)
+                    .width(Length::Fixed(SIDEBAR_RESIZER_HIT_WIDTH))
                     .height(Length::Fill),
             )
-            .width(Length::Fixed(SIDEBAR_RESIZER_WIDTH))
-            .height(Length::Fill)
-            .center_y(Length::Fill)
-            .style(move |theme: &Theme| {
-                let palette = theme.extended_palette();
-                let alpha = if resizing { 0.85 } else { 0.45 };
-                container::Style {
-                    background: Some(
-                        palette
-                            .background
-                            .strong
-                            .color
-                            .scale_alpha(alpha)
-                            .into(),
-                    ),
-                    ..Default::default()
-                }
-            }),
+            .interaction(mouse::Interaction::ResizingColumn)
+            .on_press(Message::SidebarResizeStart),
+        ]
+        .width(Length::Fixed(SIDEBAR_RESIZER_HIT_WIDTH))
+        .height(Length::Fill)
+        .into()
+    }
+
+    fn sidebar_resize_overlay(resizing: bool) -> Element<'static, Message> {
+        if !resizing {
+            return Space::new().into();
+        }
+        mouse_area(
+            Space::new()
+                .width(Length::Fill)
+                .height(Length::Fill),
         )
-        .interaction(mouse::Interaction::ResizingHorizontally)
-        .on_press(Message::SidebarResizeStart)
+        .interaction(mouse::Interaction::ResizingColumn)
+        .on_move(|point| Message::SidebarResizeMove(point.x))
+        .on_release(Message::SidebarResizeEnd)
         .into()
     }
 
@@ -1080,7 +1203,8 @@ impl App {
                 }
             });
 
-        let resizer = Self::sidebar_resizer(self.sidebar_resize.is_some());
+        let resizing = self.sidebar_resize.is_some();
+        let resizer = Self::sidebar_resizer(resizing);
 
         let player = container(if self.drag_over {
             stack![
@@ -1110,10 +1234,15 @@ impl App {
         .width(Length::Fill)
         .height(Length::Fill);
 
-        let workspace = row![file_selector, resizer, player]
-            .spacing(0)
-            .height(Length::Fill)
-            .width(Length::Fill);
+        let workspace = stack![
+            row![file_selector, resizer, player]
+                .spacing(0)
+                .height(Length::Fill)
+                .width(Length::Fill),
+            Self::sidebar_resize_overlay(resizing),
+        ]
+        .width(Length::Fill)
+        .height(Length::Fill);
 
         let layout = column![menu, workspace]
             .width(Length::Fill)

@@ -48,11 +48,11 @@ fn muted_text(theme: &theme::Theme) -> Color {
 }
 
 fn tree_icon_color(theme: &theme::Theme, emphasized: bool) -> Color {
-    let text = theme.extended_palette().background.base.text;
+    let palette = theme.extended_palette();
     if emphasized {
-        text.scale_alpha(0.85)
+        palette.primary.base.color.scale_alpha(0.85)
     } else {
-        text.scale_alpha(0.58)
+        palette.background.base.text.scale_alpha(0.62)
     }
 }
 

@@ -9,11 +9,12 @@ use iced::keyboard::Modifiers;
 use iced::alignment;
 use iced::widget::canvas::Text;
 use iced::{Color, Pixels, Point, Rectangle, Renderer, Size, Theme, Vector};
+use std::cell::Cell;
 use std::sync::Arc;
 
 use crate::source::arc_samples::PlaybackPosition;
 
-const MIN_ZOOM: f32 = 0.25;
+const MIN_ZOOM: f32 = 1.0;
 const MAX_ZOOM: f32 = 64.0;
 const ZOOM_FACTOR: f32 = 1.25;
 const MAX_COLUMNS_FACTOR: f32 = 4.0;
@@ -22,6 +23,15 @@ const TIME_MARKER_HEIGHT: f32 = 16.0;
 const MAX_OVERSCROLL: f32 = 0.14;
 const OVERSCROLL_SPRING: f32 = 0.78;
 const OVERSCROLL_STOP: f32 = 0.002;
+const WHEEL_ZOOM_STEP: f32 = 0.15;
+const WHEEL_ZOOM_TAIL: f32 = 0.01;
+const EDGE_RUBBER_BAND: f32 = 0.35;
+const WAVEFORM_CORNER_RADIUS: f32 = 8.0;
+
+fn theme_cache_key(theme: &Theme) -> u32 {
+    let primary = theme.extended_palette().primary.base.color;
+    primary.r.to_bits() ^ primary.g.to_bits() ^ primary.b.to_bits()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WaveFormView {
@@ -42,23 +52,40 @@ impl Default for WaveFormView {
 
 impl WaveFormView {
     pub fn zoom_in(&mut self) {
-        self.apply_zoom(ZOOM_FACTOR);
+        self.apply_zoom_at(ZOOM_FACTOR, 0.5);
     }
 
     pub fn zoom_out(&mut self) {
-        self.apply_zoom(1.0 / ZOOM_FACTOR);
+        self.apply_zoom_at(1.0 / ZOOM_FACTOR, 0.5);
     }
 
-    pub fn apply_wheel(&mut self, delta: ScrollDelta) {
-        let lines = match delta {
+    pub fn wheel_lines(delta: ScrollDelta) -> f32 {
+        match delta {
             ScrollDelta::Lines { y, .. } => y,
             ScrollDelta::Pixels { y, .. } => y / 48.0,
-        };
-        if lines > 0.0 {
-            self.apply_zoom(ZOOM_FACTOR.powf(lines.abs()));
-        } else if lines < 0.0 {
-            self.apply_zoom((1.0 / ZOOM_FACTOR).powf(lines.abs()));
         }
+    }
+
+    /// Accumulate trackpad/mouse wheel delta; apply zoom in fixed steps.
+    pub fn accumulate_wheel(&mut self, lines: f32, anchor_x: f32, pending: &mut f32) -> bool {
+        *pending += lines;
+        let mut changed = false;
+        while *pending >= WHEEL_ZOOM_STEP {
+            self.apply_zoom_at(ZOOM_FACTOR.powf(WHEEL_ZOOM_STEP), anchor_x);
+            *pending -= WHEEL_ZOOM_STEP;
+            changed = true;
+        }
+        while *pending <= -WHEEL_ZOOM_STEP {
+            self.apply_zoom_at((1.0 / ZOOM_FACTOR).powf(WHEEL_ZOOM_STEP), anchor_x);
+            *pending += WHEEL_ZOOM_STEP;
+            changed = true;
+        }
+        if pending.abs() >= WHEEL_ZOOM_TAIL {
+            self.apply_zoom_at(ZOOM_FACTOR.powf(*pending), anchor_x);
+            *pending = 0.0;
+            changed = true;
+        }
+        changed
     }
 
     pub fn pan(&mut self, delta: f32) {
@@ -72,12 +99,14 @@ impl WaveFormView {
 
         if target < 0.0 {
             self.offset = 0.0;
-            let overflow = -target / visible.max(1e-6);
-            self.overscroll = Self::rubber_band(self.overscroll, -overflow * 0.18);
+            let overflow = (-target / visible.max(1e-6))
+                .max(offset_delta.abs() / visible.max(1e-6));
+            self.overscroll = Self::rubber_band(self.overscroll, -overflow * EDGE_RUBBER_BAND);
         } else if target > max {
             self.offset = max;
-            let overflow = (target - max) / visible.max(1e-6);
-            self.overscroll = Self::rubber_band(self.overscroll, overflow * 0.18);
+            let overflow = ((target - max) / visible.max(1e-6))
+                .max(offset_delta.abs() / visible.max(1e-6));
+            self.overscroll = Self::rubber_band(self.overscroll, overflow * EDGE_RUBBER_BAND);
         } else {
             self.offset = target;
             if self.overscroll != 0.0
@@ -107,53 +136,77 @@ impl WaveFormView {
         (current + additional / resistance).clamp(-MAX_OVERSCROLL, MAX_OVERSCROLL)
     }
 
-    fn apply_zoom(&mut self, factor: f32) {
-        let center = self.center_fraction();
+    fn apply_zoom_at(&mut self, factor: f32, anchor_x: f32) {
+        let old_visible = self.visible_fraction();
+        let anchor_x = anchor_x.clamp(0.0, 1.0);
+        let anchor_pos = self.offset + anchor_x * old_visible;
         self.zoom = (self.zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
-        self.offset = (center - self.visible_fraction() / 2.0).clamp(0.0, self.max_offset());
+        let new_visible = self.visible_fraction();
+        self.offset = (anchor_pos - anchor_x * new_visible).clamp(0.0, self.max_offset());
         self.overscroll = 0.0;
     }
 
     pub(crate) fn visible_fraction(&self) -> f32 {
-        if self.zoom >= 1.0 {
-            1.0 / self.zoom
-        } else {
-            1.0
-        }
+        1.0 / self.zoom
     }
 
     pub(crate) fn max_offset(&self) -> f32 {
         (1.0 - self.visible_fraction()).max(0.0)
     }
 
-    fn center_fraction(&self) -> f32 {
-        self.offset + self.visible_fraction() / 2.0
-    }
-
-    fn sample_range(&self, sample_count: usize) -> (usize, usize) {
+    /// Visible sample window: `(start, end, sub-sample phase)`.
+    fn sample_window(&self, sample_count: usize) -> (usize, usize, f32) {
         if sample_count == 0 {
-            return (0, 0);
+            return (0, 0, 0.0);
         }
 
         let visible = (sample_count as f32 * self.visible_fraction())
             .ceil()
             .clamp(1.0, sample_count as f32) as usize;
         let max_start = sample_count.saturating_sub(visible);
-        let start = if max_start == 0 {
-            0
-        } else {
-            (self.offset * max_start as f32).round() as usize
-        };
-        (start, (start + visible).min(sample_count))
+        if max_start == 0 {
+            return (0, visible.min(sample_count), 0.0);
+        }
+
+        let raw_start = self.offset * max_start as f32;
+        let start = raw_start.floor() as usize;
+        let phase = raw_start - start as f32;
+        let start = start.min(max_start);
+        (start, (start + visible).min(sample_count), phase)
+    }
+
+    fn view_cache_key(&self, sample_count: usize) -> (u32, u32, u32) {
+        let (start, _, phase) = self.sample_window(sample_count);
+        let zoom_q = (self.zoom * 64.0).round() as u32;
+        let phase_q = (phase * 8.0).round() as u32;
+        (start as u32, zoom_q, phase_q)
+    }
+
+    fn draw_cache_key(&self, sample_count: usize, theme: &Theme) -> (u32, u32, u32, u32) {
+        let (start, zoom_q, phase_q) = self.view_cache_key(sample_count);
+        (start, zoom_q, phase_q, theme_cache_key(theme))
+    }
+
+    fn content_scale(&self) -> (f32, f32) {
+        let overscroll = self.overscroll.clamp(-MAX_OVERSCROLL, MAX_OVERSCROLL);
+        (
+            1.0 + overscroll.abs() * 1.35,
+            1.0 - overscroll.abs() * 0.12,
+        )
+    }
+
+    fn content_translate_x(&self, width: f32) -> f32 {
+        let overscroll = self.overscroll.clamp(-MAX_OVERSCROLL, MAX_OVERSCROLL);
+        overscroll * width * 0.55
+    }
+
+    fn content_transform_active(&self) -> bool {
+        self.overscroll != 0.0
     }
 
     fn column_count(&self, width: f32, visible_samples: usize) -> usize {
         if visible_samples == 0 || width <= 0.0 {
             return 1;
-        }
-
-        if self.zoom < 1.0 {
-            return ((width * self.zoom.max(MIN_ZOOM)).ceil() as usize).max(1);
         }
 
         let max_columns = (width * MAX_COLUMNS_FACTOR).ceil() as usize;
@@ -187,11 +240,13 @@ impl WaveFormView {
 pub struct WaveFormState {
     pan_anchor: Option<PanAnchor>,
     last_pan_view: Option<WaveFormView>,
+    last_pan_x: Option<f32>,
+    wheel_lines: f32,
+    tracked_samples: usize,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default, PartialEq)]
 struct PanAnchor {
-    cursor_x: f32,
     view_offset: f32,
     overscroll: f32,
 }
@@ -205,6 +260,8 @@ pub struct WaveForm {
     modifiers: Modifiers,
     pan_active: bool,
     cache: Cache,
+    content_cache_key: Cell<(u32, u32, u32, u32)>,
+    preview_view: Cell<Option<WaveFormView>>,
 }
 
 struct ColumnSample {
@@ -248,7 +305,25 @@ impl WaveForm {
             modifiers: Modifiers::default(),
             pan_active: false,
             cache: Cache::new(),
+            content_cache_key: Cell::new((0, 0, 0, 0)),
+            preview_view: Cell::new(None),
         }
+    }
+
+    fn effective_view(&self) -> WaveFormView {
+        self.preview_view.get().unwrap_or(self.view)
+    }
+
+    fn sync_content_cache(&self, theme: &Theme) {
+        let key = self.view.draw_cache_key(self.samples.len(), theme);
+        if self.content_cache_key.get() != key {
+            self.cache.clear();
+            self.content_cache_key.set(key);
+        }
+    }
+
+    pub fn set_preview_view(&self, view: Option<WaveFormView>) {
+        self.preview_view.set(view);
     }
 
     pub fn set_sample_rate(&mut self, sample_rate: u32) {
@@ -277,23 +352,37 @@ impl WaveForm {
         self.pan_active
     }
 
-    fn with_overscroll_transform(
+    fn with_content_transform(
         frame: &mut Frame,
-        overscroll: f32,
+        view: WaveFormView,
         width: f32,
         height: f32,
         draw: impl FnOnce(&mut Frame),
     ) {
-        let stretch = overscroll.clamp(-MAX_OVERSCROLL, MAX_OVERSCROLL);
-        let scale_x = 1.0 + stretch.abs() * 1.35;
-        let scale_y = 1.0 - stretch.abs() * 0.12;
+        let (scale_x, scale_y) = view.content_scale();
+        let translate_x = view.content_translate_x(width);
         frame.push_transform();
-        frame.translate(Vector::new(stretch * width * 0.55, 0.0));
+        frame.translate(Vector::new(translate_x, 0.0));
         frame.translate(Vector::new(width / 2.0, height / 2.0));
         frame.scale_nonuniform(Vector::new(scale_x, scale_y));
         frame.translate(Vector::new(-width / 2.0, -height / 2.0));
         draw(frame);
         frame.pop_transform();
+    }
+
+    fn map_content_x(&self, view: WaveFormView, width: f32, x: f32) -> f32 {
+        let (scale_x, _) = view.content_scale();
+        let translate_x = view.content_translate_x(width);
+        (x - width / 2.0) * scale_x + width / 2.0 + translate_x
+    }
+
+    fn unmap_content_x(&self, view: WaveFormView, width: f32, x: f32) -> f32 {
+        let (scale_x, _) = view.content_scale();
+        let translate_x = view.content_translate_x(width);
+        if scale_x.abs() < 1e-6 {
+            return width / 2.0;
+        }
+        (x - translate_x - width / 2.0) / scale_x + width / 2.0
     }
 
     fn scroll_lines(delta: ScrollDelta) -> (f32, f32) {
@@ -310,7 +399,7 @@ impl WaveForm {
         self.playback_position.as_ref().map(|position| position.progress())
     }
 
-    fn playhead_x(&self, width: f32, progress: f64) -> Option<f32> {
+    fn playhead_content_x(&self, view: WaveFormView, width: f32, progress: f64) -> Option<f32> {
         if self.samples.is_empty() || width <= 0.0 {
             return None;
         }
@@ -326,15 +415,59 @@ impl WaveForm {
 
         let progress_frame = ((progress * frame_count as f64).round() as usize)
             .min(frame_count.saturating_sub(1));
-        let (start, end) = self.view.sample_range(self.samples.len());
+        let (start, end, phase) = view.sample_window(self.samples.len());
         let visible = end.saturating_sub(start);
         if visible == 0 {
             return None;
         }
 
-        let fraction = (progress_frame.saturating_sub(start)) as f32 / visible as f32;
-        let stretch = self.view.overscroll.clamp(-MAX_OVERSCROLL, MAX_OVERSCROLL);
-        Some((fraction.clamp(0.0, 1.0) * width) + stretch * width * 0.55)
+        let px_per_sample = width / visible as f32;
+        let sample_pos = progress_frame.saturating_sub(start) as f32 - phase;
+        Some(sample_pos * px_per_sample)
+    }
+
+    fn playhead_screen_x(&self, view: WaveFormView, width: f32, progress: f64) -> Option<f32> {
+        let x = self.playhead_content_x(view, width, progress)?;
+        Some(self.map_content_x(view, width, x))
+    }
+
+    fn stroke_playhead(frame: &mut Frame, x: f32, height: f32, accent: Color) {
+        let line = Path::line(Point::new(x, 0.0), Point::new(x, height));
+        frame.stroke(
+            &line,
+            Stroke::default()
+                .with_color(accent)
+                .with_width(2.0)
+                .with_line_cap(LineCap::Round),
+        );
+        frame.stroke(
+            &line,
+            Stroke::default()
+                .with_color(accent.scale_alpha(0.35))
+                .with_width(6.0)
+                .with_line_cap(LineCap::Round),
+        );
+    }
+
+    fn draw_playhead_on_frame(
+        &self,
+        frame: &mut Frame,
+        theme: &Theme,
+        size: Size,
+        progress: f64,
+        view: WaveFormView,
+        content_space: bool,
+    ) {
+        let x = if content_space {
+            self.playhead_content_x(view, size.width, progress)
+        } else {
+            self.playhead_screen_x(view, size.width, progress)
+        };
+        let Some(x) = x else {
+            return;
+        };
+        let accent = theme.extended_palette().primary.base.color;
+        Self::stroke_playhead(frame, x, size.height, accent);
     }
 
     fn progress_at_x(&self, width: f32, x: f32) -> Option<f64> {
@@ -351,15 +484,17 @@ impl WaveForm {
             return None;
         }
 
-        let (start, end) = self.view.sample_range(self.samples.len());
+        let view = self.view;
+        let (start, end, phase) = view.sample_window(self.samples.len());
         let visible = end.saturating_sub(start);
         if visible == 0 {
             return None;
         }
 
-        let fraction = (x / width).clamp(0.0, 1.0);
-        let progress_frame =
-            (start as f32 + fraction * visible as f32).round() as usize;
+        let px_per_sample = width / visible as f32;
+        let content_x = self.unmap_content_x(view, width, x);
+        let sample_pos = (content_x / px_per_sample + phase).clamp(0.0, visible as f32);
+        let progress_frame = (start as f32 + sample_pos).round() as usize;
         Some(progress_frame.min(frame_count.saturating_sub(1)) as f64 / frame_count as f64)
     }
 
@@ -369,29 +504,12 @@ impl WaveForm {
         size: Size,
         theme: &Theme,
         progress: f64,
+        view: WaveFormView,
     ) -> Option<Geometry> {
-        let x = self.playhead_x(size.width, progress)?;
-        let palette = theme.extended_palette();
-        let accent = palette.primary.base.color;
+        let x = self.playhead_screen_x(view, size.width, progress)?;
+        let accent = theme.extended_palette().primary.base.color;
         let mut frame = Frame::new(renderer, size);
-        let line = Path::line(
-            Point::new(x, 0.0),
-            Point::new(x, size.height),
-        );
-        frame.stroke(
-            &line,
-            Stroke::default()
-                .with_color(accent)
-                .with_width(2.0)
-                .with_line_cap(LineCap::Round),
-        );
-        frame.stroke(
-            &line,
-            Stroke::default()
-                .with_color(accent.scale_alpha(0.35))
-                .with_width(6.0)
-                .with_line_cap(LineCap::Round),
-        );
+        Self::stroke_playhead(&mut frame, x, size.height, accent);
         Some(frame.into_geometry())
     }
 
@@ -400,11 +518,13 @@ impl WaveForm {
     }
 
     pub fn set_view(&mut self, view: WaveFormView) {
-        // Overscroll is drawn outside the cache; only offset/zoom affect cached geometry.
-        let cache_key_changed = self.view.offset != view.offset || self.view.zoom != view.zoom;
+        let cache_key_changed =
+            self.view.view_cache_key(self.samples.len()) != view.view_cache_key(self.samples.len());
         self.view = view;
+        self.preview_view.set(None);
         if cache_key_changed {
             self.cache.clear();
+            self.content_cache_key.set((0, 0, 0, 0));
         }
     }
 
@@ -416,7 +536,7 @@ impl WaveForm {
             .clamp(0.0, 1.0)
     }
 
-    fn columns(&self, size: Size) -> (f32, Vec<ColumnSample>) {
+    fn columns(&self, view: WaveFormView, size: Size) -> (f32, Vec<ColumnSample>) {
         let height = size.height;
         let width = size.width;
         let center = height / 2.0;
@@ -425,26 +545,29 @@ impl WaveForm {
             return (center, Vec::new());
         }
 
-        let (start, end) = self.view.sample_range(self.samples.len());
+        let (start, end, phase) = view.sample_window(self.samples.len());
         let visible_count = end.saturating_sub(start);
         if visible_count == 0 {
             return (center, Vec::new());
         }
 
-        let columns = self.view.column_count(width, visible_count);
-        let bucket = visible_count.div_ceil(columns);
+        let columns = view.column_count(width, visible_count);
+        let samples_per_col = visible_count.div_ceil(columns).next_power_of_two().max(1);
+        let columns = visible_count.div_ceil(samples_per_col);
         let column_width = width / columns as f32;
+        let px_per_sample = width / visible_count as f32;
+        let x_shift = -phase * px_per_sample;
         let slice = &self.samples[start..end];
 
         let mut out = Vec::with_capacity(columns);
         for col in 0..columns {
-            let chunk_start = col * bucket;
+            let chunk_start = col * samples_per_col;
             if chunk_start >= visible_count {
                 break;
             }
-            let chunk_end = (chunk_start + bucket).min(visible_count);
+            let chunk_end = (chunk_start + samples_per_col).min(visible_count);
             let peak = Self::peak_amplitude(&slice[chunk_start..chunk_end]);
-            let x = (col as f32 + 0.5) * column_width;
+            let x = (col as f32 + 0.5) * column_width + x_shift;
             out.push(ColumnSample {
                 x,
                 y_min: center + peak * center,
@@ -501,41 +624,63 @@ impl WaveForm {
         builder.build()
     }
 
-    fn draw_waveform(&self, frame: &mut Frame, theme: &Theme) {
+    fn draw_background(&self, frame: &mut Frame, theme: &Theme, size: Size) {
+        let palette = WaveformPalette::from_theme(theme);
+        let background = Path::rounded_rectangle(
+            Point::ORIGIN,
+            size,
+            Radius::new(WAVEFORM_CORNER_RADIUS),
+        );
+        frame.fill(&background, palette.background);
+    }
+
+    fn draw_waveform_content(
+        &self,
+        frame: &mut Frame,
+        theme: &Theme,
+        view: WaveFormView,
+        clip: bool,
+    ) {
         let palette = WaveformPalette::from_theme(theme);
         let size = frame.size();
 
-        let background = Path::rounded_rectangle(Point::ORIGIN, size, Radius::new(8.0));
-        frame.fill(&background, palette.background);
+        let draw_inner = |frame: &mut Frame| {
+            let (center, columns) = self.columns(view, size);
+            if columns.is_empty() {
+                return;
+            }
 
-        let (center, columns) = self.columns(size);
-        if columns.is_empty() {
-            return;
+            let axis = Path::line(
+                Point::new(0.0, center),
+                Point::new(size.width, center),
+            );
+            frame.stroke(
+                &axis,
+                Stroke::default()
+                    .with_color(palette.axis)
+                    .with_width(1.0),
+            );
+
+            frame.fill(&Self::envelope_path(&columns), palette.fill);
+
+            let stroke = Stroke::default()
+                .with_color(palette.stroke)
+                .with_width(1.0)
+                .with_line_cap(LineCap::Round)
+                .with_line_join(LineJoin::Round);
+
+            frame.stroke(&Self::envelope_line_path(&columns, true), stroke);
+            frame.stroke(&Self::envelope_line_path(&columns, false), stroke);
+
+            self.draw_time_markers(frame, &palette, size, view);
+        };
+
+        if clip {
+            let clip_bounds = Rectangle::new(Point::ORIGIN, size);
+            frame.with_clip(clip_bounds, draw_inner);
+        } else {
+            draw_inner(frame);
         }
-
-        let axis = Path::line(
-            Point::new(0.0, center),
-            Point::new(size.width, center),
-        );
-        frame.stroke(
-            &axis,
-            Stroke::default()
-                .with_color(palette.axis)
-                .with_width(1.0),
-        );
-
-        frame.fill(&Self::envelope_path(&columns), palette.fill);
-
-        let stroke = Stroke::default()
-            .with_color(palette.stroke)
-            .with_width(1.0)
-            .with_line_cap(LineCap::Round)
-            .with_line_join(LineJoin::Round);
-
-        frame.stroke(&Self::envelope_line_path(&columns, true), stroke);
-        frame.stroke(&Self::envelope_line_path(&columns, false), stroke);
-
-        self.draw_time_markers(frame, &palette, size);
     }
 
     fn nice_time_step(visible_secs: f64) -> f64 {
@@ -643,24 +788,36 @@ impl WaveForm {
         }
     }
 
-    fn draw_time_markers(&self, frame: &mut Frame, palette: &WaveformPalette, size: Size) {
+    fn draw_time_markers(
+        &self,
+        frame: &mut Frame,
+        palette: &WaveformPalette,
+        size: Size,
+        view: WaveFormView,
+    ) {
         if self.sample_rate == 0 || self.samples.is_empty() || size.width <= 0.0 {
             return;
         }
 
         let sample_rate = self.sample_rate as f64;
-        let (start, end) = self.view.sample_range(self.samples.len());
+        let (start, end, phase) = view.sample_window(self.samples.len());
         let visible_samples = end.saturating_sub(start);
         if visible_samples == 0 {
             return;
         }
 
+        let px_per_sample = size.width / visible_samples as f32;
         let start_secs = start as f64 / sample_rate;
         let visible_secs = visible_samples as f64 / sample_rate;
         let step = Self::nice_time_step(visible_secs);
         let end_secs = start_secs + visible_secs;
         let label_y = size.height - 2.0;
         let line_bottom = size.height - TIME_MARKER_HEIGHT;
+
+        let tick_x = |tick_secs: f64| -> f32 {
+            let sample_pos = ((tick_secs - start_secs) / visible_secs) * visible_samples as f64;
+            (sample_pos as f32 - phase) * px_per_sample
+        };
 
         if let Some(minor_step) = Self::minor_time_step(step) {
             let mut tick = ((start_secs / minor_step).ceil() * minor_step).max(0.0);
@@ -669,12 +826,12 @@ impl WaveForm {
                 let on_major =
                     remainder < minor_step * 0.05 || (step - remainder) < minor_step * 0.05;
                 if !on_major {
-                    let fraction = ((tick - start_secs) / visible_secs) as f32;
-                    if (0.0..=1.0).contains(&fraction) {
+                    let x = tick_x(tick);
+                    if (0.0..=size.width).contains(&x) {
                         Self::draw_time_tick(
                             frame,
                             palette,
-                            fraction * size.width,
+                            x,
                             line_bottom,
                             label_y,
                             None,
@@ -688,12 +845,12 @@ impl WaveForm {
 
         let mut tick = (start_secs / step).ceil() * step;
         while tick <= end_secs + step * 0.001 {
-            let fraction = ((tick - start_secs) / visible_secs) as f32;
-            if (0.0..=1.0).contains(&fraction) {
+            let x = tick_x(tick);
+            if (0.0..=size.width).contains(&x) {
                 Self::draw_time_tick(
                     frame,
                     palette,
-                    fraction * size.width,
+                    x,
                     line_bottom,
                     label_y,
                     Some(&Self::format_time(tick, step)),
@@ -704,19 +861,9 @@ impl WaveForm {
         }
     }
 
-    fn cache_bounds(size: Size, view: WaveFormView, theme: &Theme) -> Rectangle {
-        let primary = theme.extended_palette().primary.base.color;
-        let theme_key = primary.r + primary.g * 0.01 + primary.b * 0.0001;
-        Rectangle {
-            x: view.offset + theme_key,
-            y: view.zoom,
-            width: size.width,
-            height: size.height,
-        }
-    }
-
     fn handle_input(
         &self,
+        state: &mut WaveFormState,
         view: &mut WaveFormView,
         event: &Event,
         bounds: Rectangle,
@@ -735,10 +882,17 @@ impl WaveForm {
                         return false;
                     }
                     view.apply_pan_delta(pan_delta * PAN_STEP);
-                } else {
-                    view.apply_wheel(*delta);
+                    return true;
                 }
-                true
+                if bounds.width <= 0.0 {
+                    return false;
+                }
+                let anchor_x = cursor
+                    .position_in(bounds)
+                    .map(|point| (point.x / bounds.width).clamp(0.0, 1.0))
+                    .unwrap_or(0.5);
+                let lines = WaveFormView::wheel_lines(*delta);
+                view.accumulate_wheel(lines, anchor_x, &mut state.wheel_lines)
             }
             _ => false,
         }
@@ -757,29 +911,52 @@ impl Program<Message> for WaveForm {
         _cursor: Cursor,
     ) -> Vec<Geometry> {
         let size = bounds.size();
-        let overscroll = self.view.overscroll;
-        let cache_bounds = Self::cache_bounds(size, self.view, theme);
-        let waveform = if overscroll.abs() < OVERSCROLL_STOP {
-            self.cache.draw_with_bounds(renderer, cache_bounds, |frame| {
-                self.draw_waveform(frame, theme);
-            })
-        } else {
+        let progress = self.playback_progress();
+        let view = self.effective_view();
+        let transform_active = view.content_transform_active();
+
+        let mut bg_frame = Frame::new(renderer, size);
+        self.draw_background(&mut bg_frame, theme, size);
+        let mut layers = vec![bg_frame.into_geometry()];
+
+        if transform_active {
             let mut frame = Frame::new(renderer, size);
-            Self::with_overscroll_transform(
-                &mut frame,
-                overscroll,
-                size.width,
-                size.height,
-                |frame| self.draw_waveform(frame, theme),
-            );
-            frame.into_geometry()
-        };
-        let mut layers = vec![waveform];
-        if let Some(progress) = self.playback_progress()
-            && let Some(playhead) = self.draw_playhead(renderer, size, theme, progress)
-        {
-            layers.push(playhead);
+            let clip_bounds = Rectangle::new(Point::ORIGIN, size);
+            frame.with_clip(clip_bounds, |frame| {
+                Self::with_content_transform(
+                    frame,
+                    view,
+                    size.width,
+                    size.height,
+                    |frame| {
+                        self.draw_waveform_content(frame, theme, view, false);
+                        if let Some(progress) = progress {
+                            self.draw_playhead_on_frame(
+                                frame,
+                                theme,
+                                size,
+                                progress,
+                                view,
+                                true,
+                            );
+                        }
+                    },
+                );
+            });
+            layers.push(frame.into_geometry());
+        } else {
+            self.sync_content_cache(theme);
+            layers.push(self.cache.draw(renderer, size, |frame| {
+                self.draw_waveform_content(frame, theme, view, true);
+            }));
+            if let Some(progress) = progress
+                && let Some(playhead) =
+                    self.draw_playhead(renderer, size, theme, progress, view)
+            {
+                layers.push(playhead);
+            }
         }
+
         layers
     }
 
@@ -790,11 +967,17 @@ impl Program<Message> for WaveForm {
         bounds: Rectangle,
         cursor: Cursor,
     ) -> Option<Action<Message>> {
+        if state.tracked_samples != self.samples.len() {
+            state.tracked_samples = self.samples.len();
+            state.wheel_lines = 0.0;
+        }
+
         if let Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) = event
             && state.pan_anchor.is_some()
         {
             let view = state.last_pan_view.take().unwrap_or(self.view);
             state.pan_anchor = None;
+            state.last_pan_x = None;
             return Some(
                 Action::publish(Message::WaveformPanEnded(view)).and_capture(),
             );
@@ -806,10 +989,12 @@ impl Program<Message> for WaveForm {
         {
             if self.modifiers.shift() {
                 state.pan_anchor = Some(PanAnchor {
-                    cursor_x: position.x,
                     view_offset: self.view.offset,
                     overscroll: self.view.overscroll,
                 });
+                state.last_pan_x = Some(position.x);
+                state.last_pan_view = None;
+                self.preview_view.set(None);
                 return Some(Action::publish(Message::WaveformPanStarted).and_capture());
             } else if let Some(progress) = self.progress_at_x(bounds.width, position.x) {
                 return Some(Action::publish(Message::WaveformSeek(progress)).and_capture());
@@ -822,19 +1007,23 @@ impl Program<Message> for WaveForm {
             && let Some(anchor) = state.pan_anchor
         {
             let visible = self.view.visible_fraction();
-            let delta_x = position.x - anchor.cursor_x;
-            let mut view = WaveFormView {
+            let last_x = state.last_pan_x.unwrap_or(position.x);
+            let step = -(position.x - last_x) / bounds.width * visible;
+            state.last_pan_x = Some(position.x);
+
+            let mut view = state.last_pan_view.unwrap_or(WaveFormView {
                 zoom: self.view.zoom,
                 offset: anchor.view_offset,
                 overscroll: anchor.overscroll,
-            };
-            view.apply_pan_delta(-delta_x / bounds.width * visible);
+            });
+            view.apply_pan_delta(step);
             state.last_pan_view = Some(view);
+            self.preview_view.set(Some(view));
             return Some(Action::publish(Message::WaveformViewChanged(view)).and_capture());
         }
 
         let mut view = self.view;
-        if !self.handle_input(&mut view, event, bounds, cursor) {
+        if !self.handle_input(state, &mut view, event, bounds, cursor) {
             return None;
         }
 
