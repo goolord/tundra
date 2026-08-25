@@ -705,13 +705,11 @@ impl Player {
             column = column.push(Space::new().width(Length::Fill).height(Length::Fill));
         }
 
-        column = column.push(Controls::view(
-            &self.controls,
-            self.current_file
-                .as_ref()
-                .and_then(|path| path.file_name())
-                .and_then(|name| name.to_str()),
-        ));
+        let track_name = self
+            .current_file
+            .as_ref()
+            .and_then(|path| crate::path_util::file_name_lossy(path));
+        column = column.push(Controls::view(&self.controls, track_name.as_deref()));
         Container::new(column)
             .width(Length::Fill)
             .height(Length::Fill)

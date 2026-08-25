@@ -45,25 +45,23 @@ struct Tier2CliResponse {
 }
 
 const INSTALL_HINT: &str = "Install classifiers with: cargo xtask setup";
+pub const UV_PYTHON: &str = if cfg!(windows) { "3.12" } else { "3.14" };
 
 /// Single-file path persists cache immediately so manual Auto Tag survives app restarts.
 pub fn classify_file(path: &Path) -> Result<ClassificationResult, ClassifyError> {
     if let Some(cached) = classify_cache::get_cached(path) {
         return Ok(cached);
     }
-    let result = classify_file_inner(path, true)?;
+    let result = classify_file_inner(path)?;
     classify_cache::flush_cache();
     Ok(result)
 }
 
 pub fn classify_file_bulk(path: &Path) -> Result<ClassificationResult, ClassifyError> {
-    classify_file_inner(path, false)
+    classify_file_inner(path)
 }
 
-fn classify_file_inner(
-    path: &Path,
-    allow_subprocess_fallback: bool,
-) -> Result<ClassificationResult, ClassifyError> {
+fn classify_file_inner(path: &Path) -> Result<ClassificationResult, ClassifyError> {
     if let Some(cached) = classify_cache::get_cached(path) {
         return Ok(cached);
     }
@@ -92,7 +90,7 @@ fn classify_file_inner(
         return Ok(result);
     }
 
-    let tier2 = classify_tier2(path, tier1.zcr, allow_subprocess_fallback)?;
+    let tier2 = classify_tier2(path, tier1.zcr)?;
     let engine = tier2.engine.as_deref().unwrap_or("essentia");
     let result = ClassificationResult {
         instrument: tier2.instrument.clone(),
@@ -114,18 +112,16 @@ fn classify_file_inner(
 fn classify_tier2(
     path: &Path,
     tier1_zcr: f64,
-    allow_subprocess_fallback: bool,
 ) -> Result<classifier_pool::Tier2Response, ClassifyError> {
     match classifier_pool::classify_tier2(path, tier1_zcr) {
         Ok(response) => Ok(response),
-        Err(worker_err) if allow_subprocess_fallback => {
+        Err(worker_err) => {
             eprintln!(
                 "classifier worker failed ({}); falling back to subprocess tier 2",
                 worker_err.details
             );
             run_tier2_subprocess(path)
         }
-        Err(worker_err) => Err(worker_err),
     }
 }
 
@@ -146,7 +142,13 @@ fn format_confidence(confidence: Option<f64>) -> String {
 }
 
 pub fn scripts_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts")
+    const WORKER: &str = "classifier_worker.py";
+    crate::path_util::find_beside(&["scripts"], |dir| dir.join(WORKER).is_file())
+        .or_else(|| {
+            let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts");
+            dir.is_dir().then_some(dir)
+        })
+        .unwrap_or_else(|| PathBuf::from("scripts"))
 }
 
 pub fn bundled_models_dir() -> Option<PathBuf> {
@@ -154,28 +156,11 @@ pub fn bundled_models_dir() -> Option<PathBuf> {
     const INSTRUMENT: &str = "mtg_jamendo_instrument-discogs-effnet-1.pb";
     const LABELS: &str = "mtg_jamendo_instrument-discogs-effnet-1.json";
 
-    let has_models = |dir: &Path| {
+    crate::path_util::find_beside(&["models", "resources/models"], |dir| {
         dir.join(EFFNET).is_file()
             && dir.join(INSTRUMENT).is_file()
             && dir.join(LABELS).is_file()
-    };
-
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(parent) = exe.parent() {
-            for models in [parent.join("models"), parent.join("resources/models")] {
-                if has_models(&models) {
-                    return Some(models);
-                }
-            }
-        }
-    }
-
-    let manifest_models = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/models");
-    if has_models(&manifest_models) {
-        return Some(manifest_models);
-    }
-
-    None
+    })
 }
 
 pub fn configure_classifier_command(command: &mut Command) {
@@ -196,6 +181,7 @@ pub fn configure_classifier_command(command: &mut Command) {
         command.env("ESSENTIA_MODELS", &models);
         command.env("TUNDRA_ESSENTIA_DL", "1");
     }
+    crate::path_util::hide_console(command);
 }
 
 fn run_script(script: &str, path: &Path) -> Result<String, ClassifyError> {
@@ -219,6 +205,7 @@ fn run_script(script: &str, path: &Path) -> Result<String, ClassifyError> {
         attempts.push("uv not found".to_string());
     }
 
+    #[cfg(not(windows))]
     for python in ["python3", "python"] {
         let mut command = Command::new(python);
         configure_classifier_command(&mut command);
@@ -273,7 +260,7 @@ fn try_uv_run(scripts_dir: &Path, script: &str, path: &Path) -> Option<Result<St
         .current_dir(scripts_dir)
         .arg("run")
         .arg("--python")
-        .arg("3.14")
+        .arg(UV_PYTHON)
         .arg(script)
         .arg(path);
     configure_classifier_command(&mut command);

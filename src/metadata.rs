@@ -430,13 +430,13 @@ fn path_match_scores(matcher: &SkimMatcherV2, path: &Path, query: &str) -> (i64,
         .unwrap_or(0) as i64;
 
     let mut name_score = 0i64;
-    if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
-        if let Some(score) = matcher.fuzzy_match(name, query) {
+    if let Some(name) = crate::path_util::file_name_lossy(path) {
+        if let Some(score) = matcher.fuzzy_match(&name, query) {
             name_score = name_score.max(score as i64);
         }
     }
-    if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) {
-        if let Some(score) = matcher.fuzzy_match(stem, query) {
+    if let Some(stem) = crate::path_util::file_stem_lossy(path) {
+        if let Some(score) = matcher.fuzzy_match(&stem, query) {
             name_score = name_score.max(score as i64);
         }
     }
@@ -492,10 +492,10 @@ fn search_sort_score(
     } else {
         let base = if name_score > 0 { name_score } else { path_score };
         let mut score = base + FILE_SEARCH_BONUS;
-        if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) {
-            if text_eq(stem, query, case_sensitive) {
+        if let Some(stem) = crate::path_util::file_stem_lossy(path) {
+            if text_eq(&stem, query, case_sensitive) {
                 score += EXACT_STEM_BONUS;
-            } else if text_starts_with(stem, query, case_sensitive) {
+            } else if text_starts_with(&stem, query, case_sensitive) {
                 score += PREFIX_STEM_BONUS;
             }
         }
@@ -569,11 +569,11 @@ fn path_search_strings(path: &Path) -> Vec<String> {
         }
     };
     push(&path.to_string_lossy());
-    if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
-        push(name);
+    if let Some(name) = crate::path_util::file_name_lossy(path) {
+        push(&name);
     }
-    if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) {
-        push(stem);
+    if let Some(stem) = crate::path_util::file_stem_lossy(path) {
+        push(&stem);
     }
     strings
 }

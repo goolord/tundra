@@ -1,4 +1,5 @@
 use super::ClassificationResult;
+use crate::path_util;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -110,14 +111,16 @@ impl ClassifyCache {
     }
 
     fn lookup_key(&self, path: &Path) -> PathBuf {
-        let direct = path.to_path_buf();
+        let direct = path_util::cache_key(path.to_path_buf());
         if self.entries.contains_key(&direct) {
             return direct;
         }
         if let Some(key) = self.path_keys.get(&direct) {
             return key.clone();
         }
-        path.canonicalize().unwrap_or(direct)
+        path_util::canonical_path(path)
+            .map(path_util::cache_key)
+            .unwrap_or(direct)
     }
 
     fn get(&self, path: &Path) -> Option<ClassificationResult> {
@@ -145,8 +148,10 @@ impl ClassifyCache {
             return;
         };
         let entry = CachedClassification::from_result(stamp, result);
-        let direct = path.to_path_buf();
-        let canonical = path.canonicalize().unwrap_or_else(|_| direct.clone());
+        let direct = path_util::cache_key(path.to_path_buf());
+        let canonical = path_util::canonical_path(path)
+            .map(path_util::cache_key)
+            .unwrap_or_else(|_| direct.clone());
         self.entries.insert(canonical.clone(), entry.clone());
         self.remember_path_alias(direct.clone(), canonical.clone());
         if direct != canonical {

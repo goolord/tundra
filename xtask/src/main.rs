@@ -2,6 +2,10 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::process::{Command, ExitStatus, Stdio};
+use std::time::Duration;
+
+const UV_PYTHON: &str = if cfg!(windows) { "3.12" } else { "3.14" };
+const MODEL_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
 
 const MODELS: [(&str, &str); 3] = [
     (
@@ -155,14 +159,20 @@ fn download_models() -> Result<()> {
             continue;
         }
         println!("models: downloading {name}");
-        run_command(
-            Command::new("curl")
-                .args(["-fsSL", url, "-o"])
-                .arg(&dest)
-                .current_dir(project_root()),
-            &format!("curl {url}"),
-        )?;
+        download_file(url, &dest, &format!("download {name}"))?;
     }
+    Ok(())
+}
+
+fn download_file(url: &str, dest: &std::path::Path, label: &str) -> Result<()> {
+    let response = ureq::get(url)
+        .timeout(MODEL_DOWNLOAD_TIMEOUT)
+        .call()
+        .with_context(|| format!("{label}: GET {url}"))?;
+    let mut file = std::fs::File::create(dest)
+        .with_context(|| format!("{label}: create {}", dest.display()))?;
+    std::io::copy(&mut response.into_reader(), &mut file)
+        .with_context(|| format!("{label}: write {}", dest.display()))?;
     Ok(())
 }
 
@@ -176,28 +186,31 @@ fn setup_classifiers(skip_dl: bool) -> Result<()> {
 
     run_command(
         Command::new("uv")
-            .arg("sync")
+            .args(["python", "install", UV_PYTHON])
             .current_dir(&scripts),
-        "uv sync (librosa tier)",
+        &format!("uv python install {UV_PYTHON}"),
     )?;
 
-    if skip_dl {
-        println!("classifiers: skipped Essentia DL env (--skip-dl)");
+    if skip_dl || cfg!(windows) {
+        run_command(
+            Command::new("uv")
+                .args(["sync", "--python", UV_PYTHON])
+                .current_dir(&scripts),
+            "uv sync (librosa tier)",
+        )?;
+        if cfg!(windows) {
+            println!("classifiers: skipped Essentia DL env (TensorFlow tier unavailable on Windows)");
+        } else {
+            println!("classifiers: skipped Essentia DL env (--skip-dl)");
+        }
         return Ok(());
     }
 
     run_command(
         Command::new("uv")
-            .args(["python", "install", "3.14"])
+            .args(["sync", "--group", "dl", "--python", UV_PYTHON])
             .current_dir(&scripts),
-        "uv python install 3.14",
-    )?;
-
-    run_command(
-        Command::new("uv")
-            .args(["sync", "--group", "dl", "--python", "3.14"])
-            .current_dir(&scripts),
-        "uv sync --group dl --python 3.14",
+        &format!("uv sync --group dl --python {UV_PYTHON}"),
     )?;
 
     Ok(())
