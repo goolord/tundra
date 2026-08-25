@@ -3,15 +3,27 @@
 //! Windows and macOS use the [`drag`] crate. Linux/X11 uses an XDND source adapted
 //! from [guth](https://docs.rs/guth) (Apache-2.0 / MIT).
 
-use iced::window::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use std::path::{Path, PathBuf};
+use iced::window::raw_window_handle::{
+    HandleError, HasWindowHandle, RawWindowHandle, WindowHandle,
+};
+use std::path::PathBuf;
 
 #[cfg(any(windows, target_os = "macos"))]
-pub fn start_blocking<W: HasWindowHandle>(window: &W, path: PathBuf) -> Result<(), String> {
+struct WindowHandleBorrow<'a>(&'a dyn HasWindowHandle);
+
+#[cfg(any(windows, target_os = "macos"))]
+impl HasWindowHandle for WindowHandleBorrow<'_> {
+    fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
+        self.0.window_handle()
+    }
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+pub fn start_blocking(window: &dyn HasWindowHandle, path: PathBuf) -> Result<(), String> {
     let item = drag::DragItem::Files(vec![path.clone()]);
     let preview = drag::Image::File(path);
     drag::start_drag(
-        window,
+        &WindowHandleBorrow(window),
         item,
         preview,
         |_, _| {},
@@ -31,6 +43,7 @@ pub fn x11_window_id(window: &dyn HasWindowHandle) -> Option<u32> {
 #[cfg(all(unix, not(target_os = "macos")))]
 mod x11 {
     use super::*;
+    use std::path::Path;
     use std::time::{Duration, Instant};
     use x11rb::connection::Connection;
     use x11rb::protocol::xproto::{

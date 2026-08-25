@@ -681,10 +681,13 @@ impl App {
     #[cfg(any(windows, target_os = "macos"))]
     fn begin_platform_drag(path: PathBuf) -> Task<Message> {
         window::latest().then(move |id| match id {
-            Some(id) => window::run(id, move |window| {
-                crate::drag_out::start_blocking(window, path)
-            })
-            .map(Message::FileDragCompleted),
+            Some(id) => {
+                let drag_path = path.clone();
+                window::run(id, move |window| {
+                    crate::drag_out::start_blocking(window, drag_path)
+                })
+                .map(Message::FileDragCompleted)
+            }
             None => Task::none(),
         })
     }
@@ -1584,10 +1587,18 @@ impl App {
                     if cache_updated {
                         self.dir_cache.persist();
                     }
+                    // Search paths are pre-filtered to directories and audio files,
+                    // so dir-ness follows from the extension; avoids one stat per result.
                     self.file_selector.file_list = result
                         .paths
                         .iter()
-                        .map(|x| FileButton::new(x.to_path_buf(), &self.file_selector.current_dir))
+                        .map(|x| {
+                            FileButton::with_kind(
+                                x.to_path_buf(),
+                                &self.file_selector.current_dir,
+                                !is_audio(x),
+                            )
+                        })
                         .collect();
                     self.file_selector.list_error = None;
                     self.metadata_cache.merge(result.new_metadata);
@@ -1926,6 +1937,12 @@ impl App {
 
             Message::FileRowLeave => {
                 self.file_selector.hovered_file = None;
+                Task::none()
+            }
+
+            Message::FileListScrolled(viewport) => {
+                self.file_selector.list_scroll_offset = viewport.absolute_offset().y;
+                self.file_selector.list_viewport_height = viewport.bounds().height;
                 Task::none()
             }
 
