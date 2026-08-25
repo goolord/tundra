@@ -15,6 +15,12 @@ const TUNDRA_MUTED_ICON: Color = Color::from_rgb8(0x52, 0x56, 0x5c);
 const TAG_CHIP_RADIUS: f32 = 16.0;
 const FILTER_INPUT_RADIUS: f32 = 0.0;
 pub const FILE_LIST_SCROLL_ID: &str = "file-list-scroll";
+/// Fixed height of every file row; windowed rendering relies on this being exact.
+pub const FILE_ROW_HEIGHT: f32 = 31.0;
+/// Extra rows rendered above and below the viewport to absorb fast scrolling.
+const FILE_ROW_OVERDRAW: usize = 12;
+/// Assumed viewport height until the first scroll event reports the real one.
+const FILE_LIST_DEFAULT_VIEWPORT: f32 = 2400.0;
 pub const TAG_SEARCH_INPUT_ID: &str = "tag-search-input";
 pub const FILE_SEARCH_INPUT_ID: &str = "file-search-input";
 
@@ -31,6 +37,8 @@ pub struct FileSelector {
     pub tag_filters: Vec<TagFilter>,
     pub tag_search_error: Option<String>,
     pub list_error: Option<String>,
+    pub list_scroll_offset: f32,
+    pub list_viewport_height: f32,
 }
 
 pub struct FileList;
@@ -155,6 +163,7 @@ fn file_tree_row(content: Element<'_, Message>, selected: bool) -> Element<'_, M
         .push(selection_stripe(selected))
         .push(content)
         .width(Length::Fill)
+        .height(Length::Fixed(FILE_ROW_HEIGHT))
         .into()
 }
 
@@ -759,11 +768,19 @@ impl FileList {
         let mut buttons: Vec<FileButton> = entries
             .filter_map(|entry| {
                 let entry = entry.ok()?;
-                if Self::file_filter(&entry.path()) {
-                    Some(FileButton::new(entry.path(), dir))
+                let file_type = entry.file_type().ok()?;
+                let path = entry.path();
+                let is_dir = if file_type.is_symlink() {
+                    path.is_dir()
                 } else {
-                    None
-                }
+                    file_type.is_dir()
+                };
+                let keep = if is_dir {
+                    !is_hidden(&path)
+                } else {
+                    is_audio(&path)
+                };
+                keep.then(|| FileButton::with_kind(path, dir, is_dir))
             })
             .collect();
         buttons.sort_by(|a, b| match (a.is_dir, b.is_dir) {
@@ -790,6 +807,8 @@ impl FileSelector {
             tag_filters: Vec::new(),
             tag_search_error: None,
             list_error,
+            list_scroll_offset: 0.0,
+            list_viewport_height: 0.0,
         }
     }
 
@@ -872,21 +891,48 @@ impl FileSelector {
             );
         }
 
-        let new_col: Vec<Element<Message>> = self
-            .file_list
-            .iter()
-            .enumerate()
-            .map(|(index, button)| {
-                button.view(
-                    index,
-                    self.selected_file == Some(index),
-                    self.hovered_file == Some(index),
-                )
-            })
-            .collect();
+        // Windowed rendering: only build widgets for rows near the viewport;
+        // spacers stand in for the rest so scrollbar geometry stays correct.
+        let total = self.file_list.len();
+        let viewport_height = if self.list_viewport_height > 0.0 {
+            self.list_viewport_height
+        } else {
+            FILE_LIST_DEFAULT_VIEWPORT
+        };
+        let rows_in_view = (viewport_height / FILE_ROW_HEIGHT).ceil() as usize + 1;
+        let first_in_view = ((self.list_scroll_offset / FILE_ROW_HEIGHT).floor() as usize)
+            .min(total.saturating_sub(rows_in_view));
+        let start = first_in_view.saturating_sub(FILE_ROW_OVERDRAW);
+        let end = (first_in_view + rows_in_view + FILE_ROW_OVERDRAW).min(total);
 
+        let mut new_col: Vec<Element<Message>> = Vec::with_capacity(end - start + 2);
+        if start > 0 {
+            new_col.push(
+                Space::new()
+                    .width(Length::Fill)
+                    .height(Length::Fixed(start as f32 * FILE_ROW_HEIGHT))
+                    .into(),
+            );
+        }
+        for (index, button) in self.file_list[start..end].iter().enumerate() {
+            let index = start + index;
+            new_col.push(button.view(
+                index,
+                self.selected_file == Some(index),
+                self.hovered_file == Some(index),
+            ));
+        }
+        if end < total {
+            new_col.push(
+                Space::new()
+                    .width(Length::Fill)
+                    .height(Length::Fixed((total - end) as f32 * FILE_ROW_HEIGHT))
+                    .into(),
+            );
+        }
         let fs = scrollable(Column::with_children(new_col).spacing(0))
             .id(Id::new(FILE_LIST_SCROLL_ID))
+            .on_scroll(Message::FileListScrolled)
             .height(Length::Fill);
 
         let file_search_active = self.search_value.len() > 2;
@@ -970,7 +1016,7 @@ impl FileSelector {
 }
 
 impl FileButton {
-    pub fn new(path: PathBuf, base_path: &Path) -> Self {
+    pub fn with_kind(path: PathBuf, base_path: &Path, is_dir: bool) -> Self {
         let label = path
             .strip_prefix(base_path)
             .ok()
@@ -978,7 +1024,6 @@ impl FileButton {
             .or_else(|| path.file_name())
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.display().to_string());
-        let is_dir = path.is_dir();
         FileButton {
             file_path: path,
             label,

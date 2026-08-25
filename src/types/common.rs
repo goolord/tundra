@@ -70,6 +70,7 @@ impl Dialog {
 pub enum Message {
     SelectedFile(Option<PathBuf>),
     ChangeDirectory(PathBuf),
+    FileListScrolled(iced::widget::scrollable::Viewport),
     Search(String),
     SearchFocused(bool),
     TagSearchInput(String),
