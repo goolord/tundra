@@ -8,9 +8,8 @@ use std::path::{Path, PathBuf};
 
 #[cfg(any(windows, target_os = "macos"))]
 pub fn start_blocking<W: HasWindowHandle>(window: &W, path: PathBuf) -> Result<(), String> {
-    let canonical = std::fs::canonicalize(&path).map_err(|err| err.to_string())?;
-    let item = drag::DragItem::Files(vec![canonical.clone()]);
-    let preview = drag::Image::File(canonical);
+    let item = drag::DragItem::Files(vec![path.clone()]);
+    let preview = drag::Image::File(path);
     drag::start_drag(
         window,
         item,
@@ -79,6 +78,10 @@ mod x11 {
     }
 
     impl X11Drag {
+        pub fn new() -> Self {
+            Self::default()
+        }
+
         pub fn init_with_window_id(&mut self, app_window: u32) -> Result<(), String> {
             if self.source.is_some() {
                 return Ok(());
@@ -778,61 +781,29 @@ mod x11 {
 pub use x11::X11Drag;
 
 #[cfg(all(unix, not(target_os = "macos")))]
-pub struct NativeDrag {
-    x11: X11Drag,
-}
+pub type NativeDrag = X11Drag;
 
 #[cfg(not(all(unix, not(target_os = "macos"))))]
+#[derive(Default)]
 pub struct NativeDrag;
 
-impl Default for NativeDrag {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
+#[cfg(not(all(unix, not(target_os = "macos"))))]
 impl NativeDrag {
     pub fn new() -> Self {
-        #[cfg(all(unix, not(target_os = "macos")))]
-        {
-            Self { x11: X11Drag::default() }
-        }
-        #[cfg(not(all(unix, not(target_os = "macos"))))]
-        {
-            Self
-        }
+        Self
     }
 
-    pub fn init_with_window_id(&mut self, app_window: u32) -> Result<(), String> {
-        #[cfg(all(unix, not(target_os = "macos")))]
-        {
-            self.x11.init_with_window_id(app_window)
-        }
-        #[cfg(not(all(unix, not(target_os = "macos"))))]
-        {
-            let _ = app_window;
-            Ok(())
-        }
+    pub fn init_with_window_id(&mut self, _app_window: u32) -> Result<(), String> {
+        Ok(())
     }
 
     pub fn is_active(&self) -> bool {
-        #[cfg(all(unix, not(target_os = "macos")))]
-        {
-            self.x11.is_active()
-        }
-        #[cfg(not(all(unix, not(target_os = "macos"))))]
-        {
-            false
-        }
+        false
     }
 
-    #[cfg(all(unix, not(target_os = "macos")))]
-    pub fn start(&mut self, path: PathBuf) -> Result<(), String> {
-        self.x11.start(path)
+    pub fn start(&mut self, _path: PathBuf) -> Result<(), String> {
+        Err("use platform drag".to_string())
     }
 
-    #[cfg(all(unix, not(target_os = "macos")))]
-    pub fn update(&mut self, pointer_down: bool, pointer_released: bool) {
-        self.x11.update(pointer_down, pointer_released);
-    }
+    pub fn update(&mut self, _pointer_down: bool, _pointer_released: bool) {}
 }

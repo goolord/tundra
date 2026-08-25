@@ -8,21 +8,23 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 
-const RESOURCES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/resources");
+include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/resource_files.rs"));
+
+fn resources_dir() -> PathBuf {
+    crate::path_util::find_beside(&["resources"], |dir| dir.join("play.svg").is_file())
+        .or_else(|| {
+            let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources");
+            dir.is_dir().then_some(dir)
+        })
+        .unwrap_or_else(|| PathBuf::from("resources"))
+}
 
 static RESOURCE_PATHS: LazyLock<HashMap<&'static str, String>> = LazyLock::new(|| {
-    [
-        "pause.svg",
-        "play.svg",
-        "stop.svg",
-        "up_chevron.svg",
-        "folder-solid.svg",
-        "music-solid.svg",
-        "search-solid.svg",
-    ]
-    .into_iter()
-    .map(|name| (name, format!("{RESOURCES}/{name}")))
-    .collect()
+    let dir = resources_dir();
+    RESOURCE_FILES
+        .iter()
+        .map(|name| (*name, dir.join(name).to_string_lossy().into_owned()))
+        .collect()
 });
 
 pub fn resource_path(name: &str) -> &str {
@@ -125,7 +127,7 @@ pub enum Message {
     FileDragTick,
     #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
     FileDragCompleted(Result<(), String>),
-    X11WindowId(Option<u32>),
+    DragWindowId(Option<u32>),
     CursorMoved(iced::Point),
     FileRowHover(usize),
     FileRowLeave,
@@ -197,17 +199,40 @@ pub fn is_audio(path: &Path) -> bool {
 }
 
 pub fn is_hidden(entry: &Path) -> bool {
-    match entry.file_name() {
-        Some(s) => s.to_string_lossy().starts_with('.'),
-        None => false,
+    if entry
+        .file_name()
+        .is_some_and(|name| name.to_string_lossy().starts_with('.'))
+    {
+        return true;
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+        if let Ok(meta) = std::fs::metadata(entry) {
+            return meta.file_attributes() & FILE_ATTRIBUTE_HIDDEN != 0;
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::darwin::fs::MetadataExt;
+        const UF_HIDDEN: u32 = 0x8000;
+        if let Ok(meta) = std::fs::metadata(entry) {
+            return meta.flags() & UF_HIDDEN != 0;
+        }
+    }
+    false
 }
 
 pub fn startup_directory() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|err| {
         eprintln!("Could not read current directory: {err}");
-        dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"))
+        dirs::home_dir().unwrap_or_else(fallback_directory)
     })
+}
+
+fn fallback_directory() -> PathBuf {
+    std::env::temp_dir()
 }
 
 pub fn truncate_path(path: &Path, max_chars: usize) -> String {
@@ -229,14 +254,21 @@ pub fn truncate_path(path: &Path, max_chars: usize) -> String {
 pub fn file_manager_label() -> &'static str {
     if cfg!(target_os = "windows") {
         "Open in Explorer"
+    } else if cfg!(target_os = "macos") {
+        "Open in Finder"
     } else {
         "Open in File browser"
     }
 }
 
 pub fn drag_from_file_manager_hint() -> String {
+    let gesture = if cfg!(target_os = "macos") {
+        "Control-click or use a two-finger click"
+    } else {
+        "Right-click"
+    };
     format!(
-        "Right-click the file and choose \"{}\", then drag it from there.",
+        "{gesture} the file and choose \"{}\", then drag it from there.",
         file_manager_label()
     )
 }
@@ -248,9 +280,11 @@ pub fn drag_out_notice(intro: impl AsRef<str>) -> String {
 pub fn reveal_in_file_manager(path: &Path) {
     #[cfg(target_os = "windows")]
     {
-        let _ = std::process::Command::new("explorer")
-            .arg(format!("/select,{}", path.display()))
-            .spawn();
+        use std::os::windows::process::CommandExt;
+        let mut command = std::process::Command::new("explorer");
+        command.raw_arg(format!("/select,\"{}\"", path.display()));
+        crate::path_util::hide_console(&mut command);
+        let _ = command.spawn();
     }
 
     #[cfg(target_os = "macos")]

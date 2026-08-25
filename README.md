@@ -5,9 +5,21 @@ Fast sample browser GUI built with [iced](https://github.com/iced-rs/iced).
 ## Requirements
 
 - Rust 1.85+ (edition 2024)
-- [uv](https://docs.astral.sh/uv/) (Python classifier runtime; **Python 3.14** for Essentia TensorFlow tier 2)
+- [uv](https://docs.astral.sh/uv/) (Python classifier runtime)
 - Git LFS (for SVG icons in `resources/`)
-- Linux: GTK 3 (for the folder picker and X11 drag-out support via `rfd` / `x11rb`)
+- **Linux:** GTK 3 (folder picker via `rfd`; X11 drag-out via `x11rb`)
+- **Windows:** [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) (MSVC linker for Rust)
+- **macOS:** Xcode command-line tools
+
+### Classifier tiers
+
+| Tier | Engine | Platforms |
+|------|--------|-----------|
+| 1 | Rust ZCR | All |
+| 2 (grey-zone) | Essentia TensorFlow | Linux, macOS (Python 3.14 + `cargo xtask setup`) |
+| 2 (fallback) | Librosa spectral | All (default on Windows) |
+
+On Windows, setup skips the TensorFlow env automatically; tier 2 uses librosa.
 
 ## Build & run
 
@@ -42,14 +54,24 @@ Flags:
 - `--no-setup` — skip setup before build/run
 - `--release` — release profile
 
-Models are copied next to the binary at build time (`target/{profile}/models/`).
+Models and SVG icons are copied next to the binary at build time.
+
+### Portable layout
+
+For a copied build (not running from the source tree), place next to the executable:
+
+- `resources/` — SVG icons (`play.svg`, etc.; copied at build time)
+- `models/` — Essentia model files (copied at build time; optional on Windows)
+- `scripts/` — classifier `.py` files (copied at build time) plus a `uv`-synced env (`cargo xtask classifiers`)
+
+macOS `.app` bundles also look in `Contents/Resources/` (`scripts/`, `models/`, icons).
 
 ## Features
 
 - Browse directories for audio samples (FLAC, WAV, MP3, OGG)
 - Fuzzy file search with directory caching
 - Separate tag filters (`title:value`, `artist:value`, etc.) with autocomplete
-- Auto-tag untagged files (Rust ZCR tier 1 + optional Essentia TensorFlow tier 2 on Python 3.14)
+- Auto-tag untagged files (Rust ZCR tier 1 + Essentia TensorFlow tier 2 on Linux/macOS, librosa on Windows)
 - Bulk auto-tag: scan a folder, review suggestions, apply in batch
 - Waveform preview with playback controls; zoom in to see individual sample points
 

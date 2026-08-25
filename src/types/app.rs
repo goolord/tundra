@@ -86,7 +86,7 @@ struct FileDragPending {
     last: Point,
     threshold_met: bool,
     origin_locked: bool,
-    awaiting_x11: bool,
+    awaiting_drag: bool,
 }
 
 struct SidebarResize {
@@ -126,7 +126,7 @@ pub struct App {
     sidebar_resize: Option<SidebarResize>,
     file_drag: Option<FileDragPending>,
     native_drag: NativeDrag,
-    x11_drag_ready: bool,
+    drag_ready: bool,
     last_cursor: Point,
     modifiers: Modifiers,
 }
@@ -372,7 +372,7 @@ impl Default for App {
             sidebar_resize: None,
             file_drag: None,
             native_drag: NativeDrag::new(),
-            x11_drag_ready: cfg!(any(windows, target_os = "macos")),
+            drag_ready: cfg!(any(windows, target_os = "macos")),
             last_cursor: Point::ORIGIN,
             modifiers: Modifiers::default(),
         };
@@ -669,10 +669,10 @@ impl App {
         Task::none()
     }
 
-    fn ensure_x11_drag() -> Task<Message> {
+    fn ensure_drag() -> Task<Message> {
         window::latest().then(|id| match id {
             Some(id) => window::run(id, |window| crate::drag_out::x11_window_id(window))
-                .map(Message::X11WindowId),
+                .map(Message::DragWindowId),
             None => Task::none(),
         })
     }
@@ -689,7 +689,7 @@ impl App {
     }
 
     fn start_file_drag(&mut self, path: PathBuf) -> Task<Message> {
-        let canonical = match std::fs::canonicalize(&path) {
+        let canonical = match crate::path_util::canonical_path(&path) {
             Ok(path) => path,
             Err(err) => {
                 self.show_notice(drag_out_notice(format!(
@@ -1712,7 +1712,7 @@ impl App {
                         last: self.last_cursor,
                         threshold_met: true,
                         origin_locked: true,
-                        awaiting_x11: false,
+                        awaiting_drag: false,
                     });
                     return Task::none();
                 }
@@ -1722,7 +1722,7 @@ impl App {
                     last: self.last_cursor,
                     threshold_met: false,
                     origin_locked: false,
-                    awaiting_x11: false,
+                    awaiting_drag: false,
                 });
                 Task::none()
             }
@@ -1750,7 +1750,7 @@ impl App {
                         )
                     }
                     FileDragKind::File(path) => {
-                        if drag.threshold_met || drag.awaiting_x11 {
+                        if drag.threshold_met || drag.awaiting_drag {
                             return Task::none();
                         }
                         let dx = point.x - drag.origin.x;
@@ -1759,12 +1759,12 @@ impl App {
                             return Task::none();
                         }
                         let path = path.clone();
-                        if self.x11_drag_ready {
+                        if self.drag_ready {
                             drag.threshold_met = true;
                             self.start_file_drag(path)
                         } else {
-                            drag.awaiting_x11 = true;
-                            Self::ensure_x11_drag()
+                            drag.awaiting_drag = true;
+                            Self::ensure_drag()
                         }
                     }
                 }
@@ -1773,7 +1773,7 @@ impl App {
             Message::FileDragRelease => {
                 let mut task = Task::none();
                 let click_to_open = self.file_drag.as_ref().and_then(|drag| {
-                    if self.native_drag.is_active() || drag.threshold_met || drag.awaiting_x11 {
+                    if self.native_drag.is_active() || drag.threshold_met || drag.awaiting_drag {
                         return None;
                     }
                     if let FileDragKind::File(path) = &drag.kind {
@@ -1812,21 +1812,24 @@ impl App {
                 Task::none()
             }
 
-            Message::X11WindowId(window_id) => {
+            Message::DragWindowId(window_id) => {
                 let Some(id) = window_id else {
-                    self.x11_drag_ready = false;
+                    self.drag_ready = false;
+                    #[cfg(all(unix, not(target_os = "macos")))]
                     self.show_notice(drag_out_notice(
                         "Drag-out from the file list requires X11 and is unavailable on native Wayland.",
                     ));
+                    #[cfg(not(all(unix, not(target_os = "macos"))))]
+                    self.show_notice(drag_out_notice("Could not initialize drag-out."));
                     self.file_drag = None;
                     return Task::none();
                 };
                 match self.native_drag.init_with_window_id(id) {
                     Ok(()) => {
-                        self.x11_drag_ready = true;
+                        self.drag_ready = true;
                     }
                     Err(err) => {
-                        self.x11_drag_ready = false;
+                        self.drag_ready = false;
                         self.show_notice(drag_out_notice(format!(
                             "Could not initialize drag-out: {err}."
                         )));
@@ -1838,17 +1841,17 @@ impl App {
                     let Some(drag) = &mut self.file_drag else {
                         return Task::none();
                     };
-                    if !drag.awaiting_x11 {
+                    if !drag.awaiting_drag {
                         return Task::none();
                     }
                     let path = match &drag.kind {
                         FileDragKind::File(path) => path.clone(),
                         FileDragKind::Scroll => {
-                            drag.awaiting_x11 = false;
+                            drag.awaiting_drag = false;
                             return Task::none();
                         }
                     };
-                    drag.awaiting_x11 = false;
+                    drag.awaiting_drag = false;
                     drag.threshold_met = true;
                     path
                 };
@@ -1900,16 +1903,16 @@ impl App {
 
             Message::WaveformCopyName => {
                 if let Some(path) = &self.player.current_file
-                    && let Some(name) = path.file_name().and_then(|name| name.to_str())
+                    && let Some(name) = crate::path_util::file_name_lossy(path)
                 {
-                    return iced::clipboard::write(name.to_owned());
+                    return iced::clipboard::write(name);
                 }
                 Task::none()
             }
 
             Message::WaveformCopyPath => {
                 if let Some(path) = &self.player.current_file {
-                    return iced::clipboard::write(path.display().to_string());
+                    return iced::clipboard::write(path.to_string_lossy().into_owned());
                 }
                 Task::none()
             }
@@ -1922,13 +1925,15 @@ impl App {
             }
 
             Message::FileCopyName(path) => {
-                if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
-                    return iced::clipboard::write(name.to_owned());
+                if let Some(name) = crate::path_util::file_name_lossy(&path) {
+                    return iced::clipboard::write(name);
                 }
                 Task::none()
             }
 
-            Message::FileCopyPath(path) => iced::clipboard::write(path.display().to_string()),
+            Message::FileCopyPath(path) => {
+                iced::clipboard::write(path.to_string_lossy().into_owned())
+            }
 
             Message::FileRevealInFileManager(path) => {
                 reveal_in_file_manager(&path);

@@ -66,6 +66,7 @@ impl Worker {
             }
         }
 
+        #[cfg(not(windows))]
         for python in ["python3", "python"] {
             match try_spawn_python_worker(&scripts_dir, python) {
                 Ok(mut worker) => match worker.wait_for_ready() {
@@ -154,7 +155,9 @@ impl Worker {
             *self = Self::spawn()?;
         }
 
-        let path_str = path.display().to_string();
+        let path_str = crate::path_util::normalize_path(path.to_path_buf())
+            .to_string_lossy()
+            .into_owned();
         if path_str.contains('\n') || path_str.contains('\r') {
             return Err(ClassifyError::new(
                 "Couldn't analyze this file.",
@@ -402,15 +405,13 @@ fn spawn_worker(mut command: Command) -> Result<Worker, ClassifyError> {
     })
 }
 
-const CLASSIFIER_PYTHON: &str = "3.14";
-
 fn try_spawn_uv_worker(scripts_dir: &Path) -> Option<Worker> {
     let mut command = Command::new("uv");
     command
         .current_dir(scripts_dir)
         .arg("run")
         .arg("--python")
-        .arg(CLASSIFIER_PYTHON)
+        .arg(super::UV_PYTHON)
         .arg("classifier_worker.py")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -419,6 +420,7 @@ fn try_spawn_uv_worker(scripts_dir: &Path) -> Option<Worker> {
     spawn_worker(command).ok()
 }
 
+#[cfg(not(windows))]
 fn try_spawn_python_worker(scripts_dir: &Path, python: &str) -> Result<Worker, ClassifyError> {
     let script = scripts_dir.join("classifier_worker.py");
     let mut command = Command::new(python);

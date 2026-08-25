@@ -91,14 +91,14 @@ def map_jamendo_class(raw_class: str) -> str:
 
 
 def dl_enabled() -> bool:
-    if os.environ.get("TUNDRA_ESSENTIA_DL", "").strip().lower() in {
+    if sys.platform == "win32":
+        return False
+    return os.environ.get("TUNDRA_ESSENTIA_DL", "").strip().lower() in {
         "1",
         "true",
         "yes",
         "on",
-    }:
-        return True
-    return bundled_model_dir() is not None
+    }
 
 
 def configure_tensorflow_runtime() -> None:
@@ -111,13 +111,14 @@ def bundled_model_dir() -> Path | None:
     if env := os.environ.get("ESSENTIA_MODELS"):
         candidates.append(Path(env))
     script_dir = Path(__file__).resolve().parent
-    candidates.extend(
-        [
-            script_dir.parent / "resources" / "models",
-            script_dir.parent / "target" / "debug" / "models",
-            script_dir.parent / "target" / "release" / "models",
-        ]
-    )
+    project = script_dir.parent
+    candidates.append(project / "resources" / "models")
+    target_root = project / "target"
+    for profile in ("debug", "release"):
+        candidates.append(target_root / profile / "models")
+        if target_root.is_dir():
+            for child in target_root.iterdir():
+                candidates.append(child / profile / "models")
     for candidate in candidates:
         if required_models_present(candidate):
             return candidate
