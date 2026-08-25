@@ -422,23 +422,95 @@ pub fn index_paths(
     lookup.into_new_entries()
 }
 
-fn path_match_scores(matcher: &SkimMatcherV2, path: &Path, query: &str) -> (i64, i64) {
-    let path_score = path_search_strings(path)
-        .iter()
-        .filter_map(|candidate| matcher.fuzzy_match(candidate, query))
-        .max()
-        .unwrap_or(0) as i64;
+pub const FILE_SEARCH_MIN_QUERY_LEN: usize = 2;
+const FILE_SEARCH_DEBOUNCE_MS: u64 = 200;
+const FILE_SEARCH_DEBOUNCE_MS_SHORT: u64 = 450;
+const CONTAINS_NAME_MATCH_SCORE: i64 = 400;
 
-    let mut name_score = 0i64;
+pub fn file_search_debounce_ms(query_len: usize) -> u64 {
+    if query_len <= FILE_SEARCH_MIN_QUERY_LEN {
+        FILE_SEARCH_DEBOUNCE_MS_SHORT
+    } else {
+        FILE_SEARCH_DEBOUNCE_MS
+    }
+}
+
+fn file_search_terms(query: &str) -> Vec<String> {
+    query
+        .split_whitespace()
+        .map(str::trim)
+        .filter(|term| !term.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+fn text_contains(haystack: &str, needle: &str, case_sensitive: bool) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    if case_sensitive {
+        haystack.contains(needle)
+    } else {
+        haystack
+            .to_ascii_lowercase()
+            .contains(&needle.to_ascii_lowercase())
+    }
+}
+
+fn term_field_score(
+    matcher: &SkimMatcherV2,
+    text: &str,
+    term: &str,
+    case_sensitive: bool,
+) -> i64 {
+    if text_contains(text, term, case_sensitive) {
+        return CONTAINS_NAME_MATCH_SCORE + term.len() as i64;
+    }
+    matcher.fuzzy_match(text, term).unwrap_or(0) as i64
+}
+
+fn path_match_scores(
+    matcher: &SkimMatcherV2,
+    path: &Path,
+    query: &str,
+    case_sensitive: bool,
+) -> (i64, i64) {
+    let terms = file_search_terms(query);
+    if terms.is_empty() {
+        return (0, 0);
+    }
+
+    let mut name_fields = Vec::new();
     if let Some(name) = crate::path_util::file_name_lossy(path) {
-        if let Some(score) = matcher.fuzzy_match(&name, query) {
-            name_score = name_score.max(score as i64);
-        }
+        name_fields.push(name);
     }
     if let Some(stem) = crate::path_util::file_stem_lossy(path) {
-        if let Some(score) = matcher.fuzzy_match(&stem, query) {
-            name_score = name_score.max(score as i64);
+        if name_fields.last().is_none_or(|last| last != &stem) {
+            name_fields.push(stem);
         }
+    }
+
+    let path_string = path.to_string_lossy().into_owned();
+    let mut name_score = 0i64;
+    let mut path_score = 0i64;
+
+    for term in &terms {
+        let name_term_score = name_fields
+            .iter()
+            .map(|field| term_field_score(matcher, field, term, case_sensitive))
+            .max()
+            .unwrap_or(0);
+        let path_term_score = if text_contains(&path_string, term, case_sensitive) {
+            CONTAINS_NAME_MATCH_SCORE + term.len() as i64
+        } else {
+            0
+        };
+        let term_score = name_term_score.max(path_term_score);
+        if term_score == 0 {
+            return (0, 0);
+        }
+        name_score += name_term_score;
+        path_score += path_term_score;
     }
 
     (name_score, path_score)
@@ -558,24 +630,6 @@ impl SearchRank {
             path,
         }
     }
-}
-
-fn path_search_strings(path: &Path) -> Vec<String> {
-    let mut seen = HashSet::new();
-    let mut strings = Vec::new();
-    let mut push = |value: &str| {
-        if !value.is_empty() && seen.insert(value.to_owned()) {
-            strings.push(value.to_string());
-        }
-    };
-    push(&path.to_string_lossy());
-    if let Some(name) = crate::path_util::file_name_lossy(path) {
-        push(&name);
-    }
-    if let Some(stem) = crate::path_util::file_stem_lossy(path) {
-        push(&stem);
-    }
-    strings
 }
 
 fn file_search_matcher(case_sensitive: bool) -> SkimMatcherV2 {
@@ -748,7 +802,7 @@ pub async fn filter_search_paths(
     async_io::Timer::after(std::time::Duration::from_millis(debounce_ms)).await;
     let file_matcher = file_search_matcher(case_sensitive);
     let tag_matcher = tag_search_matcher();
-    let file_active = file_query.len() > 2;
+    let file_active = file_query.len() >= FILE_SEARCH_MIN_QUERY_LEN;
     let tag_active = !tag_filters.is_empty();
     let mut lookup = MetadataLookup::new(metadata);
     let mut matches = Vec::new();
@@ -759,7 +813,7 @@ pub async fn filter_search_paths(
         }
 
         let (name_score, path_score) = if file_active {
-            path_match_scores(&file_matcher, &path, &file_query)
+            path_match_scores(&file_matcher, &path, &file_query, case_sensitive)
         } else {
             (0, 0)
         };
@@ -914,4 +968,35 @@ pub fn refresh_cached_metadata(path: &Path) -> Option<CachedMetadata> {
         mtime_secs,
         fields,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_search_matches_snare_in_filename() {
+        let matcher = file_search_matcher(false);
+        let path = PathBuf::from(r"C:\Samples\Snare Drum 01.wav");
+        let (name_score, path_score) = path_match_scores(&matcher, &path, "snare", false);
+        assert!(name_score > 0 || path_score > 0, "expected snare to match filename");
+    }
+
+    #[test]
+    fn file_search_requires_all_terms() {
+        let matcher = file_search_matcher(false);
+        let path = PathBuf::from(r"C:\Samples\Snare Drum 01.wav");
+        let (both, _) = path_match_scores(&matcher, &path, "snare drum", false);
+        let (snare_only, _) = path_match_scores(&matcher, &path, "snare", false);
+        let (missing, _) = path_match_scores(&matcher, &path, "snare kick", false);
+        assert!(both > 0);
+        assert!(snare_only > 0);
+        assert_eq!(missing, 0);
+    }
+
+    #[test]
+    fn file_search_debounce_is_longer_for_two_chars() {
+        assert_eq!(file_search_debounce_ms(2), FILE_SEARCH_DEBOUNCE_MS_SHORT);
+        assert_eq!(file_search_debounce_ms(3), FILE_SEARCH_DEBOUNCE_MS);
+    }
 }

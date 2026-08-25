@@ -662,37 +662,62 @@ fn tag_suggestions_slot(suggestions: Vec<Element<'static, Message>>) -> Element<
     }
 }
 
+fn filter_clear_button(on_press: Message) -> Element<'static, Message> {
+    button(text("×").size(13))
+        .on_press(on_press)
+        .padding([4, 8])
+        .style(tag_chip_close_style)
+        .into()
+}
+
 fn file_search_input(search_value: &str) -> Element<'_, Message> {
-    container(
-        mouse_area(
-            TextInput::new("Search files…", search_value)
-                .id(Id::new(FILE_SEARCH_INPUT_ID))
-                .on_input(Message::Search)
-                .size(13)
-                .padding([8, 10])
-                .width(Length::Fill),
-        )
-        .on_press(Message::SearchFocused(true)),
-    )
-    .width(Length::Fill)
-    .into()
+    let mut input_row = Row::new()
+        .spacing(4)
+        .align_y(Alignment::Center)
+        .push(
+            container(
+                mouse_area(
+                    TextInput::new("Search files…", search_value)
+                        .id(Id::new(FILE_SEARCH_INPUT_ID))
+                        .on_input(Message::Search)
+                        .size(13)
+                        .padding([8, 10])
+                        .width(Length::Fill),
+                )
+                .on_press(Message::SearchFocused(true)),
+            )
+            .width(Length::Fill),
+        );
+    if !search_value.is_empty() {
+        input_row = input_row.push(filter_clear_button(Message::Search(String::new())));
+    }
+    input_row.width(Length::Fill).into()
 }
 
 fn tag_search_input(tag_search_value: &str) -> Element<'_, Message> {
-    container(
-        mouse_area(
-            TextInput::new("title:value — Enter or Tab", tag_search_value)
-                .id(Id::new(TAG_SEARCH_INPUT_ID))
-                .on_input(Message::TagSearchInput)
-                .on_submit(Message::TagSearchSubmit)
-                .size(12)
-                .padding([8, 10])
-                .width(Length::Fill),
-        )
-        .on_press(Message::TagSearchFocused(true)),
-    )
-    .width(Length::Fill)
-    .into()
+    let mut input_row = Row::new()
+        .spacing(4)
+        .align_y(Alignment::Center)
+        .push(
+            container(
+                mouse_area(
+                    TextInput::new("title:value — Enter or Tab", tag_search_value)
+                        .id(Id::new(TAG_SEARCH_INPUT_ID))
+                        .on_input(Message::TagSearchInput)
+                        .on_submit(Message::TagSearchSubmit)
+                        .size(12)
+                        .padding([8, 10])
+                        .width(Length::Fill),
+                )
+                .on_press(Message::TagSearchFocused(true)),
+            )
+            .width(Length::Fill),
+        );
+    if !tag_search_value.is_empty() {
+        input_row =
+            input_row.push(filter_clear_button(Message::TagSearchInput(String::new())));
+    }
+    input_row.width(Length::Fill).into()
 }
 
 fn section_divider(theme: &theme::Theme) -> container::Style {
@@ -834,7 +859,8 @@ impl FileSelector {
     }
 
     pub fn search_active(&self) -> bool {
-        self.search_value.len() > 2 || !self.tag_filters.is_empty()
+        self.search_value.len() >= crate::metadata::FILE_SEARCH_MIN_QUERY_LEN
+            || !self.tag_filters.is_empty()
     }
 
     pub fn selected_audio_path(&self) -> Option<PathBuf> {
@@ -935,7 +961,8 @@ impl FileSelector {
             .on_scroll(Message::FileListScrolled)
             .height(Length::Fill);
 
-        let file_search_active = self.search_value.len() > 2;
+        let file_search_active =
+            self.search_value.len() >= crate::metadata::FILE_SEARCH_MIN_QUERY_LEN;
 
         let mut filter_body = Column::new()
             .spacing(0)
