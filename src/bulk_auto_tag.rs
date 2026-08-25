@@ -246,6 +246,25 @@ fn scan_cancelled(cancel: &AtomicBool) -> bool {
     cancel.load(Ordering::Relaxed)
 }
 
+fn should_skip_walk_entry(entry: &walkdir::DirEntry) -> bool {
+    entry.depth() > 0 && is_link_or_reparse(entry.path())
+}
+
+fn is_link_or_reparse(path: &Path) -> bool {
+    if path.is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        if let Ok(meta) = std::fs::symlink_metadata(path) {
+            return meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+        }
+    }
+    false
+}
+
 fn collect_audio_paths(
     root: &Path,
     progress: Option<&BulkScanProgress>,
@@ -257,6 +276,7 @@ fn collect_audio_paths(
     for entry in WalkDir::new(root)
         .follow_links(false)
         .into_iter()
+        .filter_entry(|entry| !should_skip_walk_entry(entry))
         .filter_map(|entry| entry.ok())
     {
         if scan_cancelled(cancel) {
@@ -266,7 +286,7 @@ fn collect_audio_paths(
             continue;
         }
         let path = entry.into_path();
-        if path.is_symlink() || !is_audio(&path) {
+        if is_link_or_reparse(&path) || !is_audio(&path) {
             continue;
         }
         seen += 1;
@@ -458,12 +478,16 @@ pub fn collect_accepted(groups: &[BulkDirGroup]) -> Vec<BulkApplyItem> {
 pub fn apply_items(
     items: &[BulkApplyItem],
     progress: Option<&BulkScanProgress>,
+    cancel: &AtomicBool,
 ) -> BulkApplySummary {
     let mut applied = 0usize;
     let mut applied_paths = Vec::new();
     let mut failed = Vec::new();
 
     for item in items {
+        if scan_cancelled(cancel) {
+            break;
+        }
         match write_instrument_tag_if_untagged(&item.path, &item.instrument) {
             Ok(()) => {
                 applied += 1;

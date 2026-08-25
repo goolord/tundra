@@ -1197,6 +1197,18 @@ pub fn bulk_auto_tag_view<'a>(
                 })
                 .width(Length::Fill),
         );
+    let header = if is_review {
+        header.push(
+            text("Apply writes tags permanently. There is no undo. Untagged files may get a new tag container (for example ID3 on WAV).")
+                .size(11)
+                .style(|_theme: &Theme| iced::widget::text::Style {
+                    color: Some(Color::from_rgb(0.88, 0.78, 0.52)),
+                })
+                .width(Length::Fill),
+        )
+    } else {
+        header
+    };
 
     let content: Element<Message> = match phase {
         BulkAutoTagPhase::PickDirectory => {
@@ -1364,13 +1376,9 @@ pub fn bulk_auto_tag_view<'a>(
             })
             .style(|theme, status| modal_button_style(theme, status, true)),
         Space::new().width(Length::Fill),
-        button(text("Close").size(12))
+        button(text(if busy { "Cancel" } else { "Close" }).size(12))
             .padding([6, 14])
-            .on_press_maybe(if busy {
-                None
-            } else {
-                Some(Message::CloseBulkAutoTag)
-            })
+            .on_press(Message::CloseBulkAutoTag)
             .style(|theme, status| modal_button_style(theme, status, false)),
     ]
     .spacing(8)

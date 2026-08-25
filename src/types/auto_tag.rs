@@ -298,6 +298,17 @@ pub fn auto_tag_view<'a>(state: &'a AutoTagState) -> Element<'a, Message> {
     let can_run = state.target.is_some() && untagged && !state.running;
     let can_apply = state.result.is_some() && untagged && !state.running && !state.applied;
 
+    if can_apply {
+        body = body.push(
+            text("Apply writes the instrument tag permanently. There is no undo. Untagged files may get a new tag container (for example ID3 on WAV).")
+                .size(11)
+                .style(|_theme: &Theme| iced::widget::text::Style {
+                    color: Some(Color::from_rgb(0.88, 0.78, 0.52)),
+                })
+                .width(Length::Fill),
+        );
+    }
+
     body = body.push(
         row![
             button(text("Choose file…").size(12))

@@ -322,6 +322,7 @@ pub fn read_tag_fields(path: &Path) -> Option<TagFields> {
     }
 
     let tagged_file = read_from_path(path).ok()?;
+    discard_tag_backup(path);
 
     let Some(tag) = tagged_file.primary_tag().or_else(|| tagged_file.first_tag()) else {
         return Some(TagFields::default());
@@ -814,24 +815,19 @@ pub fn instrument_tag(path: &Path) -> Option<String> {
     }
 
     let tagged_file = read_from_path(path).ok()?;
+    discard_tag_backup(path);
     let tag = tagged_file.primary_tag().or_else(|| tagged_file.first_tag())?;
     explicit_instrument_from_tag(tag)
 }
 
 pub fn write_instrument_tag_if_untagged(path: &Path, instrument: &str) -> Result<(), String> {
-    if let Some(existing) = instrument_tag(path) {
-        return Err(format!(
-            "This file already has an instrument tag ({existing}). Auto Tag only fills untagged files."
-        ));
-    }
     write_instrument_tag(path, instrument)
 }
 
 pub fn write_instrument_tag(path: &Path, instrument: &str) -> Result<(), String> {
-    use lofty::config::WriteOptions;
     use lofty::file::TaggedFileExt;
     use lofty::probe::Probe;
-    use lofty::tag::{ItemKey, ItemValue, Tag, TagExt, TagItem};
+    use lofty::tag::{ItemKey, ItemValue, Tag, TagItem};
 
     let trimmed = instrument.trim();
     if trimmed.is_empty() {
@@ -842,6 +838,16 @@ pub fn write_instrument_tag(path: &Path, instrument: &str) -> Result<(), String>
         .map_err(|err| format!("Failed to open {}: {err}", path.display()))?
         .read()
         .map_err(|err| format!("Failed to read {}: {err}", path.display()))?;
+
+    if let Some(existing) = tagged_file
+        .primary_tag()
+        .or_else(|| tagged_file.first_tag())
+        .and_then(explicit_instrument_from_tag)
+    {
+        return Err(format!(
+            "This file already has an instrument tag ({existing}). Auto Tag only fills untagged files."
+        ));
+    }
 
     let tag = if let Some(primary_tag) = tagged_file.primary_tag_mut() {
         primary_tag
@@ -868,15 +874,55 @@ pub fn write_instrument_tag(path: &Path, instrument: &str) -> Result<(), String>
     item.set_description("INSTRUMENT".to_string());
     tag.push(item);
 
-    tag.save_to_path(path, WriteOptions::default())
-        .map_err(|err| format!("Failed to write tags to {}: {err}", path.display()))?;
-
+    save_tags_atomically(path, tag)?;
     Ok(())
+}
+
+fn save_tags_atomically(path: &Path, tag: &lofty::tag::Tag) -> Result<(), String> {
+    use lofty::config::WriteOptions;
+    use lofty::tag::TagExt;
+
+    let tmp = crate::path_util::sidecar(path, ".tundra-tag.tmp");
+    let bak = crate::path_util::sidecar(path, ".tundra-tag.bak");
+    std::fs::copy(path, &tmp)
+        .map_err(|err| format!("Failed to stage {}: {err}", path.display()))?;
+    if !bak.exists() {
+        std::fs::copy(path, &bak)
+            .map_err(|err| format!("Failed to back up {}: {err}", path.display()))?;
+    }
+
+    let write_result = tag
+        .save_to_path(&tmp, WriteOptions::default())
+        .map_err(|err| format!("Failed to write tags to {}: {err}", path.display()))
+        .and_then(|_| {
+            std::fs::File::open(&tmp)
+                .and_then(|file| file.sync_all())
+                .map_err(|err| format!("Failed to sync tagged file {}: {err}", path.display()))
+        })
+        .and_then(|_| {
+            crate::path_util::replace_file(&tmp, path)
+                .map_err(|err| format!("Failed to replace {}: {err}", path.display()))
+        });
+
+    if write_result.is_err() {
+        if path.exists() {
+            let _ = std::fs::remove_file(&tmp);
+        } else if std::fs::rename(&tmp, path).is_err() {
+            let _ = std::fs::copy(&bak, path);
+        }
+    }
+    write_result
+}
+
+fn discard_tag_backup(path: &Path) {
+    let bak = crate::path_util::sidecar(path, ".tundra-tag.bak");
+    let _ = std::fs::remove_file(bak);
 }
 
 pub fn refresh_cached_metadata(path: &Path) -> Option<CachedMetadata> {
     let mtime_secs = file_mtime_secs(path)?;
     let fields = read_tag_fields(path)?;
+    discard_tag_backup(path);
     Some(CachedMetadata {
         mtime_secs,
         fields,
