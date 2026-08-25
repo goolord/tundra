@@ -1,10 +1,10 @@
 use super::*;
 use super::common::debounce;
 use crate::drag_out::NativeDrag;
+use crate::metadata::file_matches_search;
 use futures::future::{AbortHandle, Abortable};
 use futures::*;
 use fuzzy_matcher::skim::SkimMatcherV2;
-use fuzzy_matcher::FuzzyMatcher;
 
 use iced::widget::{button, center, column, container, mouse_area, operation, opaque, row, stack, text, Space};
 use iced::widget::operation::AbsoluteOffset;
@@ -69,6 +69,7 @@ pub struct App {
     pub player: Player,
     pub search_thread: AbortHandle,
     pub dir_cache: DirCache,
+    metadata_cache: MetadataCache,
     player_msgs: Option<futures::channel::mpsc::UnboundedReceiver<super::PlayerMsg>>,
     player_events_started: bool,
     drag_over: bool,
@@ -85,6 +86,8 @@ pub struct App {
 }
 
 pub struct DirCache(HashMap<PathBuf, Vec<PathBuf>>);
+
+pub struct MetadataCache(HashMap<PathBuf, String>);
 
 impl DirCache {
     fn new() -> DirCache {
@@ -148,6 +151,49 @@ fn cache_file(name: &str) -> Option<PathBuf> {
         path.push(name);
         path
     })
+}
+
+impl MetadataCache {
+    fn new() -> Self {
+        Self(HashMap::new())
+    }
+
+    fn get_path() -> Option<std::path::PathBuf> {
+        cache_file("metadata_cache.bin")
+    }
+
+    fn load() -> Self {
+        match MetadataCache::get_path() {
+            Some(path) => match std::fs::read(path) {
+                Ok(bytes) => bincode::deserialize::<HashMap<PathBuf, String>>(&bytes)
+                    .map(MetadataCache)
+                    .unwrap_or_else(|_| MetadataCache::new()),
+                Err(_) => MetadataCache::new(),
+            },
+            None => MetadataCache::new(),
+        }
+    }
+
+    fn persist(&self) {
+        let Some(path) = MetadataCache::get_path() else {
+            return;
+        };
+        let Ok(bytes) = bincode::serialize(&self.0) else {
+            eprintln!("Failed to serialize metadata cache");
+            return;
+        };
+        if let Err(err) = std::fs::write(path, bytes) {
+            eprintln!("Failed to write metadata cache: {err}");
+        }
+    }
+
+    fn merge(&mut self, entries: HashMap<PathBuf, String>) {
+        if entries.is_empty() {
+            return;
+        }
+        self.0.extend(entries);
+        self.persist();
+    }
 }
 
 fn load_cached_f32(name: &str, default: f32, clamp: impl Fn(f32) -> f32) -> f32 {
@@ -224,12 +270,14 @@ impl Default for App {
         let (player, player_msgs) = Player::new(VolumeSettings::load());
         let search_thread = AbortHandle::new_pair().0;
         let dir_cache = DirCache::get_dir_cache();
+        let metadata_cache = MetadataCache::load();
         App {
             file_selector,
             menu,
             player,
             search_thread,
             dir_cache,
+            metadata_cache,
             player_msgs: Some(player_msgs),
             player_events_started: false,
             drag_over: false,
@@ -629,25 +677,23 @@ impl App {
                         if search_str.len() > 2 {
                             let matcher = SkimMatcherV2::default();
                             let children_clone = children.clone();
+                            let mut metadata = self.metadata_cache.0.clone();
                             let file_list = Abortable::new(
                                 async move {
                                     debounce(std::time::Duration::from_millis(200)).await;
-                                    children_clone
+                                    let paths: Vec<PathBuf> = children_clone
                                         .iter()
-                                        .filter_map(|e| {
-                                            if matcher
-                                                .fuzzy_match(
-                                                    e.to_string_lossy().as_ref(),
-                                                    &search_str,
-                                                )
-                                                .is_some()
-                                            {
-                                                Some(e.to_owned())
-                                            } else {
-                                                None
-                                            }
+                                        .filter(|path| {
+                                            file_matches_search(
+                                                &matcher,
+                                                path,
+                                                &search_str,
+                                                &mut metadata,
+                                            )
                                         })
-                                        .collect()
+                                        .cloned()
+                                        .collect();
+                                    (paths, metadata)
                                 },
                                 abort_reg,
                             );
@@ -667,33 +713,30 @@ impl App {
                         let current_dir = self.file_selector.current_dir.clone();
                         if search_str.len() > 2 {
                             let matcher = SkimMatcherV2::default();
+                            let mut metadata = self.metadata_cache.0.clone();
                             let file_list = Abortable::new(
                                 async move {
                                     debounce(std::time::Duration::from_millis(300)).await;
-                                    WalkDir::new(&current_dir)
+                                    let paths: Vec<PathBuf> = WalkDir::new(&current_dir)
                                         .max_depth(100)
                                         .max_open(100)
                                         .follow_links(true)
                                         .into_iter()
                                         .filter_entry(|e| FileList::file_filter(e.path()))
                                         .filter_map(|e| match e {
-                                            Ok(e) => {
-                                                let epath = e.path();
-                                                if matcher
-                                                    .fuzzy_match(
-                                                        epath.to_string_lossy().as_ref(),
-                                                        &search_str,
-                                                    )
-                                                    .is_some()
-                                                {
-                                                    Some(epath.to_path_buf())
-                                                } else {
-                                                    None
-                                                }
-                                            }
+                                            Ok(entry) => Some(entry.path().to_path_buf()),
                                             Err(_) => None,
                                         })
-                                        .collect()
+                                        .filter(|path| {
+                                            file_matches_search(
+                                                &matcher,
+                                                path,
+                                                &search_str,
+                                                &mut metadata,
+                                            )
+                                        })
+                                        .collect();
+                                    (paths, metadata)
                                 },
                                 abort_reg,
                             );
@@ -715,12 +758,13 @@ impl App {
             }
 
             Message::SearchCompleted(file_list_res) => {
-                if let Ok(file_list) = file_list_res {
+                if let Ok((file_list, metadata)) = file_list_res {
                     self.file_selector.file_list = file_list
                         .iter()
                         .map(|x| FileButton::new(x.to_path_buf(), &self.file_selector.current_dir))
                         .collect();
                     self.file_selector.list_error = None;
+                    self.metadata_cache.merge(metadata);
                 }
                 Task::none()
             }
@@ -753,6 +797,8 @@ impl App {
             Message::InvalidateDircache => {
                 self.dir_cache = DirCache::new();
                 self.dir_cache.persist();
+                self.metadata_cache = MetadataCache::new();
+                self.metadata_cache.persist();
                 Task::none()
             }
 

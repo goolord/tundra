@@ -278,7 +278,7 @@ impl FileSelector {
 
         let search = mouse_area(
             container(
-                TextInput::new("Search files…", &self.search_value)
+                TextInput::new("Search files and tags…", &self.search_value)
                     .on_input(Message::Search)
                     .size(13)
                     .padding([8, 10])

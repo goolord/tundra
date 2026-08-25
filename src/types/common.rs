@@ -68,7 +68,7 @@ pub enum Message {
     ChangeDirectory(PathBuf),
     Search(String),
     SearchFocused(bool),
-    SearchCompleted(Result<Vec<PathBuf>, Aborted>),
+    SearchCompleted(Result<(Vec<PathBuf>, HashMap<PathBuf, String>), Aborted>),
     InsertDircache((PathBuf, Vec<PathBuf>)),
     InvalidateDircache,
     Seek(f64),
