@@ -5,9 +5,18 @@ use futures::*;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 
-use iced::{Element, Length, Task};
+use iced::widget::{button, column, container, row, stack, text};
+use iced::{Color, Element, Event, Length, Subscription, Task};
+use iced::event;
+use iced::futures::stream;
+use iced::window;
+use iced_aw::ICED_AW_FONT_BYTES;
+use futures::StreamExt;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::{collections::hash_map::HashMap, path::PathBuf};
+use std::sync::atomic::Ordering;
+use std::collections::hash_map::HashMap;
+use std::time::Duration;
 use walkdir::WalkDir;
 
 pub struct App {
@@ -18,6 +27,9 @@ pub struct App {
     pub dir_cache: DirCache,
     player_msgs: Option<futures::channel::mpsc::UnboundedReceiver<super::PlayerMsg>>,
     player_events_started: bool,
+    drag_over: bool,
+    notice: Option<String>,
+    waveform_hovered: bool,
 }
 
 pub struct DirCache(HashMap<PathBuf, Vec<PathBuf>>);
@@ -80,6 +92,8 @@ pub fn app() {
     iced::application(App::default, App::update, App::view)
         .title(App::title)
         .antialiasing(true)
+        .font(ICED_AW_FONT_BYTES)
+        .subscription(App::subscription)
         .run()
         .unwrap()
 }
@@ -100,52 +114,186 @@ impl Default for App {
             dir_cache,
             player_msgs: Some(player_msgs),
             player_events_started: false,
+            drag_over: false,
+            notice: None,
+            waveform_hovered: false,
         }
     }
 }
 
 impl App {
+    pub fn subscription(state: &App) -> Subscription<Message> {
+        let file_events = event::listen_with(|event, _status, _window| match event {
+            Event::Window(window::Event::FileDropped(path)) => Some(Message::FileDropped(path)),
+            Event::Window(window::Event::FileHovered(path)) => Some(Message::FileHovered(path)),
+            Event::Window(window::Event::FilesHoveredLeft) => Some(Message::FilesHoverLeft),
+            Event::Keyboard(iced::keyboard::Event::ModifiersChanged(modifiers)) => {
+                Some(Message::ModifiersChanged(modifiers))
+            }
+            _ => None,
+        });
+
+        let playing = state.player.controls.is_playing.load(Ordering::Relaxed)
+            && state.player.waveform.is_some();
+        let playback_tick = if playing {
+            Subscription::run_with((), |_| {
+                stream::unfold((), |()| async {
+                    async_io::Timer::after(Duration::from_millis(33)).await;
+                    Some((Message::PlaybackTick, ()))
+                })
+            })
+        } else {
+            Subscription::none()
+        };
+
+        let waveform_keys = if state.waveform_hovered && state.player.waveform.is_some() {
+            event::listen_with(|event, _status, _window| match event {
+                Event::Keyboard(iced::keyboard::Event::KeyPressed { key, .. }) => {
+                    Some(Message::WaveformKey(key))
+                }
+                _ => None,
+            })
+        } else {
+            Subscription::none()
+        };
+
+        Subscription::batch([file_events, playback_tick, waveform_keys])
+    }
+
+    fn open_path(&mut self, path: &Path) -> Task<Message> {
+        if path.is_dir() {
+            self.file_selector = FileSelector::new(path);
+            Task::none()
+        } else if is_audio(path) {
+            self.play_audio(path)
+        } else {
+            Task::none()
+        }
+    }
+
+    fn play_audio(&mut self, file_path: &Path) -> Task<Message> {
+        match self.player.play_file(file_path) {
+            Ok(()) => {
+                self.file_selector.selected_file = self
+                    .file_selector
+                    .file_list
+                    .iter()
+                    .position(|entry| entry.file_path == file_path);
+                self.ensure_player_events()
+            }
+            Err(err) => {
+                self.player.set_error(err);
+                self.file_selector.selected_file = None;
+                Task::none()
+            }
+        }
+    }
+
+    fn ensure_player_events(&mut self) -> Task<Message> {
+        if !self.player_events_started {
+            self.player_events_started = true;
+            if let Some(recv) = self.player_msgs.take() {
+                return Task::perform(recv.into_future(), |x| {
+                    Message::PlayerMsg((x.0, Arc::new(x.1)))
+                });
+            }
+        }
+        Task::none()
+    }
+
     pub fn title(&self) -> String {
         String::from("Tundra Sample Browser")
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::SelectedFile(selected_file) => {
-                match &selected_file {
-                    Some(file_path) => {
-                        if file_path.is_dir() {
-                            self.file_selector = FileSelector::new(file_path);
-                        } else {
-                            match self.player.play_file(file_path) {
-                                Ok(()) => {
-                                    self.file_selector.selected_file =
-                                        self.file_selector.file_list.iter().position(|x| {
-                                            selected_file
-                                                .as_ref()
-                                                .is_some_and(|y| y == &x.file_path)
-                                        });
-                                    if !self.player_events_started {
-                                        self.player_events_started = true;
-                                        if let Some(recv) = self.player_msgs.take() {
-                                            return Task::perform(recv.into_future(), |x| {
-                                                Message::PlayerMsg((x.0, Arc::new(x.1)))
-                                            });
-                                        }
-                                    }
-                                }
-                                Err(err) => {
-                                    self.player.set_error(err);
-                                    self.file_selector.selected_file = None;
-                                }
-                            }
-                        }
-                    }
-                    None => {
-                        self.player.waveform = None;
-                    }
+            Message::SelectedFile(selected_file) => match &selected_file {
+                Some(file_path) => self.open_path(file_path),
+                None => {
+                    self.player.waveform = None;
+                    Task::none()
                 }
+            },
 
+            Message::FileDropped(path) => {
+                self.drag_over = false;
+                self.open_path(&path)
+            }
+
+            Message::FileHovered(path) => {
+                self.drag_over = is_audio(&path) || path.is_dir();
+                Task::none()
+            }
+
+            Message::FilesHoverLeft => {
+                self.drag_over = false;
+                Task::none()
+            }
+
+            Message::OpenFolder => Task::perform(
+                async {
+                    rfd::AsyncFileDialog::new()
+                        .pick_folder()
+                        .await
+                        .map(|folder| folder.path().to_path_buf())
+                },
+                Message::FolderPicked,
+            ),
+
+            Message::OpenFile => Task::perform(
+                async {
+                    rfd::AsyncFileDialog::new()
+                        .add_filter(
+                            "Audio",
+                            &["flac", "wav", "mp3", "ogg"],
+                        )
+                        .pick_file()
+                        .await
+                        .map(|file| file.path().to_path_buf())
+                },
+                Message::FilePicked,
+            ),
+
+            Message::FilePicked(file) => {
+                if let Some(path) = file {
+                    return self.open_path(&path);
+                }
+                Task::none()
+            }
+
+            Message::FolderPicked(folder) => {
+                if let Some(path) = folder {
+                    self.file_selector = FileSelector::new(&path);
+                }
+                Task::none()
+            }
+
+            Message::GoHome => {
+                if let Some(home) = dirs::home_dir() {
+                    self.file_selector = FileSelector::new(&home);
+                }
+                Task::none()
+            }
+
+            Message::RefreshDirectory => {
+                let current_dir = self.file_selector.current_dir.clone();
+                self.file_selector = FileSelector::new(&current_dir);
+                Task::none()
+            }
+
+            Message::Quit => iced::exit(),
+
+            Message::About => {
+                self.notice = Some(format!(
+                    "Tundra {} — browse and preview audio samples (FLAC, WAV, MP3, OGG). \
+                     Drag-and-drop works on Windows, macOS, and X11; on native Wayland use File → Open File.",
+                    env!("CARGO_PKG_VERSION")
+                ));
+                Task::none()
+            }
+
+            Message::DismissNotice => {
+                self.notice = None;
                 Task::none()
             }
 
@@ -329,8 +477,60 @@ impl App {
                 Task::none()
             }
 
+            Message::WaveformViewChanged(view) => {
+                if let Some(waveform) = &mut self.player.waveform {
+                    waveform.set_view(view);
+                }
+                Task::none()
+            }
+
+            Message::WaveformZoomIn => {
+                if let Some(waveform) = &mut self.player.waveform {
+                    let mut view = waveform.view_state();
+                    view.zoom_in();
+                    waveform.set_view(view);
+                }
+                Task::none()
+            }
+
+            Message::WaveformZoomOut => {
+                if let Some(waveform) = &mut self.player.waveform {
+                    let mut view = waveform.view_state();
+                    view.zoom_out();
+                    waveform.set_view(view);
+                }
+                Task::none()
+            }
+
+            Message::WaveformHoverChanged(hovered) => {
+                self.waveform_hovered = hovered;
+                Task::none()
+            }
+
+            Message::WaveformKey(key) => {
+                if let Some(waveform) = &mut self.player.waveform {
+                    let mut view = waveform.view_state();
+                    if WaveFormView::apply_key(&mut view, &key) {
+                        waveform.set_view(view);
+                    }
+                }
+                Task::none()
+            }
+
+            Message::PlaybackTick => {
+                self.player.sync_playback_ui();
+                Task::none()
+            }
+
+            Message::ModifiersChanged(modifiers) => {
+                if let Some(waveform) = &mut self.player.waveform {
+                    waveform.set_modifiers(modifiers);
+                }
+                Task::none()
+            }
+
             Message::Seek(p) => {
-                self.player.controls.seeking(p);
+                self.player.begin_scrub(p);
                 Task::none()
             }
 
@@ -345,22 +545,71 @@ impl App {
 
     pub fn view(&self) -> Element<'_, Message> {
         let menu = self.menu.view();
-        let file_selector = iced::widget::container(self.file_selector.view())
+
+        let notice = self.notice.as_ref().map(|notice_text| {
+            container(
+                row![
+                    notice_text.as_str(),
+                    button(text("Dismiss")).on_press(Message::DismissNotice),
+                ]
+                .spacing(8)
+                .align_y(iced::Alignment::Center),
+            )
+            .padding(6)
+            .width(Length::Fill)
+        });
+
+        let file_selector = container(self.file_selector.view())
             .width(Length::FillPortion(1))
-            .max_width(320.0)
             .height(Length::Fill)
-            .padding(4);
+            .padding(4)
+            .style(|theme| {
+                let base = theme.extended_palette().background.base.color;
+                container::Style {
+                    background: Some(
+                        Color::from_rgb(base.r * 0.58, base.g * 0.58, base.b * 0.58).into(),
+                    ),
+                    ..Default::default()
+                }
+            });
 
-        let player = self.player.view();
+        let player = container(if self.drag_over {
+            stack![
+                self.player.view(),
+                container(
+                    text("Drop audio file or folder")
+                        .size(18)
+                        .width(Length::Fill)
+                        .align_x(iced::alignment::Horizontal::Center),
+                )
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill)
+                .style(|_theme| container::Style {
+                    background: Some(Color::from_rgba(0.08, 0.12, 0.18, 0.82).into()),
+                    ..Default::default()
+                }),
+            ]
+            .width(Length::Fill)
+            .height(Length::Fill)
+        } else {
+            stack![self.player.view()]
+                .width(Length::Fill)
+                .height(Length::Fill)
+        })
+        .width(Length::FillPortion(3))
+        .height(Length::Fill);
 
-        let workspace = iced::widget::row![file_selector, player]
+        let workspace = row![file_selector, player]
             .spacing(4)
             .height(Length::Fill)
             .width(Length::Fill);
 
-        iced::widget::column![menu, workspace]
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into()
+        let mut layout = column![menu].width(Length::Fill).height(Length::Fill);
+        if let Some(notice) = notice {
+            layout = layout.push(notice);
+        }
+        layout.push(workspace).into()
     }
 }

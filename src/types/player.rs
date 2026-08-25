@@ -1,4 +1,4 @@
-use crate::source::arc_samples::ArcSamplesSource;
+use crate::source::arc_samples::{ArcSamplesSource, PlaybackPosition};
 use crate::source::callback::Callback;
 
 pub use super::common::*;
@@ -17,6 +17,10 @@ use iced::widget::Slider;
 use iced::widget::Space;
 use iced::widget::Svg;
 use iced::widget::Text;
+use iced::widget::button;
+use iced::widget::mouse_area;
+use iced::widget::row;
+use iced::widget::text;
 use iced::Element;
 use iced::Length;
 use rodio::Source;
@@ -36,7 +40,7 @@ pub struct Player {
 }
 
 enum PlayerCommand {
-    Load(PlaybackData),
+    Load(PlaybackData, sync::Arc<PlaybackPosition>),
     Play,
     Pause,
     Stop,
@@ -53,11 +57,11 @@ pub enum PlayerMsg {
 pub struct Controls {
     pub is_playing: sync::Arc<sync::atomic::AtomicBool>,
     pub seekbar: Option<Seekbar>,
+    pub playback_position: Option<sync::Arc<PlaybackPosition>>,
+    pub scrubbing: bool,
 }
 
 pub struct Seekbar {
-    pub total: u64,
-    pub remaining: u64,
     pub seeking: f64,
 }
 
@@ -74,12 +78,7 @@ struct LoadedAudio {
 }
 
 impl Seekbar {
-    pub fn view(&self) -> Element<'_, Message> {
-        let progress = if self.total == 0 {
-            0.0
-        } else {
-            1.0 - (self.remaining as f64 / self.total as f64)
-        };
+    pub fn view(&self, progress: f64) -> Element<'_, Message> {
         Slider::new(0.0..=1.0, progress, Message::Seek)
             .step(0.01)
             .on_release(Message::SeekCommit)
@@ -88,12 +87,6 @@ impl Seekbar {
 }
 
 impl Controls {
-    pub fn seeking(&mut self, p: f64) {
-        if let Some(seekbar) = &mut self.seekbar {
-            seekbar.seeking = p;
-        }
-    }
-
     pub fn play_button(&self) -> Button<'_, Message> {
         let playing = self.is_playing.load(Ordering::SeqCst);
         let label = if playing {
@@ -120,9 +113,22 @@ impl Controls {
     }
 
     pub fn seek_bar(&self) -> Element<'_, Message> {
+        let progress = match &self.seekbar {
+            None => 0.0,
+            Some(seekbar) => {
+                if self.scrubbing {
+                    seekbar.seeking
+                } else {
+                    self.playback_position
+                        .as_ref()
+                        .map(|position| position.progress())
+                        .unwrap_or(seekbar.seeking)
+                }
+            }
+        };
         match &self.seekbar {
             None => Slider::new(0.0..=0.0, 0.0, Message::Seek).into(),
-            Some(seekbar) => seekbar.view(),
+            Some(seekbar) => seekbar.view(progress),
         }
     }
 
@@ -161,6 +167,8 @@ impl Player {
                 controls: Controls {
                     is_playing,
                     seekbar: None,
+                    playback_position: None,
+                    scrubbing: false,
                 },
                 cmd_sender,
                 error: None,
@@ -170,19 +178,49 @@ impl Player {
     }
 
     pub fn view(&self) -> Container<'_, Message> {
-        let svg: Element<Message> = match &self.waveform {
-            Some(wf) => Canvas::new(wf)
+        let waveform_area: Element<Message> = match &self.waveform {
+            Some(wf) => {
+                let zoom = wf.view_state().zoom;
+                let toolbar = row![
+                    text(format!("Zoom {zoom:.1}×")).size(12),
+                    button(text("−").size(16))
+                        .padding([2, 8])
+                        .on_press(Message::WaveformZoomOut),
+                    button(text("+").size(16))
+                        .padding([2, 8])
+                        .on_press(Message::WaveformZoomIn),
+                    text("Scroll to zoom · Shift+scroll to pan · ← → when hovered")
+                        .size(11)
+                        .color(iced::Color::from_rgb(0.55, 0.58, 0.62)),
+                ]
+                .spacing(6)
+                .align_y(iced::Alignment::Center);
+
+                Column::new()
+                    .push(toolbar)
+                    .push(
+                        mouse_area(
+                            Canvas::new(wf)
+                                .width(Length::Fill)
+                                .height(Length::Fill),
+                        )
+                        .on_enter(Message::WaveformHoverChanged(true))
+                        .on_exit(Message::WaveformHoverChanged(false)),
+                    )
+                    .spacing(4)
+                    .into()
+            }
+            None => Space::new()
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .into(),
-            None => Space::new().width(Length::Fill).height(Length::Fill).into(),
         };
 
         let mut column = Column::new()
             .width(Length::Fill)
             .height(Length::Fill)
             .push(
-                Container::new(svg)
+                Container::new(waveform_area)
                     .width(Length::Fill)
                     .height(Length::Fill)
                     .padding(2),
@@ -214,18 +252,23 @@ impl Player {
 
     pub fn play_file(&mut self, file_path: &Path) -> Result<(), String> {
         self.stop();
-        let loaded = load_audio(file_path)?;
+        let mut loaded = load_audio(file_path)?;
         self.error = None;
 
         let total_frames = loaded.playback.total_frames;
-        self.controls.seekbar = Some(Seekbar {
-            total: total_frames,
-            remaining: total_frames,
-            seeking: 0.0,
-        });
+        let playback_position = PlaybackPosition::new(total_frames);
+        loaded
+            .waveform
+            .set_playback_position(sync::Arc::clone(&playback_position));
+        self.controls.playback_position = Some(sync::Arc::clone(&playback_position));
+        self.controls.scrubbing = false;
+        self.controls.seekbar = Some(Seekbar { seeking: 0.0 });
         self.waveform = Some(loaded.waveform);
 
-        send_command(&self.cmd_sender, PlayerCommand::Load(loaded.playback));
+        send_command(
+            &self.cmd_sender,
+            PlayerCommand::Load(loaded.playback, playback_position),
+        );
         self.play();
         Ok(())
     }
@@ -239,19 +282,73 @@ impl Player {
     }
 
     pub fn stop(&mut self) {
+        if let Some(position) = &self.controls.playback_position {
+            position.reset();
+        }
+        self.controls.scrubbing = false;
+        if let Some(seekbar) = &mut self.controls.seekbar {
+            seekbar.seeking = 0.0;
+        }
+        if let Some(waveform) = &mut self.waveform {
+            waveform.set_scrub_progress(None);
+        }
         send_command(&self.cmd_sender, PlayerCommand::Stop);
     }
 
     pub fn seek(&mut self, p: f64) {
+        self.controls.scrubbing = false;
+        if let Some(seekbar) = &mut self.controls.seekbar {
+            seekbar.seeking = p;
+        }
+        if let Some(waveform) = &mut self.waveform {
+            waveform.set_scrub_progress(None);
+        }
         send_command(&self.cmd_sender, PlayerCommand::Seek(p));
     }
 
+    pub fn begin_scrub(&mut self, p: f64) {
+        self.controls.scrubbing = true;
+        if let Some(seekbar) = &mut self.controls.seekbar {
+            seekbar.seeking = p;
+        }
+        if let Some(waveform) = &mut self.waveform {
+            waveform.set_scrub_progress(Some(p));
+        }
+    }
+
+    pub fn sync_playback_ui(&mut self) -> bool {
+        if self.controls.scrubbing {
+            return false;
+        }
+        let Some(position) = self.controls.playback_position.as_ref() else {
+            return false;
+        };
+        let progress = position.progress();
+        let changed = self
+            .controls
+            .seekbar
+            .as_ref()
+            .is_some_and(|seekbar| (seekbar.seeking - progress).abs() > 0.000_1);
+        if !changed {
+            return false;
+        }
+        if let Some(seekbar) = &mut self.controls.seekbar {
+            seekbar.seeking = progress;
+        }
+        true
+    }
+
     pub fn set_error(&mut self, message: String) {
-        self.error = Some(message);
-        self.waveform = None;
-        self.controls.seekbar = None;
+        send_command(&self.cmd_sender, PlayerCommand::Stop);
         self.controls.is_playing.store(false, Ordering::SeqCst);
-        self.stop();
+        if let Some(position) = &self.controls.playback_position {
+            position.reset();
+        }
+        self.controls.scrubbing = false;
+        self.controls.seekbar = None;
+        self.controls.playback_position = None;
+        self.waveform = None;
+        self.error = Some(message);
     }
 }
 
@@ -278,12 +375,15 @@ fn run_audio_worker(
 
     let sink = rodio::Sink::connect_new(stream.mixer());
     let mut playback: Option<PlaybackData> = None;
+    let mut playback_position: Option<sync::Arc<PlaybackPosition>> = None;
     let mut play_offset = 0.0_f64;
 
     block_on(async move {
         while let Some(command) = cmd_receiver.next().await {
             match command {
-                PlayerCommand::Load(data) => {
+                PlayerCommand::Load(data, position) => {
+                    position.reset();
+                    playback_position = Some(position);
                     playback = Some(data);
                     play_offset = 0.0;
                     sink.clear();
@@ -295,7 +395,13 @@ fn run_audio_worker(
                     };
                     let _ = msg_sender.unbounded_send(PlayerMsg::PlayingStored);
                     if sink.empty() {
-                        append_playback(&sink, data, play_offset, &msg_sender);
+                        append_playback(
+                            &sink,
+                            data,
+                            play_offset,
+                            playback_position.as_ref(),
+                            &msg_sender,
+                        );
                     }
                     sink.play();
                     is_playing.store(true, Ordering::SeqCst);
@@ -307,6 +413,9 @@ fn run_audio_worker(
                 }
                 PlayerCommand::Stop => {
                     play_offset = 0.0;
+                    if let Some(position) = &playback_position {
+                        position.reset();
+                    }
                     let _ = msg_sender.unbounded_send(PlayerMsg::PlayingStored);
                     sink.clear();
                     is_playing.store(false, Ordering::SeqCst);
@@ -316,9 +425,20 @@ fn run_audio_worker(
                         continue;
                     };
                     play_offset = p.clamp(0.0, 1.0);
+                    if let Some(position) = &playback_position {
+                        let frame =
+                            (play_offset * data.total_frames as f64).round() as u64;
+                        position.set_frame(frame);
+                    }
                     let _ = msg_sender.unbounded_send(PlayerMsg::PlayingStored);
                     sink.clear();
-                    append_playback(&sink, data, play_offset, &msg_sender);
+                    append_playback(
+                        &sink,
+                        data,
+                        play_offset,
+                        playback_position.as_ref(),
+                        &msg_sender,
+                    );
                     sink.play();
                     is_playing.store(true, Ordering::SeqCst);
                 }
@@ -331,6 +451,7 @@ fn append_playback(
     sink: &rodio::Sink,
     data: &PlaybackData,
     offset: f64,
+    position: Option<&sync::Arc<PlaybackPosition>>,
     msg_sender: &UnboundedSender<PlayerMsg>,
 ) {
     let channels = data.channels as usize;
@@ -344,11 +465,16 @@ fn append_playback(
         return;
     }
 
+    if let Some(position) = position {
+        position.set_frame(skip_frames as u64);
+    }
+
     sink.append(ArcSamplesSource::new(
         sync::Arc::clone(&data.samples),
         data.channels,
         data.sample_rate,
         skip_samples,
+        position.cloned(),
     ));
 
     let sender = msg_sender.clone();

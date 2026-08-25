@@ -8,4 +8,5 @@ mod waveform;
 pub use app::*;
 pub use file_selector::*;
 pub use menu::*;
+pub use waveform::WaveFormView;
 pub use player::*;
