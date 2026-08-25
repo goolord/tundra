@@ -11,7 +11,7 @@ walkdir = "2.5"
 fuzzy-matcher = "0.3"
 futures = "0.3"
 async-io = "2"
-iced_aw = { version = "0.14", features = ["menu"] }
+iced_aw = { version = "0.14", features = ["menu", "context_menu"] }
 dirs = "6"
 bincode = "1.3"
 rfd = "0.15"

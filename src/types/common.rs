@@ -40,6 +40,10 @@ pub enum Message {
     InvalidateDircache,
     Seek(f64),
     SeekCommit,
+    WaveformSeek(f64),
+    SidebarResizeStart,
+    SidebarResizeMove(f32),
+    SidebarResizeEnd,
     PlayerMsg((
         Option<super::PlayerMsg>,
         Arc<UnboundedReceiver<super::PlayerMsg>>,
@@ -64,6 +68,9 @@ pub enum Message {
     WaveformZoomOut,
     WaveformHoverChanged(bool),
     WaveformKey(iced::keyboard::Key),
+    WaveformCopyName,
+    WaveformCopyPath,
+    WaveformRevealInFileManager,
     PlaybackTick,
     ModifiersChanged(iced::keyboard::Modifiers),
 }
@@ -107,4 +114,36 @@ pub fn truncate_path(path: &Path, max_chars: usize) -> String {
         .rev()
         .collect();
     format!("…{tail}")
+}
+
+pub fn file_manager_label() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "Open in Explorer"
+    } else {
+        "Open in File browser"
+    }
+}
+
+pub fn reveal_in_file_manager(path: &Path) {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::process::Command::new("explorer")
+            .arg(format!("/select,{}", path.display()))
+            .spawn();
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open")
+            .arg("-R")
+            .arg(path)
+            .spawn();
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    if let Some(parent) = path.parent() {
+        let _ = std::process::Command::new("xdg-open")
+            .arg(parent)
+            .spawn();
+    }
 }

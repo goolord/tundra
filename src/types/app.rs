@@ -5,10 +5,11 @@ use futures::*;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 
-use iced::widget::{button, column, container, row, stack, text};
-use iced::{Color, Element, Event, Length, Subscription, Task};
+use iced::widget::{button, column, container, mouse_area, row, stack, text, Space};
+use iced::{Color, Element, Event, Length, Subscription, Task, Theme};
 use iced::event;
 use iced::futures::stream;
+use iced::mouse;
 use iced::window;
 use iced_aw::ICED_AW_FONT_BYTES;
 use futures::StreamExt;
@@ -18,6 +19,17 @@ use std::sync::atomic::Ordering;
 use std::collections::hash_map::HashMap;
 use std::time::Duration;
 use walkdir::WalkDir;
+
+const DEFAULT_SIDEBAR_WIDTH: f32 = 280.0;
+const MIN_SIDEBAR_WIDTH: f32 = 160.0;
+const MAX_SIDEBAR_WIDTH: f32 = 720.0;
+const SIDEBAR_RESIZER_WIDTH: f32 = 6.0;
+
+struct SidebarResize {
+    origin_x: f32,
+    origin_width: f32,
+    pending_origin: bool,
+}
 
 pub struct App {
     pub file_selector: FileSelector,
@@ -30,6 +42,8 @@ pub struct App {
     drag_over: bool,
     notice: Option<String>,
     waveform_hovered: bool,
+    sidebar_width: f32,
+    sidebar_resize: Option<SidebarResize>,
 }
 
 pub struct DirCache(HashMap<PathBuf, Vec<PathBuf>>);
@@ -117,6 +131,8 @@ impl Default for App {
             drag_over: false,
             notice: None,
             waveform_hovered: false,
+            sidebar_width: DEFAULT_SIDEBAR_WIDTH,
+            sidebar_resize: None,
         }
     }
 }
@@ -157,7 +173,21 @@ impl App {
             Subscription::none()
         };
 
-        Subscription::batch([file_events, playback_tick, waveform_keys])
+        let sidebar_resize = if state.sidebar_resize.is_some() {
+            event::listen_with(|event, _status, _window| match event {
+                Event::Mouse(mouse::Event::CursorMoved { position }) => {
+                    Some(Message::SidebarResizeMove(position.x))
+                }
+                Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                    Some(Message::SidebarResizeEnd)
+                }
+                _ => None,
+            })
+        } else {
+            Subscription::none()
+        };
+
+        Subscription::batch([file_events, playback_tick, waveform_keys, sidebar_resize])
     }
 
     fn open_path(&mut self, path: &Path) -> Task<Message> {
@@ -210,7 +240,7 @@ impl App {
             Message::SelectedFile(selected_file) => match &selected_file {
                 Some(file_path) => self.open_path(file_path),
                 None => {
-                    self.player.waveform = None;
+                    self.player.clear_waveform();
                     Task::none()
                 }
             },
@@ -540,7 +570,94 @@ impl App {
                 }
                 Task::none()
             }
+
+            Message::WaveformSeek(progress) => {
+                self.player.seek(progress);
+                Task::none()
+            }
+
+            Message::WaveformCopyName => {
+                if let Some(path) = &self.player.current_file
+                    && let Some(name) = path.file_name().and_then(|name| name.to_str())
+                {
+                    return iced::clipboard::write(name.to_owned());
+                }
+                Task::none()
+            }
+
+            Message::WaveformCopyPath => {
+                if let Some(path) = &self.player.current_file {
+                    return iced::clipboard::write(path.display().to_string());
+                }
+                Task::none()
+            }
+
+            Message::WaveformRevealInFileManager => {
+                if let Some(path) = &self.player.current_file {
+                    reveal_in_file_manager(path);
+                }
+                Task::none()
+            }
+
+            Message::SidebarResizeStart => {
+                self.sidebar_resize = Some(SidebarResize {
+                    origin_x: 0.0,
+                    origin_width: self.sidebar_width,
+                    pending_origin: true,
+                });
+                Task::none()
+            }
+
+            Message::SidebarResizeMove(cursor_x) => {
+                let Some(resize) = &mut self.sidebar_resize else {
+                    return Task::none();
+                };
+                if resize.pending_origin {
+                    resize.origin_x = cursor_x;
+                    resize.pending_origin = false;
+                    return Task::none();
+                }
+                self.sidebar_width = (resize.origin_width + (cursor_x - resize.origin_x))
+                    .clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
+                Task::none()
+            }
+
+            Message::SidebarResizeEnd => {
+                self.sidebar_resize = None;
+                Task::none()
+            }
         }
+    }
+
+    fn sidebar_resizer(resizing: bool) -> Element<'static, Message> {
+        mouse_area(
+            container(
+                Space::new()
+                    .width(Length::Fill)
+                    .height(Length::Fill),
+            )
+            .width(Length::Fixed(SIDEBAR_RESIZER_WIDTH))
+            .height(Length::Fill)
+            .center_y(Length::Fill)
+            .style(move |theme: &Theme| {
+                let palette = theme.extended_palette();
+                let alpha = if resizing { 0.85 } else { 0.45 };
+                container::Style {
+                    background: Some(
+                        palette
+                            .background
+                            .strong
+                            .color
+                            .scale_alpha(alpha)
+                            .into(),
+                    ),
+                    ..Default::default()
+                }
+            }),
+        )
+        .interaction(mouse::Interaction::ResizingHorizontally)
+        .on_press(Message::SidebarResizeStart)
+        .into()
     }
 
     pub fn view(&self) -> Element<'_, Message> {
@@ -560,7 +677,7 @@ impl App {
         });
 
         let file_selector = container(self.file_selector.view())
-            .width(Length::FillPortion(1))
+            .width(Length::Fixed(self.sidebar_width))
             .height(Length::Fill)
             .padding(4)
             .style(|theme| {
@@ -572,6 +689,8 @@ impl App {
                     ..Default::default()
                 }
             });
+
+        let resizer = Self::sidebar_resizer(self.sidebar_resize.is_some());
 
         let player = container(if self.drag_over {
             stack![
@@ -598,11 +717,11 @@ impl App {
                 .width(Length::Fill)
                 .height(Length::Fill)
         })
-        .width(Length::FillPortion(3))
+        .width(Length::Fill)
         .height(Length::Fill);
 
-        let workspace = row![file_selector, player]
-            .spacing(4)
+        let workspace = row![file_selector, resizer, player]
+            .spacing(0)
             .height(Length::Fill)
             .width(Length::Fill);
 

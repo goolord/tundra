@@ -1,4 +1,5 @@
 pub use super::common::*;
+use iced::widget::button::{Status as ButtonStatus, Style as ButtonStyle};
 use iced::widget::scrollable;
 use iced::widget::Button;
 use iced::widget::Column;
@@ -7,11 +8,12 @@ use iced::widget::Row;
 use iced::widget::Svg;
 use iced::widget::Text;
 use iced::widget::TextInput;
-use iced::Element;
-use iced::Length;
+use iced::{Border, Color, Element, Length, Shadow, theme};
 use std::cmp::*;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+const TUNDRA_ACCENT: Color = Color::from_rgb8(0x50, 0x7a, 0xe0);
 
 #[derive(Debug, Clone)]
 pub struct FileSelector {
@@ -32,6 +34,48 @@ pub struct FileButton {
 
 pub struct DirUp;
 
+fn sidebar_background(theme: &theme::Theme) -> Color {
+    let base = theme.extended_palette().background.base.color;
+    Color::from_rgb(base.r * 0.58, base.g * 0.58, base.b * 0.58)
+}
+
+fn file_tree_button_style(
+    theme: &theme::Theme,
+    status: ButtonStatus,
+    selected: bool,
+) -> ButtonStyle {
+    let palette = theme.extended_palette();
+    let border = Border {
+        width: 1.0,
+        color: palette.background.strong.color.scale_alpha(0.45),
+        radius: 0.0.into(),
+    };
+    let mut style = ButtonStyle {
+        text_color: palette.background.base.text,
+        border,
+        shadow: Shadow::default(),
+        ..ButtonStyle::default()
+    };
+
+    match status {
+        ButtonStatus::Active | ButtonStatus::Disabled => {
+            if selected {
+                style.background = Some(TUNDRA_ACCENT.scale_alpha(0.35).into());
+            } else {
+                style.background = Some(sidebar_background(theme).into());
+            }
+        }
+        ButtonStatus::Hovered => {
+            style.background = Some(TUNDRA_ACCENT.scale_alpha(0.55).into());
+        }
+        ButtonStatus::Pressed => {
+            style.background = Some(TUNDRA_ACCENT.scale_alpha(0.72).into());
+        }
+    }
+
+    style
+}
+
 impl DirUp {
     pub fn view(&self, cwd: PathBuf) -> Button<'_, Message> {
         let label = format!("  {}", truncate_path(&cwd, 28));
@@ -49,6 +93,8 @@ impl DirUp {
             None => cwd,
         }))
         .width(Length::Fill)
+        .padding([4, 8])
+        .style(|theme, status| file_tree_button_style(theme, status, false))
     }
 }
 
@@ -96,10 +142,9 @@ impl FileSelector {
     }
 
     pub fn view(&self) -> Column<'_, Message> {
-        let dir_up =
-            Container::new(DirUp.view(self.current_dir.to_owned()).padding(5)).width(Length::Fill);
+        let dir_up = DirUp.view(self.current_dir.to_owned());
 
-        let mut column = Column::new().push(dir_up);
+        let mut column = Column::new().push(dir_up).spacing(0);
 
         if let Some(error) = &self.list_error {
             column = column.push(
@@ -112,11 +157,10 @@ impl FileSelector {
         let new_col: Vec<Element<Message>> = self
             .file_list
             .iter()
-            .map(|button| {
-                let element: Button<'_, Message> = button.view();
-                Container::new(element.padding(5))
-                    .width(Length::Fill)
-                    .into()
+            .enumerate()
+            .map(|(index, button)| {
+                let selected = self.selected_file == Some(index);
+                button.view(selected).into()
             })
             .collect();
 
@@ -143,7 +187,7 @@ impl FileButton {
         }
     }
 
-    pub fn view(&self) -> Button<'_, Message> {
+    pub fn view(&self, selected: bool) -> Button<'_, Message> {
         let text = Text::new(&self.label).size(16);
         let label = Row::with_children(if self.file_path.is_dir() {
             vec![
@@ -166,6 +210,8 @@ impl FileButton {
         Button::new(label)
             .on_press(Message::SelectedFile(Some(self.file_path.to_owned())))
             .width(Length::Fill)
+            .padding([4, 8])
+            .style(move |theme, status| file_tree_button_style(theme, status, selected))
     }
 }
 

@@ -6,7 +6,9 @@ use iced::widget::canvas::Action;
 use iced::widget::canvas::*;
 use iced::border::Radius;
 use iced::keyboard::Modifiers;
-use iced::{Color, Point, Rectangle, Renderer, Size, Theme};
+use iced::alignment;
+use iced::widget::canvas::Text;
+use iced::{Color, Pixels, Point, Rectangle, Renderer, Size, Theme};
 use std::sync::Arc;
 
 use crate::source::arc_samples::PlaybackPosition;
@@ -16,6 +18,7 @@ const MAX_ZOOM: f32 = 64.0;
 const ZOOM_FACTOR: f32 = 1.25;
 const MAX_COLUMNS_FACTOR: f32 = 4.0;
 const PAN_STEP: f32 = 0.08;
+const TIME_MARKER_HEIGHT: f32 = 16.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WaveFormView {
@@ -146,6 +149,7 @@ impl Default for WaveFormState {
 pub struct WaveForm {
     pub samples: Vec<f32>,
     view: WaveFormView,
+    sample_rate: u32,
     playback_position: Option<Arc<PlaybackPosition>>,
     scrub_progress: Option<f64>,
     modifiers: Modifiers,
@@ -163,6 +167,8 @@ struct WaveformPalette {
     axis: Color,
     fill: Color,
     stroke: Color,
+    marker: Color,
+    marker_label: Color,
 }
 
 impl WaveformPalette {
@@ -174,6 +180,8 @@ impl WaveformPalette {
             axis: palette.background.strong.color.scale_alpha(0.35),
             fill: primary.scale_alpha(0.22),
             stroke: primary.scale_alpha(0.92),
+            marker: palette.background.strong.color.scale_alpha(0.55),
+            marker_label: palette.background.base.text.scale_alpha(0.72),
         }
     }
 }
@@ -183,11 +191,16 @@ impl WaveForm {
         Self {
             samples,
             view: WaveFormView::default(),
+            sample_rate: 0,
             playback_position: None,
             scrub_progress: None,
             modifiers: Modifiers::default(),
             cache: Cache::new(),
         }
+    }
+
+    pub fn set_sample_rate(&mut self, sample_rate: u32) {
+        self.sample_rate = sample_rate;
     }
 
     pub fn set_playback_position(&mut self, position: Arc<PlaybackPosition>) {
@@ -242,6 +255,32 @@ impl WaveForm {
 
         let fraction = (progress_frame.saturating_sub(start)) as f32 / visible as f32;
         Some(fraction.clamp(0.0, 1.0) * width)
+    }
+
+    fn progress_at_x(&self, width: f32, x: f32) -> Option<f64> {
+        if self.samples.is_empty() || width <= 0.0 {
+            return None;
+        }
+
+        let frame_count = self
+            .playback_position
+            .as_ref()
+            .map(|position| position.total_frames() as usize)
+            .unwrap_or(self.samples.len());
+        if frame_count == 0 {
+            return None;
+        }
+
+        let (start, end) = self.view.sample_range(self.samples.len());
+        let visible = end.saturating_sub(start);
+        if visible == 0 {
+            return None;
+        }
+
+        let fraction = (x / width).clamp(0.0, 1.0);
+        let progress_frame =
+            (start as f32 + fraction * visible as f32).round() as usize;
+        Some(progress_frame.min(frame_count.saturating_sub(1)) as f64 / frame_count as f64)
     }
 
     fn draw_playhead(
@@ -413,6 +452,89 @@ impl WaveForm {
 
         frame.stroke(&Self::envelope_line_path(&columns, true), stroke);
         frame.stroke(&Self::envelope_line_path(&columns, false), stroke);
+
+        self.draw_time_markers(frame, &palette, size);
+    }
+
+    fn nice_time_step(visible_secs: f64) -> f64 {
+        if visible_secs <= 0.0 {
+            return 1.0;
+        }
+        let raw = visible_secs / 8.0;
+        let magnitude = 10_f64.powf(raw.log10().floor());
+        let normalized = raw / magnitude;
+        let nice = if normalized <= 1.0 {
+            1.0
+        } else if normalized <= 2.0 {
+            2.0
+        } else if normalized <= 5.0 {
+            5.0
+        } else {
+            10.0
+        };
+        nice * magnitude
+    }
+
+    fn format_time(secs: f64) -> String {
+        let total = secs.max(0.0).round() as u64;
+        let hours = total / 3600;
+        let minutes = (total % 3600) / 60;
+        let seconds = total % 60;
+        if hours > 0 {
+            format!("{hours}:{minutes:02}:{seconds:02}")
+        } else {
+            format!("{minutes}:{seconds:02}")
+        }
+    }
+
+    fn draw_time_markers(&self, frame: &mut Frame, palette: &WaveformPalette, size: Size) {
+        if self.sample_rate == 0 || self.samples.is_empty() || size.width <= 0.0 {
+            return;
+        }
+
+        let sample_rate = self.sample_rate as f64;
+        let (start, end) = self.view.sample_range(self.samples.len());
+        let visible_samples = end.saturating_sub(start);
+        if visible_samples == 0 {
+            return;
+        }
+
+        let start_secs = start as f64 / sample_rate;
+        let visible_secs = visible_samples as f64 / sample_rate;
+        let step = Self::nice_time_step(visible_secs);
+        let mut tick = (start_secs / step).ceil() * step;
+        let end_secs = start_secs + visible_secs;
+        let label_y = size.height - 2.0;
+        let line_bottom = size.height - TIME_MARKER_HEIGHT;
+
+        while tick <= end_secs + step * 0.001 {
+            let fraction = ((tick - start_secs) / visible_secs) as f32;
+            if !(0.0..=1.0).contains(&fraction) {
+                tick += step;
+                continue;
+            }
+
+            let x = fraction * size.width;
+            let line = Path::line(Point::new(x, 0.0), Point::new(x, line_bottom));
+            frame.stroke(
+                &line,
+                Stroke::default()
+                    .with_color(palette.marker)
+                    .with_width(1.0),
+            );
+
+            frame.fill_text(Text {
+                content: Self::format_time(tick),
+                position: Point::new(x, label_y),
+                color: palette.marker_label,
+                size: Pixels(10.0),
+                align_x: iced::alignment::Horizontal::Center.into(),
+                align_y: alignment::Vertical::Bottom,
+                ..Default::default()
+            });
+
+            tick += step;
+        }
     }
 
     fn cache_bounds(size: Size, view: WaveFormView, theme: &Theme) -> Rectangle {
@@ -489,6 +611,14 @@ impl Program<Message> for WaveForm {
         bounds: Rectangle,
         cursor: Cursor,
     ) -> Option<Action<Message>> {
+        if let Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) = event
+            && cursor.is_over(bounds)
+            && let Some(position) = cursor.position_in(bounds)
+            && let Some(progress) = self.progress_at_x(bounds.width, position.x)
+        {
+            return Some(Action::publish(Message::WaveformSeek(progress)).and_capture());
+        }
+
         let mut view = self.view;
         if !self.handle_input(&mut view, event, bounds, cursor) {
             return None;
@@ -505,8 +635,8 @@ impl Program<Message> for WaveForm {
         _bounds: Rectangle,
         cursor: Cursor,
     ) -> iced::mouse::Interaction {
-        if cursor.is_over(_bounds) && self.view.zoom > 1.0 {
-            iced::mouse::Interaction::Grab
+        if cursor.is_over(_bounds) {
+            iced::mouse::Interaction::Pointer
         } else {
             iced::mouse::Interaction::default()
         }
