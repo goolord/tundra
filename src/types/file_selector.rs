@@ -1184,7 +1184,7 @@ impl FileSelector {
             .collect()
     }
 
-    pub fn view(&self) -> Column<'_, Message> {
+    pub fn view(&self, search_enabled: bool) -> Column<'_, Message> {
         let mut column = Column::new()
             .push(DirUp.view(self.current_dir.to_owned()))
             .spacing(0)
@@ -1227,6 +1227,7 @@ impl FileSelector {
                 index,
                 self.selected_file == Some(index),
                 self.hovered_file == Some(index),
+                search_enabled,
             ));
         }
         if end < total {
@@ -1331,6 +1332,10 @@ impl FileSelector {
         .width(Length::Fill)
         .style(filter_dock_style);
 
+        if !search_enabled {
+            return column.push(list_with_scrollbar);
+        }
+
         column.push(list_with_scrollbar).push(filter_dock)
     }
 }
@@ -1385,7 +1390,13 @@ impl FileButton {
         }
     }
 
-    pub fn view(&self, index: usize, selected: bool, hovered: bool) -> Element<'_, Message> {
+    pub fn view(
+        &self,
+        index: usize,
+        selected: bool,
+        hovered: bool,
+        search_enabled: bool,
+    ) -> Element<'_, Message> {
         let selected_copy = selected;
         let hovered_copy = hovered;
         let label = file_tree_label(&self.label, selected, hovered, self.is_dir);
@@ -1498,7 +1509,7 @@ impl FileButton {
                     Message::FileCopyName(path.clone()),
                     Message::FileCopyPath(path.clone()),
                     Message::FileRevealInFileManager(path.clone()),
-                    Some(Message::OpenAutoTagFor(path.clone())),
+                    search_enabled.then(|| Message::OpenAutoTagFor(path.clone())),
                 )
             })
             .style(context_menu_style)

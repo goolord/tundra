@@ -176,26 +176,37 @@ impl TagFields {
     }
 }
 
-/// Compact tag line for the transport bar (instrument, bpm, key, genre).
-pub fn format_control_bar_tags(fields: &TagFields) -> Option<String> {
-    let mut parts = Vec::new();
+/// Compact tags for the waveform toolbar (instrument, bpm, key, genre).
+pub fn control_bar_tags(fields: &TagFields) -> Vec<(TagField, String)> {
+    let mut tags = Vec::new();
     let instrument = fields.field_value(TagField::Instrument);
     if !instrument.is_empty() {
-        parts.push(format!("Instrument: {instrument}"));
+        tags.push((TagField::Instrument, instrument.to_string()));
     }
     if !fields.bpm.is_empty() {
-        parts.push(format!("BPM: {}", fields.bpm));
+        tags.push((TagField::Bpm, fields.bpm.clone()));
     }
     if !fields.key.is_empty() {
-        parts.push(format!("Key: {}", fields.key));
+        tags.push((TagField::Key, fields.key.clone()));
     }
     if !fields.genre.is_empty() {
-        parts.push(format!("Genre: {}", fields.genre));
+        tags.push((TagField::Genre, fields.genre.clone()));
     }
-    if parts.is_empty() {
+    tags
+}
+
+/// Compact tag line for tests and text-only surfaces.
+pub fn format_control_bar_tags(fields: &TagFields) -> Option<String> {
+    let tags = control_bar_tags(fields);
+    if tags.is_empty() {
         None
     } else {
-        Some(parts.join(" · "))
+        Some(
+            tags.iter()
+                .map(|(field, value)| format!("{}: {value}", field.label()))
+                .collect::<Vec<_>>()
+                .join(" · "),
+        )
     }
 }
 
@@ -661,25 +672,7 @@ fn write_native_tags(path: &Path, tags: &NativeTags) -> Result<(), String> {
         };
 
         match container {
-            Container::Wav => {
-                let mut wav = {
-                    let mut file = open()?;
-                    lofty::iff::wav::WavFile::read_from(&mut file, options).map_err(read_error)?
-                };
-                let mut info = wav.remove_riff_info().unwrap_or_default();
-                for (key, value) in [
-                    (WAV_INSTRUMENT_KEY, &tags.instrument),
-                    (WAV_ARTIST_KEY, &tags.artist),
-                    (WAV_COMMENT_KEY, &tags.comment),
-                ] {
-                    if let Some(value) = value {
-                        info.insert(key.to_string(), value.clone());
-                    }
-                }
-                wav.set_riff_info(info);
-                wav.save_to_path(staged, WriteOptions::default())
-                    .map_err(write_error)
-            }
+            Container::Wav => write_wav_tags_preserving_chunks(staged, tags),
             Container::Flac => {
                 let mut flac = {
                     let mut file = open()?;
@@ -723,41 +716,195 @@ fn write_native_tags(path: &Path, tags: &NativeTags) -> Result<(), String> {
     })
 }
 
+/// Rewrite only the LIST INFO chunk so `smpl` / `cue ` / `inst` / ACID survive.
+fn write_wav_tags_preserving_chunks(path: &Path, tags: &NativeTags) -> Result<(), String> {
+    let bytes = std::fs::read(path)
+        .map_err(|err| format!("Failed to read {}: {err}", path.display()))?;
+    let mut chunks = parse_riff_wave_chunks(&bytes)?;
+    upsert_wav_info_chunk(&mut chunks, tags);
+    let encoded = encode_riff_wave(&chunks);
+    std::fs::write(path, encoded)
+        .map_err(|err| format!("Failed to write tags to {}: {err}", path.display()))
+}
+
+fn parse_riff_wave_chunks(bytes: &[u8]) -> Result<Vec<([u8; 4], Vec<u8>)>, String> {
+    if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return Err("Not a RIFF WAVE file".into());
+    }
+    let mut offset = 12usize;
+    let mut chunks = Vec::new();
+    while offset + 8 <= bytes.len() {
+        let id: [u8; 4] = bytes[offset..offset + 4]
+            .try_into()
+            .map_err(|_| "Invalid WAV chunk id".to_string())?;
+        let size = u32::from_le_bytes(
+            bytes[offset + 4..offset + 8]
+                .try_into()
+                .map_err(|_| "Invalid WAV chunk size".to_string())?,
+        ) as usize;
+        offset += 8;
+        if offset + size > bytes.len() {
+            return Err("Truncated WAV chunk".into());
+        }
+        chunks.push((id, bytes[offset..offset + size].to_vec()));
+        offset += size;
+        if size % 2 == 1 {
+            offset += 1;
+        }
+    }
+    Ok(chunks)
+}
+
+fn upsert_wav_info_chunk(chunks: &mut Vec<([u8; 4], Vec<u8>)>, tags: &NativeTags) {
+    let mut fields = match chunks.iter().find(|(id, data)| {
+        id == b"LIST" && data.len() >= 4 && &data[..4] == b"INFO"
+    }) {
+        Some((_, data)) => parse_info_fields(&data[4..]),
+        None => Vec::new(),
+    };
+    for (key, value) in [
+        (WAV_INSTRUMENT_KEY, &tags.instrument),
+        (WAV_ARTIST_KEY, &tags.artist),
+        (WAV_COMMENT_KEY, &tags.comment),
+    ] {
+        if let Some(value) = value {
+            upsert_info_field(&mut fields, key, value);
+        }
+    }
+    let encoded = encode_info_fields(&fields);
+    if let Some(index) = chunks
+        .iter()
+        .position(|(id, data)| id == b"LIST" && data.len() >= 4 && &data[..4] == b"INFO")
+    {
+        chunks[index] = (*b"LIST", encoded);
+    } else {
+        chunks.push((*b"LIST", encoded));
+    }
+}
+
+fn parse_info_fields(bytes: &[u8]) -> Vec<([u8; 4], Vec<u8>)> {
+    let mut offset = 0usize;
+    let mut fields = Vec::new();
+    while offset + 8 <= bytes.len() {
+        let Ok(id) = bytes[offset..offset + 4].try_into() else {
+            break;
+        };
+        let Ok(size_bytes) = bytes[offset + 4..offset + 8].try_into() else {
+            break;
+        };
+        let size = u32::from_le_bytes(size_bytes) as usize;
+        offset += 8;
+        if offset + size > bytes.len() {
+            break;
+        }
+        fields.push((id, bytes[offset..offset + size].to_vec()));
+        offset += size;
+        if size % 2 == 1 {
+            offset += 1;
+        }
+    }
+    fields
+}
+
+fn upsert_info_field(fields: &mut Vec<([u8; 4], Vec<u8>)>, key: &str, value: &str) {
+    let mut id = [b' '; 4];
+    for (index, byte) in key.as_bytes().iter().take(4).enumerate() {
+        id[index] = *byte;
+    }
+    let mut data = value.as_bytes().to_vec();
+    data.push(0);
+    if let Some(existing) = fields.iter_mut().find(|(found, _)| found == &id) {
+        existing.1 = data;
+    } else {
+        fields.push((id, data));
+    }
+}
+
+fn encode_info_fields(fields: &[([u8; 4], Vec<u8>)]) -> Vec<u8> {
+    let mut body = Vec::from(*b"INFO");
+    for (id, data) in fields {
+        body.extend_from_slice(id);
+        body.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        body.extend_from_slice(data);
+        if data.len() % 2 == 1 {
+            body.push(0);
+        }
+    }
+    body
+}
+
+fn encode_riff_wave(chunks: &[([u8; 4], Vec<u8>)]) -> Vec<u8> {
+    let mut body = Vec::from(*b"WAVE");
+    for (id, data) in chunks {
+        body.extend_from_slice(id);
+        body.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        body.extend_from_slice(data);
+        if data.len() % 2 == 1 {
+            body.push(0);
+        }
+    }
+    let mut bytes = Vec::from(*b"RIFF");
+    bytes.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    bytes.extend(body);
+    bytes
+}
+
 /// Edits a copy, then swaps it in, so a failed write never truncates the original.
 fn stage_and_replace(
     path: &Path,
     edit: impl FnOnce(&Path) -> Result<(), String>,
 ) -> Result<(), String> {
-    let tmp = crate::path_util::sidecar(path, crate::path_util::TAG_TMP_SUFFIX);
-    std::fs::copy(path, &tmp)
-        .map_err(|err| format!("Failed to stage {}: {err}", path.display()))?;
-    crate::path_util::ensure_writable(&tmp)
-        .map_err(|err| format!("Failed to prepare tagged file {}: {err}", path.display()))?;
-
-    let result = edit(&tmp)
-        .and_then(|()| {
-            crate::path_util::sync_file(&tmp)
-                .map_err(|err| format!("Failed to sync tagged file {}: {err}", tmp.display()))
-        })
-        .and_then(|()| {
-            crate::path_util::ensure_writable(path).map_err(|err| {
-                format!(
-                    "Cannot write tags to read-only file {}: {err}",
-                    path.display()
-                )
-            })?;
-            crate::path_util::replace_file(&tmp, path)
-                .map_err(|err| format!("Failed to replace {}: {err}", path.display()))
-        });
-
-    if result.is_ok() {
-        let _ = crate::path_util::sync_parent_dir(path);
-    } else if path.exists() {
+    let original_perms = std::fs::metadata(path).ok().map(|meta| meta.permissions());
+    let restore_perms = || {
+        if let Some(perms) = original_perms.clone() {
+            if path.exists() {
+                let _ = std::fs::set_permissions(path, perms);
+            }
+        }
+    };
+    let tmp = crate::path_util::unique_sidecar(path, "tag");
+    if let Err(err) = std::fs::copy(path, &tmp) {
         let _ = std::fs::remove_file(&tmp);
-    } else {
-        let _ = std::fs::rename(&tmp, path);
+        return Err(format!("Failed to stage {}: {err}", path.display()));
     }
-    result
+    if let Err(err) = crate::path_util::ensure_writable(&tmp) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!(
+            "Failed to prepare tagged file {}: {err}",
+            path.display()
+        ));
+    }
+
+    if let Err(err) = edit(&tmp) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(err);
+    }
+    if let Err(err) = crate::path_util::sync_file(&tmp) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("Failed to sync tagged file {}: {err}", tmp.display()));
+    }
+    if let Err(err) = crate::path_util::ensure_writable(path) {
+        let _ = std::fs::remove_file(&tmp);
+        restore_perms();
+        return Err(format!(
+            "Cannot write tags to read-only file {}: {err}",
+            path.display()
+        ));
+    }
+    if let Err(err) = crate::path_util::replace_file(&tmp, path) {
+        if path.exists() {
+            restore_perms();
+            let _ = std::fs::remove_file(&tmp);
+        } else {
+            let _ = std::fs::rename(&tmp, path);
+            restore_perms();
+        }
+        return Err(format!("Failed to replace {}: {err}", path.display()));
+    }
+
+    let _ = crate::path_util::sync_parent_dir(path);
+    restore_perms();
+    Ok(())
 }
 
 /// Tundra's marker comment, preserving a comment the user already wrote.
@@ -2169,13 +2316,21 @@ mod tests {
 
     #[test]
     fn format_control_bar_tags_shows_instrument_bpm_and_key() {
-        let summary = format_control_bar_tags(&TagFields {
+        let fields = TagFields {
             explicit_instrument: "Snare".into(),
             bpm: "120".into(),
             key: "Am".into(),
             ..TagFields::default()
-        })
-        .expect("tag summary");
+        };
+        assert_eq!(
+            control_bar_tags(&fields),
+            vec![
+                (TagField::Instrument, "Snare".into()),
+                (TagField::Bpm, "120".into()),
+                (TagField::Key, "Am".into()),
+            ]
+        );
+        let summary = format_control_bar_tags(&fields).expect("tag summary");
         assert!(summary.contains("Instrument: Snare"));
         assert!(summary.contains("BPM: 120"));
         assert!(summary.contains("Key: Am"));
@@ -2366,24 +2521,92 @@ mod tests {
     }
 
     fn write_minimal_wav(path: &Path) {
-        let data: Vec<u8> = vec![0; 512];
-        let riff_size = 36u32 + data.len() as u32;
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(b"RIFF");
-        bytes.extend_from_slice(&riff_size.to_le_bytes());
-        bytes.extend_from_slice(b"WAVE");
-        bytes.extend_from_slice(b"fmt ");
-        bytes.extend_from_slice(&16u32.to_le_bytes());
-        bytes.extend_from_slice(&1u16.to_le_bytes());
-        bytes.extend_from_slice(&1u16.to_le_bytes());
-        bytes.extend_from_slice(&44100u32.to_le_bytes());
-        bytes.extend_from_slice(&88200u32.to_le_bytes());
-        bytes.extend_from_slice(&2u16.to_le_bytes());
-        bytes.extend_from_slice(&16u16.to_le_bytes());
-        bytes.extend_from_slice(b"data");
-        bytes.extend_from_slice(&(data.len() as u32).to_le_bytes());
-        bytes.extend_from_slice(&data);
-        std::fs::write(path, bytes).unwrap();
+        write_wav_chunks(
+            path,
+            vec![
+                (*b"fmt ", wav_pcm_fmt_chunk()),
+                (*b"data", vec![0; 512]),
+            ],
+        );
+    }
+
+    fn wav_pcm_fmt_chunk() -> Vec<u8> {
+        let mut fmt = Vec::new();
+        fmt.extend_from_slice(&1u16.to_le_bytes());
+        fmt.extend_from_slice(&1u16.to_le_bytes());
+        fmt.extend_from_slice(&44100u32.to_le_bytes());
+        fmt.extend_from_slice(&88200u32.to_le_bytes());
+        fmt.extend_from_slice(&2u16.to_le_bytes());
+        fmt.extend_from_slice(&16u16.to_le_bytes());
+        fmt
+    }
+
+    fn write_wav_chunks(path: &Path, chunks: Vec<([u8; 4], Vec<u8>)>) {
+        std::fs::write(path, encode_riff_wave(&chunks)).unwrap();
+    }
+
+    fn wav_chunk<'a>(chunks: &'a [([u8; 4], Vec<u8>)], id: &[u8; 4]) -> Option<&'a [u8]> {
+        chunks
+            .iter()
+            .find(|(found, _)| found == id)
+            .map(|(_, data)| data.as_slice())
+    }
+
+    fn wav_list_chunk<'a>(
+        chunks: &'a [([u8; 4], Vec<u8>)],
+        form: &[u8; 4],
+    ) -> Option<&'a [u8]> {
+        chunks.iter().find_map(|(id, data)| {
+            (id == b"LIST" && data.len() >= 4 && &data[..4] == form).then_some(data.as_slice())
+        })
+    }
+
+    #[test]
+    fn write_auto_tags_preserves_wav_non_info_chunks() {
+        let dir = unique_temp_dir("tundra_wav_chunk_preserve");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let audio = dir.join("kick.wav");
+        let smpl = vec![0x11; 60];
+        let cue = vec![0x22; 28];
+        let inst = vec![0x33; 8];
+        let acid = vec![0x44; 24];
+        let adtl = {
+            let mut data = Vec::from(*b"adtl");
+            data.extend_from_slice(b"labl");
+            data.extend_from_slice(&8u32.to_le_bytes());
+            data.extend_from_slice(&1u32.to_le_bytes());
+            data.extend_from_slice(b"cue\0");
+            data
+        };
+        write_wav_chunks(
+            &audio,
+            vec![
+                (*b"fmt ", wav_pcm_fmt_chunk()),
+                (*b"data", vec![0; 512]),
+                (*b"smpl", smpl.clone()),
+                (*b"cue ", cue.clone()),
+                (*b"inst", inst.clone()),
+                (*b"acid", acid.clone()),
+                (*b"LIST", adtl.clone()),
+            ],
+        );
+
+        write_auto_tags(&audio, "Kick").expect("tag wav");
+
+        let bytes = std::fs::read(&audio).expect("read tagged wav");
+        let chunks = parse_riff_wave_chunks(&bytes).expect("parse tagged wav");
+        assert_eq!(wav_chunk(&chunks, b"smpl"), Some(smpl.as_slice()));
+        assert_eq!(wav_chunk(&chunks, b"cue "), Some(cue.as_slice()));
+        assert_eq!(wav_chunk(&chunks, b"inst"), Some(inst.as_slice()));
+        assert_eq!(wav_chunk(&chunks, b"acid"), Some(acid.as_slice()));
+        assert_eq!(wav_list_chunk(&chunks, b"adtl"), Some(adtl.as_slice()));
+        assert!(
+            wav_list_chunk(&chunks, b"INFO").is_some(),
+            "LIST INFO must be written without replacing adtl"
+        );
+        assert_eq!(instrument_tag(&audio).as_deref(), Some("Kick"));
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

@@ -41,6 +41,7 @@ pub fn resource_path(name: &str) -> &str {
 pub struct Dialog {
     pub title: String,
     pub body: String,
+    pub rows: Vec<(String, String)>,
 }
 
 impl Dialog {
@@ -48,6 +49,7 @@ impl Dialog {
         Self {
             title: "About Tundra".into(),
             body,
+            rows: Vec::new(),
         }
     }
 
@@ -55,6 +57,20 @@ impl Dialog {
         Self {
             title: "Notice".into(),
             body,
+            rows: Vec::new(),
+        }
+    }
+
+    pub fn waveform_help() -> Self {
+        Self {
+            title: "Waveform controls".into(),
+            body: String::new(),
+            rows: vec![
+                ("Click".into(), "Seek".into()),
+                ("Scroll".into(), "Zoom".into()),
+                ("Shift+scroll".into(), "Pan".into()),
+                ("Drag".into(), "Pan".into()),
+            ],
         }
     }
 
@@ -62,6 +78,7 @@ impl Dialog {
         Self {
             title: "Error".into(),
             body,
+            rows: Vec::new(),
         }
     }
 }
@@ -128,6 +145,7 @@ pub enum Message {
     WaveformSpringTick,
     WaveformZoomIn,
     WaveformZoomOut,
+    WaveformHelp,
     WaveformHoverChanged(bool),
     ControlsHoverChanged(bool),
     WaveformKey(iced::keyboard::Key),

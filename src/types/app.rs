@@ -3,7 +3,7 @@ use crate::auto_tag;
 use crate::bulk_auto_tag;
 use crate::drag_out::NativeDrag;
 use crate::metadata::{
-    file_search_debounce_ms, format_control_bar_tags, index_paths, instrument_tag, parse_tag_filter,
+    control_bar_tags, file_search_debounce_ms, index_paths, instrument_tag, parse_tag_filter,
     refresh_cached_metadata, search_paths, tag_field_best_match,
     tag_parse_message, tag_search_cached_paths, write_auto_tags, auto_tag_already_complete_message,
     auto_tag_field_status, CachedMetadata,
@@ -1054,11 +1054,20 @@ impl App {
         defocus
     }
 
+    fn search_enabled(&self) -> bool {
+        self.allowed_directories
+            .contains_path(&self.file_selector.current_dir)
+    }
+
     fn navigate_directory(&mut self, dir: PathBuf) -> Task<Message> {
         self.search_focused = false;
         self.tag_search_focused = false;
         self.file_selector.reload_directory(&dir);
-        if self.allowed_directories.contains_path(&dir) && !self.dir_cache.contains_key(&dir) {
+        if !self.search_enabled() {
+            self.search_thread.abort();
+            return Task::none();
+        }
+        if !self.dir_cache.contains_key(&dir) {
             let walker = future::lazy(move |_| {
                 let children = walk_directory(&dir);
                 (dir, children)
@@ -1225,12 +1234,9 @@ impl App {
         let show_directories = self.file_selector.search_show_directories;
         let tag_only = self.file_selector.tag_only_search();
 
-        if file_query.len() < FILE_SEARCH_MIN_QUERY_LEN && tag_filters.is_empty() {
-            self.reset_file_list();
-            return Task::none();
-        }
-
-        if self.allowed_directories.is_empty() {
+        if !self.search_enabled()
+            || (file_query.len() < FILE_SEARCH_MIN_QUERY_LEN && tag_filters.is_empty())
+        {
             self.reset_file_list();
             return Task::none();
         }
@@ -2054,6 +2060,9 @@ impl App {
             }
 
             Message::SearchCompleted(file_list_res) => {
+                if !self.search_enabled() {
+                    return Task::none();
+                }
                 if let Ok(result) = file_list_res {
                     let mut cache_updated = false;
                     for (root, children) in result.cached_roots {
@@ -2244,6 +2253,11 @@ impl App {
                     view.zoom_out(waveform.samples.len());
                     waveform.set_view(view);
                 }
+                Task::none()
+            }
+
+            Message::WaveformHelp => {
+                self.dialog = Some(Dialog::waveform_help());
                 Task::none()
             }
 
@@ -2700,24 +2714,126 @@ impl App {
         .into()
     }
 
-    fn dialog_view(dialog: &Dialog) -> Element<'_, Message> {
-        opaque(
-            container(
-                column![
-                    text(&dialog.title).size(18),
-                    text(&dialog.body)
-                        .size(14)
-                        .width(Length::Fill),
+    fn dialog_control_table(rows: &[(String, String)]) -> Element<'static, Message> {
+        let header = container(
+            row![
+                text("Input")
+                    .size(10)
+                    .width(Length::FillPortion(1))
+                    .style(|theme: &Theme| iced::widget::text::Style {
+                        color: Some(
+                            theme
+                                .extended_palette()
+                                .background
+                                .base
+                                .text
+                                .scale_alpha(0.62),
+                        ),
+                    }),
+                text("Action")
+                    .size(10)
+                    .width(Length::FillPortion(1))
+                    .style(|theme: &Theme| iced::widget::text::Style {
+                        color: Some(
+                            theme
+                                .extended_palette()
+                                .background
+                                .base
+                                .text
+                                .scale_alpha(0.62),
+                        ),
+                    }),
+            ]
+            .spacing(12)
+            .align_y(iced::Alignment::Center)
+            .width(Length::Fill),
+        )
+        .padding([6, 10])
+        .width(Length::Fill)
+        .style(|theme: &Theme| {
+            let palette = theme.extended_palette();
+            container::Style {
+                background: Some(palette.background.weak.color.scale_alpha(0.32).into()),
+                border: Border {
+                    width: 1.0,
+                    color: palette.background.strong.color.scale_alpha(0.18),
+                    radius: 0.0.into(),
+                },
+                ..Default::default()
+            }
+        });
+
+        let mut table = column![header].spacing(0).width(Length::Fill);
+        for (index, (input, action)) in rows.iter().enumerate() {
+            let zebra = index % 2 == 1;
+            table = table.push(
+                container(
                     row![
-                        Space::new().width(Length::Fill),
-                        button(text("OK")).on_press(Message::DismissDialog),
+                        text(input.clone())
+                            .size(13)
+                            .width(Length::FillPortion(1)),
+                        text(action.clone())
+                            .size(13)
+                            .width(Length::FillPortion(1)),
                     ]
-                    .align_y(iced::Alignment::Center),
-                ]
-                .spacing(12)
-                .padding(16)
-                .width(Length::Fixed(440.0)),
-            )
+                    .spacing(12)
+                    .align_y(iced::Alignment::Center)
+                    .width(Length::Fill),
+                )
+                .padding([7, 10])
+                .width(Length::Fill)
+                .style(move |theme: &Theme| {
+                    let palette = theme.extended_palette();
+                    container::Style {
+                        background: Some(
+                            if zebra {
+                                palette.background.weak.color.scale_alpha(0.18)
+                            } else {
+                                Color::TRANSPARENT
+                            }
+                            .into(),
+                        ),
+                        ..Default::default()
+                    }
+                }),
+            );
+        }
+        container(table)
+            .width(Length::Fill)
+            .style(|theme: &Theme| {
+                let palette = theme.extended_palette();
+                container::Style {
+                    border: Border {
+                        width: 1.0,
+                        color: palette.background.strong.color.scale_alpha(0.22),
+                        radius: 6.0.into(),
+                    },
+                    ..Default::default()
+                }
+            })
+            .into()
+    }
+
+    fn dialog_view(dialog: &Dialog) -> Element<'_, Message> {
+        let mut body = column![text(&dialog.title).size(18)]
+            .spacing(12)
+            .padding(16)
+            .width(Length::Fixed(440.0));
+        if !dialog.body.is_empty() {
+            body = body.push(text(&dialog.body).size(14).width(Length::Fill));
+        }
+        if !dialog.rows.is_empty() {
+            body = body.push(Self::dialog_control_table(&dialog.rows));
+        }
+        body = body.push(
+            row![
+                Space::new().width(Length::Fill),
+                button(text("OK")).on_press(Message::DismissDialog),
+            ]
+            .align_y(iced::Alignment::Center),
+        );
+        opaque(
+            container(body)
             .style(|theme: &Theme| {
                 let palette = theme.extended_palette();
                 container::Style {
@@ -2827,7 +2943,7 @@ impl App {
     pub fn view(&self) -> Element<'_, Message> {
         let menu = self.menu.view(self.always_on_top);
 
-        let file_selector = container(self.file_selector.view())
+        let file_selector = container(self.file_selector.view(self.search_enabled()))
             .width(Length::Fixed(self.sidebar_width))
             .height(Length::Fill)
             .style(|theme| {
@@ -2853,7 +2969,8 @@ impl App {
             .player
             .current_file
             .as_ref()
-            .and_then(|path| format_control_bar_tags(&self.metadata_cache.tag_fields_for(path)));
+            .map(|path| control_bar_tags(&self.metadata_cache.tag_fields_for(path)))
+            .unwrap_or_default();
 
         let player = container(if self.drag_over {
             stack![

@@ -119,10 +119,16 @@ pub fn find_beside(
 }
 
 pub const TAG_TMP_SUFFIX: &str = ".tundra-tag.tmp";
+/// Legacy only: older builds wrote this, reclaim still deletes it.
 pub const TAG_BAK_SUFFIX: &str = ".tundra-tag.bak";
 pub const REPLACE_OLD_SUFFIX: &str = ".tundra-replace-old";
 
-const WRITE_SIDECAR_SUFFIXES: [&str; 3] = [TAG_TMP_SUFFIX, TAG_BAK_SUFFIX, REPLACE_OLD_SUFFIX];
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WriteSidecarKind {
+    Tmp,
+    Bak,
+    ReplaceOld,
+}
 
 pub fn sidecar(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
@@ -130,10 +136,92 @@ pub fn sidecar(path: &Path, suffix: &str) -> PathBuf {
     path.with_file_name(name)
 }
 
-fn write_sidecar_suffix(name: &str) -> Option<&'static str> {
-    WRITE_SIDECAR_SUFFIXES
-        .into_iter()
-        .find(|suffix| name.ends_with(suffix) && name.len() > suffix.len())
+/// Same-directory temp that two Tundra processes cannot share.
+pub fn unique_sidecar(path: &Path, kind: &str) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    sidecar(
+        path,
+        &format!(".tundra-{kind}-{}-{seq}.tmp", std::process::id()),
+    )
+}
+
+fn parse_write_sidecar(name: &str) -> Option<(&str, WriteSidecarKind, Option<u32>)> {
+    if let Some(dest) = name.strip_suffix(REPLACE_OLD_SUFFIX) {
+        return (!dest.is_empty()).then_some((dest, WriteSidecarKind::ReplaceOld, None));
+    }
+    if let Some(dest) = name.strip_suffix(TAG_BAK_SUFFIX) {
+        return (!dest.is_empty()).then_some((dest, WriteSidecarKind::Bak, None));
+    }
+    if let Some(dest) = name.strip_suffix(TAG_TMP_SUFFIX) {
+        return (!dest.is_empty()).then_some((dest, WriteSidecarKind::Tmp, None));
+    }
+    let rest = name.strip_suffix(".tmp")?;
+    let marker = ".tundra-tag-";
+    let index = rest.rfind(marker)?;
+    let dest = &rest[..index];
+    if dest.is_empty() {
+        return None;
+    }
+    let meta = &rest[index + marker.len()..];
+    let pid = meta.split('-').next()?.parse().ok();
+    Some((dest, WriteSidecarKind::Tmp, pid))
+}
+
+fn pid_is_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    if pid == std::process::id() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        return windows_pid_is_alive(pid);
+    }
+    #[cfg(unix)]
+    {
+        let path = std::path::PathBuf::from(format!("/proc/{pid}"));
+        if path.exists() {
+            return true;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let mut command = std::process::Command::new("kill");
+            command.args(["-0", &pid.to_string()]);
+            hide_console(&mut command);
+            return command.status().is_ok_and(|status| status.success());
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            return false;
+        }
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        false
+    }
+}
+
+#[cfg(windows)]
+fn windows_pid_is_alive(pid: u32) -> bool {
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    const ERROR_ACCESS_DENIED: u32 = 5;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut core::ffi::c_void;
+        fn CloseHandle(handle: *mut core::ffi::c_void) -> i32;
+        fn GetLastError() -> u32;
+    }
+
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if !handle.is_null() {
+        unsafe { CloseHandle(handle) };
+        return true;
+    }
+    unsafe { GetLastError() == ERROR_ACCESS_DENIED }
 }
 
 /// Same-directory replace. POSIX `rename` overwrites atomically. Windows uses
@@ -239,37 +327,35 @@ pub fn sync_parent_dir(path: &Path) -> io::Result<()> {
 }
 
 /// Restore a missing dest from `.tundra-replace-old` only (crash-aside).
-/// Never delete `*.tundra-tag.tmp` (live tag writes). Never resurrect dest
-/// from `.bak`/`.tmp` (user may have deleted the audio). Never delete
-/// sidecars unless dest is present after restore.
+/// Keep a tmp only when its PID is still live. Delete dest-less legacy
+/// `.tundra-tag.tmp` only after dest exists. Never resurrect dest from
+/// `.bak`/`.tmp` (user may have deleted the audio).
 pub fn reclaim_write_sidecars(dir: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
 
-    let mut groups: std::collections::HashMap<PathBuf, Vec<(PathBuf, &'static str)>> =
-        std::collections::HashMap::new();
+    let mut groups: std::collections::HashMap<
+        PathBuf,
+        Vec<(PathBuf, WriteSidecarKind, Option<u32>)>,
+    > = std::collections::HashMap::new();
     for entry in entries.flatten() {
         let path = entry.path();
         let Some(name) = file_name_lossy(&path) else {
             continue;
         };
-        let Some(suffix) = write_sidecar_suffix(&name) else {
+        let Some((dest_name, kind, pid)) = parse_write_sidecar(&name) else {
             continue;
         };
-        let dest_name = &name[..name.len() - suffix.len()];
-        if dest_name.is_empty() {
-            continue;
-        }
         let dest = path.with_file_name(dest_name);
-        groups.entry(dest).or_default().push((path, suffix));
+        groups.entry(dest).or_default().push((path, kind, pid));
     }
 
     for (dest, sidecars) in groups {
         if !dest.exists() {
-            if let Some((source, _)) = sidecars
+            if let Some((source, _, _)) = sidecars
                 .iter()
-                .find(|(_, suffix)| *suffix == REPLACE_OLD_SUFFIX)
+                .find(|(_, kind, _)| *kind == WriteSidecarKind::ReplaceOld)
             {
                 if std::fs::rename(source, &dest).is_err() {
                     if std::fs::copy(source, &dest).is_ok() {
@@ -279,15 +365,24 @@ pub fn reclaim_write_sidecars(dir: &Path) {
             }
         }
 
-        if !dest.exists() {
-            continue;
-        }
-
-        for (path, suffix) in sidecars {
-            if suffix == TAG_TMP_SUFFIX {
-                continue;
+        let dest_exists = dest.exists();
+        for (path, kind, pid) in sidecars {
+            match kind {
+                WriteSidecarKind::Tmp => {
+                    let live = pid.is_some_and(pid_is_alive);
+                    if live {
+                        continue;
+                    }
+                    if dest_exists || pid.is_some() {
+                        let _ = std::fs::remove_file(path);
+                    }
+                }
+                WriteSidecarKind::Bak | WriteSidecarKind::ReplaceOld => {
+                    if dest_exists {
+                        let _ = std::fs::remove_file(path);
+                    }
+                }
             }
-            let _ = std::fs::remove_file(path);
         }
     }
 }
@@ -306,6 +401,9 @@ pub fn reclaim_write_sidecars_tree(root: &Path) {
                 continue;
             };
             if meta.file_type().is_symlink() {
+                if path.is_dir() {
+                    stack.push(path);
+                }
                 continue;
             }
             if meta.is_dir() {
@@ -319,7 +417,7 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let tmp = sidecar(path, ".tmp");
+    let tmp = unique_sidecar(path, "atomic");
     {
         let mut file = std::fs::File::create(&tmp)?;
         file.write_all(bytes)?;
@@ -416,20 +514,35 @@ mod tests {
     }
 
     #[test]
-    fn reclaim_keeps_tmp_when_dest_exists() {
+    fn reclaim_keeps_live_pid_tmp_when_dest_exists() {
         let dir = ScratchDir::new();
         let dest = dir.path().join("kick.wav");
         fs::write(&dest, b"original").unwrap();
-        fs::write(sidecar(&dest, TAG_TMP_SUFFIX), b"tmp").unwrap();
+        let tmp = unique_sidecar(&dest, "tag");
+        fs::write(&tmp, b"tmp").unwrap();
         fs::write(sidecar(&dest, TAG_BAK_SUFFIX), b"bak").unwrap();
         fs::write(sidecar(&dest, REPLACE_OLD_SUFFIX), b"old").unwrap();
 
         reclaim_write_sidecars(dir.path());
 
         assert_eq!(fs::read(&dest).unwrap(), b"original");
-        assert!(sidecar(&dest, TAG_TMP_SUFFIX).exists());
+        assert!(tmp.exists(), "in-progress tmp for this process must stay");
         assert!(!sidecar(&dest, TAG_BAK_SUFFIX).exists());
         assert!(!sidecar(&dest, REPLACE_OLD_SUFFIX).exists());
+    }
+
+    #[test]
+    fn reclaim_deletes_dead_pid_tmp() {
+        let dir = ScratchDir::new();
+        let dest = dir.path().join("kick.wav");
+        fs::write(&dest, b"original").unwrap();
+        let tmp = sidecar(&dest, ".tundra-tag-4294967294-1.tmp");
+        fs::write(&tmp, b"stale").unwrap();
+
+        reclaim_write_sidecars(dir.path());
+
+        assert!(!tmp.exists());
+        assert_eq!(fs::read(&dest).unwrap(), b"original");
     }
 
     #[test]
@@ -443,7 +556,10 @@ mod tests {
         reclaim_write_sidecars(dir.path());
 
         assert_eq!(fs::read(&dest).unwrap(), b"aside-original");
-        assert!(sidecar(&dest, TAG_TMP_SUFFIX).exists());
+        assert!(
+            !sidecar(&dest, TAG_TMP_SUFFIX).exists(),
+            "legacy tmp is deleted once dest is present"
+        );
         assert!(!sidecar(&dest, TAG_BAK_SUFFIX).exists());
         assert!(!sidecar(&dest, REPLACE_OLD_SUFFIX).exists());
     }
@@ -492,6 +608,21 @@ mod tests {
         fs::create_dir(&nested).unwrap();
         let dest = nested.join("kick.wav");
         fs::write(sidecar(&dest, REPLACE_OLD_SUFFIX), b"aside").unwrap();
+
+        reclaim_write_sidecars_tree(dir.path());
+
+        assert_eq!(fs::read(&dest).unwrap(), b"aside");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reclaim_tree_follows_symlink_directory() {
+        let dir = ScratchDir::new();
+        let real = dir.path().join("real");
+        fs::create_dir(&real).unwrap();
+        let dest = real.join("kick.wav");
+        fs::write(sidecar(&dest, REPLACE_OLD_SUFFIX), b"aside").unwrap();
+        std::os::unix::fs::symlink(&real, dir.path().join("link")).unwrap();
 
         reclaim_write_sidecars_tree(dir.path());
 
