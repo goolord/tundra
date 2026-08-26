@@ -765,6 +765,10 @@ impl Player {
         }
     }
 
+    pub fn audio_ready(&self) -> bool {
+        self.cmd_sender.is_some()
+    }
+
     fn enqueue_command(&mut self, command: PlayerCommand) {
         if let Some(sender) = self.cmd_sender.as_ref() {
             send_command(sender, command);

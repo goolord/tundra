@@ -7,7 +7,7 @@ use crate::metadata::{
     refresh_cached_metadata, search_paths, tag_field_best_match,
     tag_parse_message, tag_search_cached_paths, write_auto_tags, auto_tag_already_complete_message,
     auto_tag_field_status, CachedMetadata,
-    PersistedCaches, SearchResult, TagFields, TagParseError, FILE_SEARCH_MIN_QUERY_LEN,
+    PersistedCaches, SearchResult, TagFields, TagParseError, file_search_active,
     TAG_SEARCH_DEBOUNCE_MS,
 };
 use super::auto_tag::{auto_tag_view, AutoTagState};
@@ -220,6 +220,8 @@ pub struct App {
     player_events_started: bool,
     drag_over: bool,
     dialog: Option<Dialog>,
+    /// File or folder the OS asked us to open on startup.
+    pending_launch_path: Option<PathBuf>,
     allowed_directories: AllowedDirectories,
     settings_open: bool,
     settings_first_run: bool,
@@ -638,10 +640,15 @@ async fn load_startup_caches_async(allowed: AllowedDirectories) -> PersistedCach
 
 impl App {
     fn boot() -> (Self, Task<Message>) {
-        let app = Self::default();
+        let mut app = Self::default();
+        app.pending_launch_path =
+            crate::launch::primary_open_target(&crate::launch::paths_from_args());
         let allowed = app.allowed_directories.clone();
         let volume = app.player.controls.volume;
         let is_playing = app.player.controls.is_playing.clone();
+        let launch = app
+            .maybe_open_pending_launch()
+            .unwrap_or_else(Task::none);
         (
             app,
             Task::batch([
@@ -657,6 +664,7 @@ impl App {
                         Message::PlayerWorkerReady(worker, Arc::new(receiver))
                     },
                 ),
+                launch,
             ]),
         )
     }
@@ -687,6 +695,7 @@ impl Default for App {
             player_events_started: false,
             drag_over: false,
             dialog: None,
+            pending_launch_path: None,
             allowed_directories,
             settings_open,
             settings_first_run,
@@ -1045,13 +1054,40 @@ impl App {
     }
 
     fn open_path(&mut self, path: &Path) -> Task<Message> {
+        let path = if path.exists() {
+            crate::path_util::canonical_path(path).unwrap_or_else(|_| path.to_path_buf())
+        } else {
+            crate::path_util::normalize_path(path.to_path_buf())
+        };
         let defocus = self.release_filter_focus();
         if path.is_dir() {
-            return Task::batch([defocus, self.navigate_directory(path.to_path_buf())]);
-        } else if is_audio(path) {
-            return Task::batch([defocus, self.play_audio(path)]);
+            return Task::batch([defocus, self.navigate_directory(path)]);
+        }
+        if is_audio(&path) {
+            return Task::batch([defocus, self.open_audio_at(path)]);
         }
         defocus
+    }
+
+    fn open_audio_at(&mut self, path: PathBuf) -> Task<Message> {
+        if let Some(parent) = path.parent().filter(|dir| dir.is_dir()) {
+            self.search_focused = false;
+            self.tag_search_focused = false;
+            self.file_selector.reload_directory(parent);
+            self.search_thread.abort();
+        }
+        self.play_audio(&path)
+    }
+
+    fn maybe_open_pending_launch(&mut self) -> Option<Task<Message>> {
+        if self.settings_open || self.pending_launch_path.is_none() {
+            return None;
+        }
+        if !self.player.audio_ready() {
+            return None;
+        }
+        let path = self.pending_launch_path.take().expect("checked");
+        Some(self.open_path(&path))
     }
 
     fn search_enabled(&self) -> bool {
@@ -1088,7 +1124,10 @@ impl App {
                     .file_selector
                     .file_list
                     .iter()
-                    .position(|entry| entry.file_path == file_path);
+                    .position(|entry| {
+                        crate::path_util::cache_key(entry.file_path.clone())
+                            == crate::path_util::cache_key(file_path.to_path_buf())
+                    });
                 self.ensure_player_events()
             }
             Err(err) => {
@@ -1234,9 +1273,7 @@ impl App {
         let show_directories = self.file_selector.search_show_directories;
         let tag_only = self.file_selector.tag_only_search();
 
-        if !self.search_enabled()
-            || (file_query.len() < FILE_SEARCH_MIN_QUERY_LEN && tag_filters.is_empty())
-        {
+        if !self.search_enabled() || !file_search_active(&file_query, &tag_filters) {
             self.reset_file_list();
             return Task::none();
         }
@@ -1373,6 +1410,15 @@ impl App {
                 self.open_path(&path)
             }
 
+            Message::OpenLaunchPath(path) => {
+                if self.settings_open {
+                    self.pending_launch_path = Some(path);
+                    Task::none()
+                } else {
+                    self.open_path(&path)
+                }
+            }
+
             Message::FileHovered(path) => {
                 self.drag_over = is_audio(&path) || path.is_dir();
                 Task::none()
@@ -1474,6 +1520,16 @@ impl App {
                 self.settings_first_run = false;
                 self.settings_error = None;
                 self.prune_caches();
+                let warm = self.warm_allowed_caches();
+                let search = if self.file_selector.search_active() {
+                    self.start_file_search()
+                } else {
+                    Task::none()
+                };
+                let launch = self.maybe_open_pending_launch();
+                if let Some(task) = launch {
+                    return Task::batch([task, warm, search]);
+                }
                 let navigate = if let Some(dir) = self.allowed_directories.startup_directory() {
                     if !self
                         .allowed_directories
@@ -1485,12 +1541,6 @@ impl App {
                     }
                 } else {
                     None
-                };
-                let warm = self.warm_allowed_caches();
-                let search = if self.file_selector.search_active() {
-                    self.start_file_search()
-                } else {
-                    Task::none()
                 };
                 match navigate {
                     Some(task) => Task::batch([task, warm, search]),
@@ -2128,7 +2178,12 @@ impl App {
                 } else {
                     Task::none()
                 };
-                Task::batch([warm, search])
+                Task::batch([
+                    warm,
+                    search,
+                    self.maybe_open_pending_launch()
+                        .unwrap_or_else(Task::none),
+                ])
             }
 
             Message::PlayerWorkerReady(worker, receiver) => {
@@ -2137,7 +2192,8 @@ impl App {
                     Ok(recv) => self.player_msgs = Some(Arc::new(recv)),
                     Err(recv) => self.player_msgs = Some(recv),
                 }
-                Task::none()
+                self.maybe_open_pending_launch()
+                    .unwrap_or_else(Task::none)
             }
 
             Message::InsertDircache((parent_dir, children)) => {

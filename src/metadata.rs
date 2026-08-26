@@ -1197,6 +1197,12 @@ const FILE_SEARCH_MIN_FUZZY_SCORE: i32 = 70;
 const FILE_SEARCH_CONFIDENT_RESULT_CAP: usize = 2_000;
 const FILE_SEARCH_MAX_RESULTS: usize = 10_000;
 
+/// True when a search should run. Tag filters alone are enough; a filename
+/// query needs two characters unless tag filters already narrowed the set.
+pub fn file_search_active(file_query: &str, tag_filters: &[TagFilter]) -> bool {
+    !tag_filters.is_empty() || file_query.trim().len() >= FILE_SEARCH_MIN_QUERY_LEN
+}
+
 pub fn file_search_debounce_ms(query_len: usize) -> u64 {
     if query_len <= FILE_SEARCH_MIN_QUERY_LEN {
         FILE_SEARCH_DEBOUNCE_MS_SHORT
@@ -1255,7 +1261,12 @@ fn path_name_fields(path: &Path) -> Vec<String> {
     name_fields
 }
 
-fn path_has_substring_match(path: &Path, query: &str, case_sensitive: bool) -> bool {
+fn path_has_substring_match(
+    path: &Path,
+    query: &str,
+    case_sensitive: bool,
+    filename_only: bool,
+) -> bool {
     let terms = file_search_terms(query);
     if terms.is_empty() {
         return false;
@@ -1266,7 +1277,7 @@ fn path_has_substring_match(path: &Path, query: &str, case_sensitive: bool) -> b
         name_fields
             .iter()
             .any(|field| text_contains(field, term, case_sensitive))
-            || text_contains(&path_string, term, case_sensitive)
+            || (!filename_only && text_contains(&path_string, term, case_sensitive))
     })
 }
 
@@ -1279,6 +1290,7 @@ fn path_match_scores(
     path: &Path,
     query: &str,
     case_sensitive: bool,
+    filename_only: bool,
 ) -> (i64, i64) {
     let terms = file_search_terms(query);
     if terms.is_empty() {
@@ -1296,12 +1308,18 @@ fn path_match_scores(
             .map(|field| term_field_score(matcher, field, term, case_sensitive))
             .max()
             .unwrap_or(0);
-        let path_term_score = if text_contains(&path_string, term, case_sensitive) {
+        let path_term_score = if filename_only {
+            0
+        } else if text_contains(&path_string, term, case_sensitive) {
             CONTAINS_NAME_MATCH_SCORE + term.len() as i64
         } else {
             0
         };
-        let term_score = name_term_score.max(path_term_score);
+        let term_score = if filename_only {
+            name_term_score
+        } else {
+            name_term_score.max(path_term_score)
+        };
         if term_score == 0 {
             return (0, 0);
         }
@@ -1971,9 +1989,9 @@ pub fn search_paths(
     show_directories: bool,
     metadata: Arc<HashMap<PathBuf, CachedMetadata>>,
 ) -> SearchResult {
-    let file_active = file_query.len() >= FILE_SEARCH_MIN_QUERY_LEN;
+    let trimmed = file_query.trim();
     let tag_active = !tag_filters.is_empty();
-    if tag_active && !file_active {
+    if tag_active && trimmed.is_empty() {
         return collect_tag_matches(paths, tag_filters, metadata, true);
     }
 
@@ -1998,6 +2016,8 @@ fn collect_file_matches(
     let file_matcher = file_search_matcher(case_sensitive);
     let tag_matcher = tag_search_matcher();
     let tag_active = !tag_filters.is_empty();
+    let filename_only =
+        tag_active && file_query.trim().len() < FILE_SEARCH_MIN_QUERY_LEN;
     let mut lookup = MetadataLookup::new(metadata);
     let mut matches = Vec::new();
 
@@ -2007,13 +2027,18 @@ fn collect_file_matches(
         }
 
         if matches.len() >= FILE_SEARCH_CONFIDENT_RESULT_CAP
-            && !path_has_substring_match(path, file_query, case_sensitive)
+            && !path_has_substring_match(path, file_query, case_sensitive, filename_only)
         {
             continue;
         }
 
-        let (name_score, path_score) =
-            path_match_scores(&file_matcher, path, file_query, case_sensitive);
+        let (name_score, path_score) = path_match_scores(
+            &file_matcher,
+            path,
+            file_query,
+            case_sensitive,
+            filename_only,
+        );
 
         if name_score == 0 && path_score == 0 {
             continue;
@@ -2173,7 +2198,7 @@ mod tests {
     fn file_search_matches_snare_in_filename() {
         let matcher = file_search_matcher(false);
         let path = PathBuf::from(r"C:\Samples\Snare Drum 01.wav");
-        let (name_score, path_score) = path_match_scores(&matcher, &path, "snare", false);
+        let (name_score, path_score) = path_match_scores(&matcher, &path, "snare", false, false);
         assert!(name_score > 0 || path_score > 0, "expected snare to match filename");
     }
 
@@ -2181,9 +2206,9 @@ mod tests {
     fn file_search_requires_all_terms() {
         let matcher = file_search_matcher(false);
         let path = PathBuf::from(r"C:\Samples\Snare Drum 01.wav");
-        let (both, _) = path_match_scores(&matcher, &path, "snare drum", false);
-        let (snare_only, _) = path_match_scores(&matcher, &path, "snare", false);
-        let (missing, _) = path_match_scores(&matcher, &path, "snare kick", false);
+        let (both, _) = path_match_scores(&matcher, &path, "snare drum", false, false);
+        let (snare_only, _) = path_match_scores(&matcher, &path, "snare", false, false);
+        let (missing, _) = path_match_scores(&matcher, &path, "snare kick", false, false);
         assert!(both > 0);
         assert!(snare_only > 0);
         assert_eq!(missing, 0);
@@ -2193,7 +2218,7 @@ mod tests {
     fn file_search_rejects_weak_fuzzy_matches() {
         let matcher = file_search_matcher(false);
         let path = PathBuf::from(r"C:\Samples\Synth Pad 01.wav");
-        let (weak, _) = path_match_scores(&matcher, &path, "snare", false);
+        let (weak, _) = path_match_scores(&matcher, &path, "snare", false, false);
         assert_eq!(weak, 0, "unrelated fuzzy matches should be rejected");
     }
 
@@ -2507,6 +2532,56 @@ mod tests {
     fn file_search_debounce_is_longer_for_two_chars() {
         assert_eq!(file_search_debounce_ms(2), FILE_SEARCH_DEBOUNCE_MS_SHORT);
         assert_eq!(file_search_debounce_ms(3), FILE_SEARCH_DEBOUNCE_MS);
+    }
+
+    #[test]
+    fn file_search_active_requires_two_chars_without_tags() {
+        assert!(!file_search_active("2", &[]));
+        assert!(!file_search_active(" ", &[]));
+        assert!(file_search_active("ki", &[]));
+        assert!(file_search_active("", &[TagFilter {
+            field: TagField::Instrument,
+            value: "Kick".into(),
+        }]));
+    }
+
+    #[test]
+    fn tag_search_narrows_with_single_char_filename_query() {
+        let dir = unique_temp_dir("tundra_tag_narrow");
+        std::fs::create_dir_all(&dir).unwrap();
+        let filters = vec![TagFilter {
+            field: TagField::Instrument,
+            value: "Kick".into(),
+        }];
+        let names = ["1 kick.wav", "2 kick.wav", "3 kick.wav"];
+        let mut paths = Vec::new();
+        let mut cache = HashMap::new();
+        for name in names {
+            let path = dir.join(name);
+            std::fs::write(&path, b"RIFF").unwrap();
+            let mtime_secs = file_mtime_secs(&path).expect("mtime");
+            cache.insert(
+                path.clone(),
+                CachedMetadata {
+                    mtime_secs,
+                    fields: TagFields {
+                        instrument: "Kick".into(),
+                        ..Default::default()
+                    },
+                },
+            );
+            paths.push(path);
+        }
+        let metadata = Arc::new(cache);
+
+        let all = search_paths(&paths, "", &filters, false, false, Arc::clone(&metadata));
+        assert_eq!(all.paths.len(), 3);
+
+        let narrowed = search_paths(&paths, "2", &filters, false, false, metadata);
+        assert_eq!(narrowed.paths.len(), 1);
+        assert!(narrowed.paths[0].ends_with("2 kick.wav"));
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     fn unique_temp_dir(prefix: &str) -> PathBuf {

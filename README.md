@@ -68,6 +68,24 @@ For a copied build (not running from the source tree), place next to the executa
 
 macOS `.app` bundles also look in `Contents/Resources/` (`scripts/`, `models/`, icons).
 
+## Open audio files from the desktop
+
+Tundra accepts file paths on the command line:
+
+```bash
+tundra ~/Music/kick.wav
+cargo run --release -- ~/Desktop/snare.flac
+cargo xtask run --release -- ~/Desktop/hat.ogg
+```
+
+On **Linux**, install `packaging/linux/tundra.desktop` into `~/.local/share/applications/` (adjust `Exec=` to the full path of your binary), then set Tundra as the default app for audio files or use **Open With**.
+
+On **macOS**, copy the binary into `Tundra.app/Contents/MacOS/tundra` and use `packaging/macos/Info.plist` as `Contents/Info.plist` so Finder passes document paths at launch.
+
+On **Windows**, edit `packaging/windows/open-with.reg` with your `tundra.exe` path and import it, or choose **Open with → Choose another app** once per extension.
+
+Opening a file navigates to its folder, selects it in the file list, and starts playback. Files outside allowed search directories still play; search and auto-tag stay limited to configured folders.
+
 ## Features
 
 - Browse directories for audio samples (FLAC, WAV, MP3, OGG)

@@ -20,3 +20,5 @@ scripts/__pycache__/
 **/__pycache__/
 
 debug-*.log
+tmp*
+.cursor
