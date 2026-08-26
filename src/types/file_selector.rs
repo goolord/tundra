@@ -4,7 +4,7 @@ use iced::widget::button::{Status as ButtonStatus, Style as ButtonStyle};
 use iced::widget::canvas::{self, Action, Event, Frame, Program};
 use iced::widget::canvas::Path as CanvasPath;
 use iced::widget::scrollable::Scrollbar;
-use iced::widget::{button, container, mouse_area, row, scrollable, text, Button, Column, Row, Space, Svg, TextInput};
+use iced::widget::{button, container, mouse_area, row, scrollable, stack, text, Button, Column, Row, Space, Svg, TextInput};
 use iced::widget::Id;
 use iced::{Alignment, Border, Color, Element, Length, Rectangle, Shadow, theme};
 use iced::mouse::{self, Cursor};
@@ -872,62 +872,108 @@ fn tag_suggestions_slot(suggestions: Vec<Element<'static, Message>>) -> Element<
     }
 }
 
+const FILTER_CLEAR_TEXT_SIZE: f32 = 13.0;
+const FILTER_CLEAR_PAD_X: f32 = 8.0;
+const FILTER_CLEAR_PAD_Y: f32 = 4.0;
+const FILTER_CLEAR_MIN_HIT_WIDTH: f32 = 24.0;
+
+fn filter_clear_inset() -> f32 {
+    (FILTER_CLEAR_TEXT_SIZE + FILTER_CLEAR_PAD_X * 2.0).max(FILTER_CLEAR_MIN_HIT_WIDTH)
+}
+
+fn filter_clear_button_style(theme: &theme::Theme, status: ButtonStatus) -> ButtonStyle {
+    let palette = theme.extended_palette();
+    let mut style = ButtonStyle {
+        text_color: palette.background.base.text.scale_alpha(0.45),
+        background: Some(Color::TRANSPARENT.into()),
+        border: Border {
+            radius: 4.0.into(),
+            ..Default::default()
+        },
+        shadow: Shadow::default(),
+        ..ButtonStyle::default()
+    };
+    match status {
+        ButtonStatus::Hovered | ButtonStatus::Pressed => {
+            style.text_color = palette.background.base.text.scale_alpha(0.85);
+        }
+        ButtonStatus::Active | ButtonStatus::Disabled => {}
+    }
+    style
+}
+
 fn filter_clear_button(on_press: Message) -> Element<'static, Message> {
-    button(text("×").size(13))
+    button(text("×").size(FILTER_CLEAR_TEXT_SIZE))
         .on_press(on_press)
-        .padding([4, 8])
-        .style(tag_chip_close_style)
+        .padding([FILTER_CLEAR_PAD_Y, FILTER_CLEAR_PAD_X])
+        .style(filter_clear_button_style)
+        .into()
+}
+
+fn filter_input_with_clear(
+    input: Element<'_, Message>,
+    show_clear: bool,
+    on_clear: Message,
+) -> Element<'_, Message> {
+    if !show_clear {
+        return container(input).width(Length::Fill).into();
+    }
+
+    let clear_overlay = row![Space::new().width(Length::Fill), filter_clear_button(on_clear)]
+        .align_y(Alignment::Center)
+        .width(Length::Fill)
+        .height(Length::Fill);
+
+    container(stack![input, clear_overlay].width(Length::Fill))
+        .width(Length::Fill)
         .into()
 }
 
 fn file_search_input(search_value: &str) -> Element<'_, Message> {
-    let mut input_row = Row::new()
-        .spacing(4)
-        .align_y(Alignment::Center)
-        .push(
-            container(
-                mouse_area(
-                    TextInput::new("Search files…", search_value)
-                        .id(Id::new(FILE_SEARCH_INPUT_ID))
-                        .on_input(Message::Search)
-                        .size(13)
-                        .padding([8, 10])
-                        .width(Length::Fill),
-                )
-                .on_press(Message::SearchFocused(true)),
-            )
+    let show_clear = !search_value.is_empty();
+    let padding = if show_clear {
+        iced::Padding::from([8.0, 10.0]).right(filter_clear_inset())
+    } else {
+        iced::Padding::from([8.0, 10.0])
+    };
+
+    let input = mouse_area(
+        TextInput::new("Search files…", search_value)
+            .id(Id::new(FILE_SEARCH_INPUT_ID))
+            .on_input(Message::Search)
+            .size(13)
+            .padding(padding)
             .width(Length::Fill),
-        );
-    if !search_value.is_empty() {
-        input_row = input_row.push(filter_clear_button(Message::Search(String::new())));
-    }
-    input_row.width(Length::Fill).into()
+    )
+    .on_press(Message::SearchFocused(true));
+
+    filter_input_with_clear(input.into(), show_clear, Message::Search(String::new()))
 }
 
 fn tag_search_input(tag_search_value: &str) -> Element<'_, Message> {
-    let mut input_row = Row::new()
-        .spacing(4)
-        .align_y(Alignment::Center)
-        .push(
-            container(
-                mouse_area(
-                    TextInput::new("title:value — Enter or Tab", tag_search_value)
-                        .id(Id::new(TAG_SEARCH_INPUT_ID))
-                        .on_input(Message::TagSearchInput)
-                        .on_submit(Message::TagSearchSubmit)
-                        .size(12)
-                        .padding([8, 10])
-                        .width(Length::Fill),
-                )
-                .on_press(Message::TagSearchFocused(true)),
-            )
+    let show_clear = !tag_search_value.is_empty();
+    let padding = if show_clear {
+        iced::Padding::from([8.0, 10.0]).right(filter_clear_inset())
+    } else {
+        iced::Padding::from([8.0, 10.0])
+    };
+
+    let input = mouse_area(
+        TextInput::new("title:value — Enter or Tab", tag_search_value)
+            .id(Id::new(TAG_SEARCH_INPUT_ID))
+            .on_input(Message::TagSearchInput)
+            .on_submit(Message::TagSearchSubmit)
+            .size(12)
+            .padding(padding)
             .width(Length::Fill),
-        );
-    if !tag_search_value.is_empty() {
-        input_row =
-            input_row.push(filter_clear_button(Message::TagSearchInput(String::new())));
-    }
-    input_row.width(Length::Fill).into()
+    )
+    .on_press(Message::TagSearchFocused(true));
+
+    filter_input_with_clear(
+        input.into(),
+        show_clear,
+        Message::TagSearchInput(String::new()),
+    )
 }
 
 fn section_divider(theme: &theme::Theme) -> container::Style {

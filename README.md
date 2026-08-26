@@ -56,6 +56,8 @@ Flags:
 
 Models and SVG icons are copied next to the binary at build time.
 
+Release builds use a size-optimized profile (`opt-level = "z"`, LTO, stripped symbols) and static CRT on Windows (`+crt-static`), so the executable does not depend on the MSVC redistributable. GPU rendering uses `wgpu` with Vulkan on Windows/Linux or Metal on macOS, plus a `tiny-skia` software fallback when no GPU backend is available. DX12 is omitted to avoid a `windows` crate version conflict in the current dependency graph.
+
 ### Portable layout
 
 For a copied build (not running from the source tree), place next to the executable:

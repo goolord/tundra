@@ -18,3 +18,5 @@ test*.ogg
 scripts/.venv/
 scripts/__pycache__/
 **/__pycache__/
+
+debug-*.log

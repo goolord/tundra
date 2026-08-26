@@ -10,7 +10,7 @@ edition = "2024"
 build = "build.rs"
 
 [dependencies]
-iced = { version = "0.14", features = ["svg", "canvas"] }
+iced = { version = "0.14", default-features = false, features = ["wgpu-bare", "tiny-skia", "svg", "canvas", "crisp", "web-colors", "thread-pool", "x11", "wayland", "linux-theme-detection"] }
 rodio = "0.21"
 walkdir = "2.5"
 fuzzy-matcher = "0.3"
@@ -24,7 +24,16 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rayon = "1"
 
-[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+# wgpu backends via feature unification (not iced's full `wgpu` — avoids DX12/windows mismatch).
+[target.'cfg(any(windows, target_os = "linux"))'.dependencies]
+wgpu = { version = "27.0", default-features = false, features = ["std", "wgsl", "parking_lot", "vulkan"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+wgpu = { version = "27.0", default-features = false, features = ["std", "wgsl", "parking_lot", "metal"] }
+rfd = "0.15"
+drag = "2.1.1"
+
+[target.'cfg(windows)'.dependencies]
 rfd = "0.15"
 drag = "2.1.1"
 
@@ -36,4 +45,13 @@ x11rb = { version = "0.13", features = ["allow-unsafe-code"] }
 opt-level = 0
 
 [profile.release]
-opt-level = 3
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+strip = true
+debug = false
+incremental = false
+
+[profile.release.build-override]
+opt-level = 0
+codegen-units = 16
