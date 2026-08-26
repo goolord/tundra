@@ -262,18 +262,12 @@ fn partition_auto_tag_candidates(
             to_classify.push(path.clone());
             continue;
         };
-        if !status.needs_any() {
-            if status.can_retag_instrument {
-                to_classify.push(path.clone());
-            } else {
-                skipped_complete += 1;
-            }
-            continue;
-        }
-        if status.needs_instrument {
+        if status.allows_instrument_work() {
             to_classify.push(path.clone());
-        } else {
+        } else if status.needs_any() {
             metadata_only.push(path.clone());
+        } else {
+            skipped_complete += 1;
         }
     }
 
@@ -683,6 +677,43 @@ mod tests {
         assert!(metadata_only.is_empty());
         assert_eq!(skipped_complete, FORMATS.len());
         assert_eq!(apply_items(&items, None, &AtomicBool::new(false)).written, 0);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn legacy_tundra_comment_is_queued_for_reclassify() {
+        use lofty::config::WriteOptions;
+        use lofty::file::AudioFile;
+        use lofty::iff::wav::RiffInfoList;
+
+        let (root, paths) = kick_folder("tundra_bulk_legacy");
+        let audio = paths
+            .iter()
+            .find(|path| path.extension().and_then(|ext| ext.to_str()) == Some("wav"))
+            .cloned()
+            .expect("wav fixture");
+
+        let mut wav = {
+            let mut file = std::fs::File::open(&audio).expect("open");
+            lofty::iff::wav::WavFile::read_from(&mut file, lofty::config::ParseOptions::new())
+                .expect("parse")
+        };
+        let mut info = RiffInfoList::new();
+        info.insert("IKEY".to_string(), "Snare".to_string());
+        info.insert("ICMT".to_string(), "Tundra".to_string());
+        wav.set_riff_info(info);
+        wav.save_to_path(&audio, WriteOptions::default())
+            .expect("save legacy tags");
+
+        let (to_classify, metadata_only, skipped_complete) =
+            partition_auto_tag_candidates(std::slice::from_ref(&audio), &HashMap::new());
+        assert_eq!(to_classify, vec![audio.clone()]);
+        assert!(
+            metadata_only.is_empty(),
+            "legacy Tundra v0 must reclassify, not stamp v1 over the old instrument"
+        );
+        assert_eq!(skipped_complete, 0);
 
         let _ = std::fs::remove_dir_all(root);
     }

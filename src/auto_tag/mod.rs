@@ -51,9 +51,6 @@ const HIGH_CLASSIFIER_CONFIDENCE: f64 = 0.85;
 
 /// Single-file path persists cache immediately so manual Auto Tag survives app restarts.
 pub fn classify_file(path: &Path) -> Result<ClassificationResult, ClassifyError> {
-    if let Some(cached) = cached_with_path_hint(path) {
-        return Ok(cached);
-    }
     let result = classify_file_inner(path)?;
     classify_cache::flush_cache();
     Ok(result)
@@ -176,12 +173,11 @@ fn choose_instrument(
 }
 
 fn with_path_hint(path: &Path, result: ClassificationResult) -> ClassificationResult {
-    let hint = crate::metadata::instrument_hint(path);
-    let source = hint
-        .as_ref()
-        .map(|(_, source)| *source)
-        .unwrap_or(crate::metadata::HintSource::Path);
-    apply_hint(hint.map(|(label, _)| label), source, result)
+    apply_hint(
+        crate::metadata::instrument_hint_from_path(path),
+        crate::metadata::HintSource::Path,
+        result,
+    )
 }
 
 fn apply_hint(
