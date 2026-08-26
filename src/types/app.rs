@@ -41,6 +41,8 @@ const MIN_SIDEBAR_WIDTH: f32 = 160.0;
 const MAX_SIDEBAR_WIDTH: f32 = 720.0;
 const SIDEBAR_RESIZER_HIT_WIDTH: f32 = 10.0;
 const SIDEBAR_RESIZER_LINE_WIDTH: f32 = 2.0;
+const WINDOW_RESIZE_BORDER: f32 = 8.0;
+const TITLE_DRAG_THRESHOLD: f32 = 4.0;
 const FILE_DRAG_THRESHOLD: f32 = 8.0;
 
 fn walk_directory(dir: &Path) -> Vec<PathBuf> {
@@ -209,6 +211,11 @@ struct FileListScrollbarDrag {
     grab_offset: f32,
 }
 
+struct TitleBarInteraction {
+    drag_armed: bool,
+    press_origin: Option<Point>,
+}
+
 pub struct App {
     pub file_selector: FileSelector,
     pub menu: MainMenu,
@@ -237,6 +244,8 @@ pub struct App {
     bulk_apply_generation: u64,
     bulk_apply_active: Option<u64>,
     waveform_hovered: bool,
+    waveform_scrubbing: bool,
+    last_scrub_progress: f64,
     controls_hovered: bool,
     file_list_hovered: bool,
     file_list_focused: bool,
@@ -244,6 +253,8 @@ pub struct App {
     tag_search_focused: bool,
     sidebar_width: f32,
     sidebar_resize: Option<SidebarResize>,
+    title_bar: TitleBarInteraction,
+    window_maximized: bool,
     file_list_scrollbar_drag: Option<FileListScrollbarDrag>,
     file_drag: Option<FileDragPending>,
     native_drag: NativeDrag,
@@ -600,6 +611,8 @@ pub fn app() {
         .font(ICED_AW_FONT_BYTES)
         .subscription(App::subscription)
         .level(window_level(always_on_top))
+        .decorations(false)
+        .resizable(true)
         .run()
         .unwrap()
 }
@@ -665,6 +678,10 @@ impl App {
                     },
                 ),
                 launch,
+                window::latest().then(|id| match id {
+                    Some(id) => window::is_maximized(id).map(Message::WindowMaximizedChanged),
+                    None => Task::none(),
+                }),
             ]),
         )
     }
@@ -718,6 +735,13 @@ impl Default for App {
             tag_search_focused: false,
             sidebar_width: SidebarSettings::load(),
             sidebar_resize: None,
+            title_bar: TitleBarInteraction {
+                drag_armed: false,
+                press_origin: None,
+            },
+            window_maximized: false,
+            waveform_scrubbing: false,
+            last_scrub_progress: 0.0,
             file_list_scrollbar_drag: None,
             file_drag: None,
             native_drag: NativeDrag::new(),
@@ -1018,6 +1042,19 @@ impl App {
             Subscription::none()
         };
 
+        let window_resize = window::resize_events().map(|(_id, _size)| Message::SyncWindowMaximized);
+
+        let waveform_scrub = if state.waveform_scrubbing {
+            event::listen_with(|event, _status, _window| match event {
+                Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                    Some(Message::WaveformScrubRelease)
+                }
+                _ => None,
+            })
+        } else {
+            Subscription::none()
+        };
+
         Subscription::batch([
             file_events,
             playback_tick,
@@ -1030,6 +1067,8 @@ impl App {
             file_drag,
             file_drag_tick,
             bulk_scan_tick,
+            window_resize,
+            waveform_scrub,
         ])
     }
 
@@ -1222,7 +1261,12 @@ impl App {
     }
 
     pub fn title(&self) -> String {
-        String::from("Tundra Sample Browser")
+        let active_file = self
+            .player
+            .current_file
+            .as_ref()
+            .and_then(|path| crate::path_util::file_name_lossy(path));
+        window_title(active_file.as_deref())
     }
 
     fn reset_file_list(&mut self) {
@@ -1479,6 +1523,51 @@ impl App {
             }
 
             Message::Quit => iced::exit(),
+
+            Message::WindowTitleBarPress => {
+                self.title_bar.drag_armed = true;
+                self.title_bar.press_origin = Some(self.last_cursor);
+                Task::none()
+            }
+
+            Message::WindowTitleBarRelease => {
+                self.title_bar.drag_armed = false;
+                self.title_bar.press_origin = None;
+                Task::none()
+            }
+
+            Message::WindowMinimize => window::latest().then(|id| match id {
+                Some(id) => window::minimize(id, true),
+                None => Task::none(),
+            }),
+
+            Message::WindowToggleMaximize => {
+                self.title_bar.drag_armed = false;
+                self.title_bar.press_origin = None;
+                window::latest().then(|id| match id {
+                    Some(id) => window::toggle_maximize(id).chain(
+                        window::is_maximized(id).map(Message::WindowMaximizedChanged),
+                    ),
+                    None => Task::none(),
+                })
+            }
+
+            Message::WindowMaximizedChanged(maximized) => {
+                self.window_maximized = maximized;
+                Task::none()
+            }
+
+            Message::SyncWindowMaximized => window::latest().then(|id| match id {
+                Some(id) => window::is_maximized(id).map(Message::WindowMaximizedChanged),
+                None => Task::none(),
+            }),
+
+            Message::WindowResize(direction) => window::latest().then(move |id| match id {
+                Some(id) => window::drag_resize(id, direction),
+                None => Task::none(),
+            }),
+
+            Message::NoOp => Task::none(),
 
             Message::About => {
                 self.dialog = Some(Dialog::about(format!(
@@ -2534,6 +2623,22 @@ impl App {
 
             Message::CursorMoved(point) => {
                 self.last_cursor = point;
+                if self.title_bar.drag_armed {
+                    let Some(origin) = self.title_bar.press_origin else {
+                        return Task::none();
+                    };
+                    let dx = point.x - origin.x;
+                    let dy = point.y - origin.y;
+                    if dx * dx + dy * dy < TITLE_DRAG_THRESHOLD * TITLE_DRAG_THRESHOLD {
+                        return Task::none();
+                    }
+                    self.title_bar.drag_armed = false;
+                    self.title_bar.press_origin = None;
+                    return window::latest().then(|id| match id {
+                        Some(id) => window::drag(id),
+                        None => Task::none(),
+                    });
+                }
                 Task::none()
             }
 
@@ -2604,18 +2709,6 @@ impl App {
                 Task::none()
             }
 
-            Message::Seek(p) => {
-                self.player.begin_scrub(p);
-                Task::none()
-            }
-
-            Message::SeekCommit => {
-                if let Some(seekbar) = &self.player.controls.seekbar {
-                    self.player.seek(seekbar.seeking);
-                }
-                Task::none()
-            }
-
             Message::VolumeChanged(volume) => {
                 self.player.set_volume(volume);
                 Task::none()
@@ -2626,8 +2719,62 @@ impl App {
                 Task::none()
             }
 
-            Message::WaveformSeek(progress) => {
+            Message::WaveformScrub(progress) => {
+                self.waveform_scrubbing = true;
+                self.last_scrub_progress = progress;
+                self.player.controls.scrubbing = true;
+                if let Some(waveform) = &mut self.player.waveform {
+                    waveform.set_ui_scrubbing(true);
+                    waveform.set_scrub_progress(Some(progress));
+                }
+                if let Some(state) = &mut self.player.controls.playback_progress {
+                    state.progress = progress;
+                }
+                Task::none()
+            }
+
+            Message::WaveformScrubEnd(progress) => {
+                if !self.waveform_scrubbing {
+                    return Task::none();
+                }
+                self.waveform_scrubbing = false;
+                self.player.controls.scrubbing = false;
+                if let Some(waveform) = &mut self.player.waveform {
+                    waveform.set_ui_scrubbing(false);
+                    waveform.set_scrub_progress(None);
+                }
                 self.player.seek(progress);
+                Task::none()
+            }
+
+            Message::WaveformScrubRelease => {
+                if !self.waveform_scrubbing {
+                    return Task::none();
+                }
+                let progress = self.last_scrub_progress;
+                self.waveform_scrubbing = false;
+                self.player.controls.scrubbing = false;
+                if let Some(waveform) = &mut self.player.waveform {
+                    waveform.set_ui_scrubbing(false);
+                    waveform.set_scrub_progress(None);
+                }
+                self.player.seek(progress);
+                Task::none()
+            }
+
+            Message::WaveformFileDragStart => {
+                let Some(path) = self.player.current_file.clone() else {
+                    return Task::none();
+                };
+                self.file_drag = Some(FileDragPending {
+                    kind: FileDragKind::File(path),
+                    origin: self.last_cursor,
+                    last: self.last_cursor,
+                    threshold_met: false,
+                    origin_locked: false,
+                    awaiting_drag: false,
+                    open_on_click: false,
+                });
                 Task::none()
             }
 
@@ -2767,6 +2914,98 @@ impl App {
         .interaction(mouse::Interaction::ResizingColumn)
         .on_move(|point| Message::SidebarResizeMove(point.x))
         .on_release(Message::SidebarResizeEnd)
+        .into()
+    }
+
+    fn window_resize_strip(
+        width: Length,
+        height: Length,
+        direction: window::Direction,
+        cursor: mouse::Interaction,
+    ) -> Element<'static, Message> {
+        mouse_area(
+            Space::new()
+                .width(width)
+                .height(height),
+        )
+        .on_press(Message::WindowResize(direction))
+        .interaction(cursor)
+        .into()
+    }
+
+    fn window_resize_frame(content: Element<'_, Message>) -> Element<'_, Message> {
+        let border = WINDOW_RESIZE_BORDER;
+        let corner = Length::Fixed(border);
+        let edge = Length::Fixed(border);
+        let fill = Length::Fill;
+
+        let edges = column![
+            row![
+                Self::window_resize_strip(
+                    corner,
+                    corner,
+                    window::Direction::NorthWest,
+                    mouse::Interaction::ResizingDiagonallyDown,
+                ),
+                Space::new().width(fill).height(edge),
+                Self::window_resize_strip(
+                    corner,
+                    corner,
+                    window::Direction::NorthEast,
+                    mouse::Interaction::ResizingDiagonallyUp,
+                ),
+            ]
+            .width(fill)
+            .height(edge),
+            row![
+                Self::window_resize_strip(
+                    edge,
+                    fill,
+                    window::Direction::West,
+                    mouse::Interaction::ResizingHorizontally,
+                ),
+                Space::new().width(fill).height(fill),
+                Self::window_resize_strip(
+                    edge,
+                    fill,
+                    window::Direction::East,
+                    mouse::Interaction::ResizingHorizontally,
+                ),
+            ]
+            .width(fill)
+            .height(fill),
+            row![
+                Self::window_resize_strip(
+                    corner,
+                    corner,
+                    window::Direction::SouthWest,
+                    mouse::Interaction::ResizingDiagonallyUp,
+                ),
+                Self::window_resize_strip(
+                    fill,
+                    edge,
+                    window::Direction::South,
+                    mouse::Interaction::ResizingVertically,
+                ),
+                Self::window_resize_strip(
+                    corner,
+                    corner,
+                    window::Direction::SouthEast,
+                    mouse::Interaction::ResizingDiagonallyDown,
+                ),
+            ]
+            .width(fill)
+            .height(edge),
+        ]
+        .width(fill)
+        .height(fill);
+
+        stack![
+            container(content).width(fill).height(fill),
+            edges,
+        ]
+        .width(fill)
+        .height(fill)
         .into()
     }
 
@@ -2997,7 +3236,12 @@ impl App {
     }
 
     pub fn view(&self) -> Element<'_, Message> {
-        let menu = self.menu.view(self.always_on_top);
+        let active_file = self
+            .player
+            .current_file
+            .as_ref()
+            .and_then(|path| crate::path_util::file_name_lossy(path));
+        let menu = self.menu.view(self.always_on_top, active_file.as_deref());
 
         let file_selector = container(self.file_selector.view(self.search_enabled()))
             .width(Length::Fixed(self.sidebar_width))
@@ -3087,6 +3331,13 @@ impl App {
             layout.into()
         };
 
-        layout
+        if self.window_maximized {
+            container(layout)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into()
+        } else {
+            Self::window_resize_frame(layout)
+        }
     }
 }

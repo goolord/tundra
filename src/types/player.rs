@@ -19,6 +19,8 @@ use iced::{Alignment, Border, Color, Element, Length, Shadow, Theme, theme};
 use crate::metadata::TagField;
 use iced_aw::ContextMenu;
 use std::path::PathBuf;
+use rodio::buffer::SamplesBuffer;
+use rodio::source::UniformSourceIterator;
 use rodio::Source;
 use std::fs::File;
 use std::path::Path;
@@ -27,7 +29,6 @@ use std::sync::atomic::Ordering;
 use std::thread;
 
 const MAX_AUDIO_BYTES: u64 = 100 * 1024 * 1024;
-const SEEKBAR_HEIGHT: f32 = 22.0;
 const TRANSPORT_BUTTON: f32 = 42.0;
 const TRANSPORT_ICON: f32 = 18.0;
 const VOLUME_SLIDER_WIDTH: f32 = 72.0;
@@ -286,7 +287,20 @@ fn transport_icon_color(primary: bool, active: bool, theme: &Theme) -> Color {
     }
 }
 
-fn track_name_label(name: String, path: PathBuf) -> Element<'static, Message> {
+fn track_info_row(
+    name: String,
+    path: PathBuf,
+    current_label: String,
+    total_label: String,
+) -> Element<'static, Message> {
+    let muted = |theme: &Theme| {
+        theme
+            .extended_palette()
+            .background
+            .base
+            .text
+            .scale_alpha(0.42)
+    };
     mouse_area(
         container(
             row![
@@ -296,9 +310,8 @@ fn track_name_label(name: String, path: PathBuf) -> Element<'static, Message> {
                     .style(|theme: &Theme, _| iced::widget::svg::Style {
                         color: Some(accent_color(theme).scale_alpha(0.85)),
                     }),
-                text(name)
-                    .size(12)
-                    .style(|theme: &Theme| iced::widget::text::Style {
+                container(
+                    text(name).size(12).style(|theme: &Theme| iced::widget::text::Style {
                         color: Some(
                             theme
                                 .extended_palette()
@@ -308,8 +321,47 @@ fn track_name_label(name: String, path: PathBuf) -> Element<'static, Message> {
                                 .scale_alpha(0.72),
                         ),
                     }),
+                )
+                .width(Length::Fill)
+                .clip(true),
+                text("·")
+                    .size(11)
+                    .style(move |theme: &Theme| iced::widget::text::Style {
+                        color: Some(muted(theme)),
+                    }),
+                text(current_label)
+                    .size(12)
+                    .font(iced::Font::MONOSPACE)
+                    .style(|theme: &Theme| iced::widget::text::Style {
+                        color: Some(
+                            theme
+                                .extended_palette()
+                                .background
+                                .base
+                                .text
+                                .scale_alpha(0.62),
+                        ),
+                    }),
+                text("/")
+                    .size(11)
+                    .style(move |theme: &Theme| iced::widget::text::Style {
+                        color: Some(muted(theme)),
+                    }),
+                text(total_label)
+                    .size(12)
+                    .font(iced::Font::MONOSPACE)
+                    .style(|theme: &Theme| iced::widget::text::Style {
+                        color: Some(
+                            theme
+                                .extended_palette()
+                                .background
+                                .base
+                                .text
+                                .scale_alpha(0.52),
+                        ),
+                    }),
             ]
-            .spacing(8)
+            .spacing(6)
             .align_y(Alignment::Center),
         ),
     )
@@ -330,39 +382,6 @@ fn format_time(secs: f64) -> String {
         format!("{hours}:{minutes:02}:{seconds:02}")
     } else {
         format!("{minutes}:{seconds:02}")
-    }
-}
-
-fn seekbar_style(theme: &Theme, status: SliderStatus) -> SliderStyle {
-    let palette = theme.extended_palette();
-    let accent = accent_color(theme);
-    let track = palette.background.strong.color.scale_alpha(0.42);
-    let fill = match status {
-        SliderStatus::Active => accent.scale_alpha(0.72),
-        SliderStatus::Hovered => accent.scale_alpha(0.92),
-        SliderStatus::Dragged => accent,
-    };
-    let handle_radius = match status {
-        SliderStatus::Dragged => 9.0,
-        SliderStatus::Hovered => 8.0,
-        SliderStatus::Active => 7.0,
-    };
-    SliderStyle {
-        rail: Rail {
-            backgrounds: (fill.into(), track.into()),
-            width: 5.0,
-            border: Border {
-                radius: 2.5.into(),
-                width: 0.0,
-                color: Color::TRANSPARENT,
-            },
-        },
-        handle: Handle {
-            shape: HandleShape::Circle { radius: handle_radius },
-            background: palette.background.base.color.into(),
-            border_width: 2.0,
-            border_color: fill,
-        },
     }
 }
 
@@ -399,24 +418,6 @@ fn volume_slider_style(theme: &Theme, status: SliderStatus) -> SliderStyle {
     }
 }
 
-fn time_label(content: String, emphasized: bool, align: iced::alignment::Horizontal) -> Element<'static, Message> {
-    container(
-        text(content)
-            .size(12)
-            .font(iced::Font::MONOSPACE)
-            .style(move |theme: &Theme| iced::widget::text::Style {
-                color: Some(if emphasized {
-                    theme.extended_palette().background.base.text.scale_alpha(0.88)
-                } else {
-                    theme.extended_palette().background.base.text.scale_alpha(0.52)
-                }),
-            }),
-    )
-    .width(Length::Fixed(44.0))
-    .align_x(align)
-    .into()
-}
-
 #[derive(Debug, Clone)]
 pub struct PlayerWorker {
     cmd_sender: UnboundedSender<PlayerCommand>,
@@ -447,7 +448,7 @@ pub enum PlayerMsg {
 
 pub struct Controls {
     pub is_playing: sync::Arc<sync::atomic::AtomicBool>,
-    pub seekbar: Option<Seekbar>,
+    pub playback_progress: Option<PlaybackProgress>,
     pub playback_position: Option<sync::Arc<PlaybackPosition>>,
     pub track_duration: Option<f64>,
     pub scrubbing: bool,
@@ -455,8 +456,8 @@ pub struct Controls {
     pub looping: bool,
 }
 
-pub struct Seekbar {
-    pub seeking: f64,
+pub struct PlaybackProgress {
+    pub progress: f64,
 }
 
 struct PlaybackData {
@@ -471,75 +472,34 @@ struct LoadedAudio {
     playback: PlaybackData,
 }
 
-impl Seekbar {
-    fn seek_row(
-        progress: f64,
-        current_label: String,
-        total_label: String,
-        scrubbing: bool,
-        enabled: bool,
-    ) -> Element<'static, Message> {
-        if enabled {
-            row![
-                time_label(current_label, scrubbing, iced::alignment::Horizontal::Right),
-                Slider::new(0.0..=1.0, progress, Message::Seek)
-                    .step(0.001)
-                    .height(SEEKBAR_HEIGHT)
-                    .on_release(Message::SeekCommit)
-                    .style(seekbar_style)
-                    .width(Length::Fill),
-                time_label(total_label, false, iced::alignment::Horizontal::Left),
-            ]
-        } else {
-            row![
-                time_label(current_label, scrubbing, iced::alignment::Horizontal::Right),
-                container(
-                    Space::new()
-                        .width(Length::Fill)
-                        .height(Length::Fixed(5.0)),
-                )
-                .height(SEEKBAR_HEIGHT)
-                .center_y(Length::Fill)
-                .width(Length::Fill)
-                .style(|theme: &Theme| {
-                    let track = theme
-                        .extended_palette()
-                        .background
-                        .strong
-                        .color
-                        .scale_alpha(0.28);
-                    container::Style {
-                        background: Some(track.into()),
-                        border: Border {
-                            radius: 2.5.into(),
-                            width: 0.0,
-                            color: Color::TRANSPARENT,
-                        },
-                        ..Default::default()
-                    }
-                }),
-                time_label(total_label, false, iced::alignment::Horizontal::Left),
-            ]
-        }
-        .spacing(10)
-        .align_y(Alignment::Center)
-        .width(Length::Fill)
-        .into()
-    }
-
-    pub fn view(&self, progress: f64, duration: Option<f64>, scrubbing: bool) -> Element<'_, Message> {
-        let current_secs = duration.map(|duration| progress.clamp(0.0, 1.0) * duration);
-        let current_label = current_secs
-            .map(format_time)
-            .unwrap_or_else(|| "0:00".into());
-        let total_label = duration
-            .map(format_time)
-            .unwrap_or_else(|| "0:00".into());
-        Self::seek_row(progress, current_label, total_label, scrubbing, true)
-    }
-}
-
 impl Controls {
+    fn playback_ratio(&self) -> f64 {
+        match &self.playback_progress {
+            None => 0.0,
+            Some(state) => {
+                self.playback_position
+                    .as_ref()
+                    .map(|position| position.progress())
+                    .unwrap_or(state.progress)
+            }
+        }
+    }
+
+    fn time_labels(&self) -> (String, String) {
+        let progress = self.playback_ratio();
+        let current_secs = self
+            .track_duration
+            .map(|duration| progress.clamp(0.0, 1.0) * duration);
+        let current = current_secs
+            .map(format_time)
+            .unwrap_or_else(|| "--:--".into());
+        let total = self
+            .track_duration
+            .map(format_time)
+            .unwrap_or_else(|| "--:--".into());
+        (current, total)
+    }
+
     fn play_button(&self) -> Button<'_, Message> {
         let playing = self.is_playing.load(Ordering::SeqCst);
         let icon_path = if playing {
@@ -650,39 +610,19 @@ impl Controls {
         .into()
     }
 
-    pub fn seek_bar(&self) -> Element<'_, Message> {
-        let progress = match &self.seekbar {
-            None => 0.0,
-            Some(seekbar) => {
-                if self.scrubbing {
-                    seekbar.seeking
-                } else {
-                    self.playback_position
-                        .as_ref()
-                        .map(|position| position.progress())
-                        .unwrap_or(seekbar.seeking)
-                }
-            }
-        };
-        match &self.seekbar {
-            None => Seekbar::seek_row(
-                0.0,
-                "--:--".into(),
-                "--:--".into(),
-                false,
-                false,
-            ),
-            Some(seekbar) => seekbar.view(progress, self.track_duration, self.scrubbing),
-        }
-    }
-
     pub fn view(&self, track_name: Option<&str>, track_path: Option<&Path>) -> Element<'_, Message> {
         let transport = self.transport_cluster();
+        let (current_label, total_label) = self.time_labels();
         let footer: Element<Message> = if let (Some(name), Some(path)) = (track_name, track_path) {
             row![
-                container(track_name_label(name.to_owned(), path.to_path_buf()))
-                    .width(Length::FillPortion(2))
-                    .height(Length::Shrink),
+                container(track_info_row(
+                    name.to_owned(),
+                    path.to_path_buf(),
+                    current_label,
+                    total_label,
+                ))
+                .width(Length::FillPortion(2))
+                .height(Length::Shrink),
                 self.volume_control(),
                 transport,
             ]
@@ -703,13 +643,7 @@ impl Controls {
         };
 
         mouse_area(
-            Container::new(
-                Column::new()
-                    .push(self.seek_bar())
-                    .push(footer)
-                    .spacing(8)
-                    .width(Length::Fill),
-            )
+            Container::new(footer)
             .padding([6, 8])
             .width(Length::Fill)
             .height(Length::Shrink)
@@ -744,7 +678,7 @@ impl Player {
             current_file: None,
             controls: Controls {
                 is_playing: sync::Arc::new(sync::atomic::AtomicBool::new(false)),
-                seekbar: None,
+                playback_progress: None,
                 playback_position: None,
                 track_duration: None,
                 scrubbing: false,
@@ -783,6 +717,7 @@ impl Player {
             .height(Length::Fill);
 
         if let Some(wf) = &self.waveform {
+            wf.set_ui_scrubbing(self.controls.scrubbing);
             let zoom = wf.view_state().zoom;
             let mut bar = row![
                 zoom_label_badge(zoom),
@@ -864,8 +799,7 @@ impl Player {
         loaded.waveform.set_sample_rate(loaded.playback.sample_rate);
         self.controls.playback_position = Some(sync::Arc::clone(&playback_position));
         self.controls.track_duration = Some(total_frames as f64 / f64::from(loaded.playback.sample_rate));
-        self.controls.scrubbing = false;
-        self.controls.seekbar = Some(Seekbar { seeking: 0.0 });
+        self.controls.playback_progress = Some(PlaybackProgress { progress: 0.0 });
         self.current_file = Some(file_path.to_path_buf());
         self.waveform = Some(loaded.waveform);
 
@@ -895,8 +829,8 @@ impl Player {
         if let Some(position) = &self.controls.playback_position {
             position.set_frame(position.total_frames());
         }
-        if let Some(seekbar) = &mut self.controls.seekbar {
-            seekbar.seeking = 1.0;
+        if let Some(state) = &mut self.controls.playback_progress {
+            state.progress = 1.0;
         }
         self.pause();
     }
@@ -913,9 +847,8 @@ impl Player {
         if let Some(position) = &self.controls.playback_position {
             position.reset();
         }
-        self.controls.scrubbing = false;
-        if let Some(seekbar) = &mut self.controls.seekbar {
-            seekbar.seeking = 0.0;
+        if let Some(state) = &mut self.controls.playback_progress {
+            state.progress = 0.0;
         }
         if let Some(waveform) = &mut self.waveform {
             waveform.set_scrub_progress(None);
@@ -924,10 +857,9 @@ impl Player {
     }
 
     pub fn seek(&mut self, p: f64) {
-        self.controls.scrubbing = false;
         let resume = self.controls.is_playing.load(Ordering::SeqCst);
-        if let Some(seekbar) = &mut self.controls.seekbar {
-            seekbar.seeking = p;
+        if let Some(state) = &mut self.controls.playback_progress {
+            state.progress = p;
         }
         if let Some(waveform) = &mut self.waveform {
             waveform.set_scrub_progress(None);
@@ -941,16 +873,6 @@ impl Player {
         self.enqueue_command(PlayerCommand::SetVolume(volume));
     }
 
-    pub fn begin_scrub(&mut self, p: f64) {
-        self.controls.scrubbing = true;
-        if let Some(seekbar) = &mut self.controls.seekbar {
-            seekbar.seeking = p;
-        }
-        if let Some(waveform) = &mut self.waveform {
-            waveform.set_scrub_progress(Some(p));
-        }
-    }
-
     pub fn sync_playback_ui(&mut self) -> bool {
         if self.controls.scrubbing {
             return false;
@@ -961,14 +883,14 @@ impl Player {
         let progress = position.progress();
         let changed = self
             .controls
-            .seekbar
+            .playback_progress
             .as_ref()
-            .is_some_and(|seekbar| (seekbar.seeking - progress).abs() > 0.000_1);
+            .is_some_and(|state| (state.progress - progress).abs() > 0.000_1);
         if !changed {
             return false;
         }
-        if let Some(seekbar) = &mut self.controls.seekbar {
-            seekbar.seeking = progress;
+        if let Some(state) = &mut self.controls.playback_progress {
+            state.progress = progress;
         }
         true
     }
@@ -979,8 +901,7 @@ impl Player {
         if let Some(position) = &self.controls.playback_position {
             position.reset();
         }
-        self.controls.scrubbing = false;
-        self.controls.seekbar = None;
+        self.controls.playback_progress = None;
         self.controls.playback_position = None;
         self.controls.track_duration = None;
         self.current_file = None;
@@ -997,6 +918,12 @@ fn send_command(sender: &UnboundedSender<PlayerCommand>, command: PlayerCommand)
     if let Err(err) = sender.unbounded_send(command) {
         eprintln!("Player command failed: {err:?}");
     }
+}
+
+#[derive(Clone, Copy)]
+struct OutputFormat {
+    channels: u16,
+    sample_rate: u32,
 }
 
 fn run_audio_worker(
@@ -1017,9 +944,15 @@ fn run_audio_worker(
 
     let sink = rodio::Sink::connect_new(stream.mixer());
     sink.set_volume(clamp_volume(initial_volume));
+    let output = OutputFormat {
+        channels: stream.config().channel_count(),
+        sample_rate: stream.config().sample_rate(),
+    };
     let mut playback: Option<PlaybackData> = None;
     let mut playback_position: Option<sync::Arc<PlaybackPosition>> = None;
     let mut play_offset = 0.0_f64;
+    let mut playback_revision: u64 = 0;
+    let mut sink_revision: u64 = 0;
 
     block_on(async move {
         while let Some(command) = cmd_receiver.next().await {
@@ -1029,7 +962,20 @@ fn run_audio_worker(
                     playback_position = Some(position);
                     playback = Some(data);
                     play_offset = 0.0;
+                    playback_revision = playback_revision.wrapping_add(1);
                     sink.clear();
+                    prime_output_queue(&sink, output);
+                    if let Some(data) = playback.as_ref() {
+                        append_playback(
+                            &sink,
+                            data,
+                            play_offset,
+                            playback_position.as_ref(),
+                            &msg_sender,
+                            output,
+                        );
+                        sink_revision = playback_revision;
+                    }
                     is_playing.store(false, Ordering::SeqCst);
                 }
                 PlayerCommand::Play => {
@@ -1043,7 +989,8 @@ fn run_audio_worker(
                         data.channels as usize,
                         data.samples.len(),
                     );
-                    if sink.empty() || exhausted {
+                    let stale = sink_revision != playback_revision;
+                    if stale || should_reappend_on_play(sink.empty(), exhausted) {
                         if exhausted {
                             play_offset = 0.0;
                             if let Some(position) = &playback_position {
@@ -1053,13 +1000,16 @@ fn run_audio_worker(
                         if !sink.empty() {
                             sink.clear();
                         }
+                        prime_output_queue(&sink, output);
                         append_playback(
                             &sink,
                             data,
                             play_offset,
                             playback_position.as_ref(),
                             &msg_sender,
+                            output,
                         );
+                        sink_revision = playback_revision;
                     }
                     sink.play();
                     is_playing.store(true, Ordering::Release);
@@ -1091,18 +1041,21 @@ fn run_audio_worker(
                         position.set_frame(frame);
                     }
                     sink.clear();
+                    prime_output_queue(&sink, output);
                     append_playback(
                         &sink,
                         data,
                         play_offset,
                         playback_position.as_ref(),
                         &msg_sender,
+                        output,
                     );
                     if resume {
                         sink.play();
                     } else {
                         sink.pause();
                     }
+                    sink_revision = playback_revision;
                     is_playing.store(resume, Ordering::Release);
                 }
                 PlayerCommand::SetVolume(next) => {
@@ -1111,6 +1064,24 @@ fn run_audio_worker(
             }
         }
     });
+}
+
+fn should_reappend_on_play(sink_empty: bool, exhausted: bool) -> bool {
+    sink_empty || exhausted
+}
+
+fn prime_output_queue(sink: &rodio::Sink, output: OutputFormat) {
+    let channels = output.channels as usize;
+    if channels == 0 || output.sample_rate == 0 {
+        return;
+    }
+    // Tag the rodio queue at the device rate after clear (default filler is 44100 Hz).
+    let silence = vec![0.0_f32; channels];
+    sink.append(SamplesBuffer::new(output.channels, output.sample_rate, silence));
+}
+
+fn prime_silence_frame_len(channels: u16) -> usize {
+    channels as usize
 }
 
 fn playback_exhausted(offset: f64, total_frames: u64, channels: usize, sample_len: usize) -> bool {
@@ -1130,6 +1101,7 @@ fn append_playback(
     offset: f64,
     position: Option<&sync::Arc<PlaybackPosition>>,
     msg_sender: &UnboundedSender<PlayerMsg>,
+    output: OutputFormat,
 ) {
     let channels = data.channels as usize;
     if channels == 0 || data.total_frames == 0 {
@@ -1146,12 +1118,20 @@ fn append_playback(
         position.set_frame(skip_frames as u64);
     }
 
-    sink.append(ArcSamplesSource::new(
+    let source = ArcSamplesSource::new(
         sync::Arc::clone(&data.samples),
         data.channels,
         data.sample_rate,
         skip_samples,
         position.cloned(),
+    );
+    // Resample to the device rate before queuing. Rodio's sink queue can report a
+    // stale sample rate briefly when switching sources; normalizing here avoids
+    // wrong pitch when browsing between files at different native rates.
+    sink.append(UniformSourceIterator::new(
+        source,
+        output.channels,
+        output.sample_rate,
     ));
 
     let sender = msg_sender.clone();
@@ -1160,7 +1140,7 @@ fn append_playback(
             sender.unbounded_send(msg).unwrap_or(());
         }),
         PlayerMsg::SinkEmpty,
-        data.sample_rate,
+        output.sample_rate,
     ));
 }
 
@@ -1185,6 +1165,9 @@ fn load_audio(path: &Path) -> Result<LoadedAudio, String> {
 
     let channels = decoder.channels();
     let sample_rate = decoder.sample_rate();
+    if sample_rate == 0 {
+        return Err(format!("{} has an invalid sample rate", path.display()));
+    }
     let interleaved: Vec<f32> = decoder.collect();
 
     if channels == 0 {
@@ -1216,6 +1199,20 @@ fn load_audio(path: &Path) -> Result<LoadedAudio, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prime_silence_matches_output_channels() {
+        assert_eq!(prime_silence_frame_len(2), 2);
+        assert_eq!(prime_silence_frame_len(1), 1);
+    }
+
+    #[test]
+    fn play_reappend_when_sink_empty_or_exhausted() {
+        assert!(should_reappend_on_play(true, false));
+        assert!(should_reappend_on_play(false, true));
+        assert!(should_reappend_on_play(true, true));
+        assert!(!should_reappend_on_play(false, false));
+    }
 
     #[test]
     fn play_from_start_when_offset_at_end() {
