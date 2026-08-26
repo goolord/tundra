@@ -69,6 +69,9 @@ enum Commands {
         /// Skip Essentia DL Python env during setup
         #[arg(long)]
         skip_dl: bool,
+        /// Audio paths to open (pass after `--`)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
 }
 
@@ -92,11 +95,12 @@ fn main() -> Result<()> {
             release,
             no_setup,
             skip_dl,
+            args,
         } => {
             if !no_setup {
                 setup(false, skip_dl)?;
             }
-            cargo_run(release)
+            cargo_run(release, &args)
         }
     }
 }
@@ -250,8 +254,13 @@ fn cargo_build(release: bool) -> Result<()> {
     run_command(&mut cargo_build_command(release), "cargo build")
 }
 
-fn cargo_run(release: bool) -> Result<()> {
-    run_command(&mut cargo_run_command(release), "cargo run")
+fn cargo_run(release: bool, extra_args: &[String]) -> Result<()> {
+    let mut cmd = cargo_run_command(release);
+    if !extra_args.is_empty() {
+        cmd.arg("--");
+        cmd.args(extra_args);
+    }
+    run_command(&mut cmd, "cargo run")
 }
 
 fn ensure_tool(name: &str) -> Result<()> {

@@ -232,6 +232,8 @@ pub enum Message {
         generation: u64,
         summary: crate::bulk_auto_tag::BulkApplySummary,
     },
+    /// Open a file or folder passed in from the OS (argv, Open With, etc.).
+    OpenLaunchPath(PathBuf),
 }
 
 pub fn is_audio(path: &Path) -> bool {

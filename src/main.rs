@@ -4,6 +4,7 @@
 )]
 
 mod drag_out;
+mod launch;
 mod path_util;
 mod auto_tag;
 mod bulk_auto_tag;

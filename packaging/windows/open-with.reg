@@ -1,0 +1,19 @@
+Windows Registry Editor Version 5.00
+
+; Replace C:\\Path\\To\\tundra.exe with your installed binary path,
+; then double-click this file or run: reg import open-with.reg
+
+[HKEY_CURRENT_USER\Software\Classes\Applications\tundra.exe\shell\open\command]
+@="\"C:\\Path\\To\\tundra.exe\" \"%1\""
+
+[HKEY_CURRENT_USER\Software\Classes\.flac\OpenWithList\tundra.exe]
+@=""
+
+[HKEY_CURRENT_USER\Software\Classes\.wav\OpenWithList\tundra.exe]
+@=""
+
+[HKEY_CURRENT_USER\Software\Classes\.mp3\OpenWithList\tundra.exe]
+@=""
+
+[HKEY_CURRENT_USER\Software\Classes\.ogg\OpenWithList\tundra.exe]
+@=""

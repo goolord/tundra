@@ -1139,13 +1139,11 @@ impl FileSelector {
     }
 
     pub fn search_active(&self) -> bool {
-        self.search_value.len() >= crate::metadata::FILE_SEARCH_MIN_QUERY_LEN
-            || !self.tag_filters.is_empty()
+        crate::metadata::file_search_active(&self.search_value, &self.tag_filters)
     }
 
     pub fn tag_only_search(&self) -> bool {
-        !self.tag_filters.is_empty()
-            && self.search_value.len() < crate::metadata::FILE_SEARCH_MIN_QUERY_LEN
+        !self.tag_filters.is_empty() && self.search_value.trim().is_empty()
     }
 
     pub fn selected_audio_path(&self) -> Option<PathBuf> {
@@ -1255,8 +1253,9 @@ impl FileSelector {
         .on_enter(Message::FileListHoverChanged(true))
         .on_exit(Message::FileListHoverChanged(false));
 
-        let file_search_active =
-            self.search_value.len() >= crate::metadata::FILE_SEARCH_MIN_QUERY_LEN;
+        let trimmed = self.search_value.trim();
+        let file_search_active = trimmed.len() >= crate::metadata::FILE_SEARCH_MIN_QUERY_LEN
+            || (!self.tag_filters.is_empty() && !trimmed.is_empty());
 
         let mut filter_body = Column::new()
             .spacing(0)
