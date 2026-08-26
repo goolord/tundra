@@ -88,6 +88,11 @@ pub enum Message {
     TagSuggestionSelect(crate::metadata::TagField),
     SearchCompleted(Result<SearchResult, Aborted>),
     MetadataIndexed(std::collections::HashMap<std::path::PathBuf, crate::metadata::CachedMetadata>),
+    StartupCachesReady(crate::metadata::PersistedCaches),
+    PlayerWorkerReady(
+        super::PlayerWorker,
+        Arc<futures::channel::mpsc::UnboundedReceiver<super::PlayerMsg>>,
+    ),
     InsertDircache((PathBuf, Vec<PathBuf>)),
     InvalidateDircache,
     Seek(f64),

@@ -5,12 +5,13 @@ use crate::drag_out::NativeDrag;
 use crate::metadata::{
     file_search_debounce_ms, index_paths, instrument_tag, parse_tag_filter, refresh_cached_metadata,
     search_paths, tag_field_best_match, tag_parse_message, tag_search_paths,
-    write_instrument_tag_if_untagged, CachedMetadata, SearchResult, TagParseError,
+    write_instrument_tag_if_untagged, CachedMetadata, PersistedCaches, SearchResult, TagParseError,
     FILE_SEARCH_MIN_QUERY_LEN, TAG_SEARCH_DEBOUNCE_MS,
 };
 use super::auto_tag::{auto_tag_view, AutoTagState};
 use super::bulk_auto_tag::{bulk_auto_tag_view, BulkAutoTagPhase, BulkAutoTagState};
 use super::settings::{self, AddDirectoryResult, AllowedDirectories};
+use futures::channel::oneshot;
 use futures::future::{AbortHandle, Abortable};
 use futures::*;
 
@@ -168,7 +169,7 @@ pub struct App {
     pub search_thread: AbortHandle,
     pub dir_cache: DirCache,
     metadata_cache: MetadataCache,
-    player_msgs: Option<futures::channel::mpsc::UnboundedReceiver<super::PlayerMsg>>,
+    player_msgs: Option<Arc<futures::channel::mpsc::UnboundedReceiver<super::PlayerMsg>>>,
     player_events_started: bool,
     drag_over: bool,
     dialog: Option<Dialog>,
@@ -197,6 +198,7 @@ pub struct App {
     file_drag: Option<FileDragPending>,
     native_drag: NativeDrag,
     drag_ready: bool,
+    caches_ready: bool,
     last_cursor: Point,
     modifiers: Modifiers,
 }
@@ -222,8 +224,15 @@ impl DirCache {
         self.0.read().unwrap().contains_key(k)
     }
 
-    fn retain(&mut self, mut keep: impl FnMut(&PathBuf) -> bool) {
-        self.0.write().unwrap().retain(|path, _| keep(path));
+    fn retain(&mut self, mut keep: impl FnMut(&PathBuf) -> bool) -> bool {
+        let mut map = self.0.write().unwrap();
+        let before = map.len();
+        map.retain(|path, _| keep(path));
+        before != map.len()
+    }
+
+    fn from_map(map: HashMap<PathBuf, Vec<PathBuf>>) -> Self {
+        DirCache(Arc::new(RwLock::new(map)))
     }
 
     fn get_path() -> Option<std::path::PathBuf> {
@@ -234,15 +243,16 @@ impl DirCache {
         })
     }
 
-    fn get_dir_cache() -> DirCache {
-        match DirCache::get_path() {
-            Some(dir_cache) => match std::fs::read(dir_cache) {
-                Ok(s) => bincode::deserialize(&s)
-                    .map(|map| DirCache(Arc::new(RwLock::new(map))))
-                    .unwrap_or_else(|_| DirCache::new()),
-                Err(_) => DirCache::new(),
-            },
-            None => DirCache::new(),
+    fn persist_map(map: &HashMap<PathBuf, Vec<PathBuf>>) {
+        let Some(dir_cache) = DirCache::get_path() else {
+            return;
+        };
+        let Ok(bytes) = bincode::serialize(map) else {
+            eprintln!("Failed to serialize directory cache");
+            return;
+        };
+        if let Err(err) = crate::path_util::write_atomic(&dir_cache, &bytes) {
+            eprintln!("Failed to write directory cache: {err}");
         }
     }
 
@@ -250,16 +260,17 @@ impl DirCache {
         let Ok(map) = self.0.read() else {
             return;
         };
-        let Some(dir_cache) = DirCache::get_path() else {
-            return;
-        };
-        let Ok(bytes) = bincode::serialize(&*map) else {
-            eprintln!("Failed to serialize directory cache");
-            return;
-        };
-        if let Err(err) = crate::path_util::write_atomic(&dir_cache, &bytes) {
-            eprintln!("Failed to write directory cache: {err}");
-        }
+        Self::persist_map(&map);
+    }
+}
+
+fn load_dir_cache_map() -> HashMap<PathBuf, Vec<PathBuf>> {
+    let Some(path) = DirCache::get_path() else {
+        return HashMap::new();
+    };
+    match std::fs::read(path) {
+        Ok(bytes) => bincode::deserialize(&bytes).unwrap_or_default(),
+        Err(_) => HashMap::new(),
     }
 }
 
@@ -291,22 +302,7 @@ impl MetadataCache {
         cache_file("metadata_cache_v4.bin")
     }
 
-    fn load() -> Self {
-        match MetadataCache::get_path() {
-            Some(path) => match std::fs::read(path) {
-                Ok(bytes) => bincode::deserialize::<HashMap<PathBuf, CachedMetadata>>(&bytes)
-                    .map(|map| MetadataCache(Arc::new(RwLock::new(map))))
-                    .unwrap_or_else(|_| MetadataCache::new()),
-                Err(_) => MetadataCache::new(),
-            },
-            None => MetadataCache::new(),
-        }
-    }
-
-    fn persist(&self) {
-        let Ok(cache) = self.0.read() else {
-            return;
-        };
+    fn persist_map(cache: &HashMap<PathBuf, CachedMetadata>) {
         let Some(path) = MetadataCache::get_path() else {
             return;
         };
@@ -324,6 +320,24 @@ impl MetadataCache {
         }
     }
 
+    fn persist(&self) {
+        let Ok(cache) = self.0.read() else {
+            return;
+        };
+        Self::persist_map(&cache);
+    }
+
+    fn from_map(map: HashMap<PathBuf, CachedMetadata>) -> Self {
+        Self(Arc::new(RwLock::new(map)))
+    }
+
+    fn retain(&mut self, mut keep: impl FnMut(&PathBuf) -> bool) -> bool {
+        let mut cache = self.0.write().unwrap();
+        let before = cache.len();
+        cache.retain(|path, _| keep(path));
+        before != cache.len()
+    }
+
     fn snapshot(&self) -> Arc<HashMap<PathBuf, CachedMetadata>> {
         Arc::new(self.0.read().unwrap().clone())
     }
@@ -335,10 +349,15 @@ impl MetadataCache {
         self.0.write().unwrap().extend(entries);
         self.persist();
     }
+}
 
-    fn retain(&mut self, mut keep: impl FnMut(&PathBuf) -> bool) {
-        self.0.write().unwrap().retain(|path, _| keep(path));
-        self.persist();
+fn load_metadata_cache_map() -> HashMap<PathBuf, CachedMetadata> {
+    let Some(path) = MetadataCache::get_path() else {
+        return HashMap::new();
+    };
+    match std::fs::read(path) {
+        Ok(bytes) => bincode::deserialize(&bytes).unwrap_or_default(),
+        Err(_) => HashMap::new(),
     }
 }
 
@@ -399,13 +418,73 @@ impl VolumeSettings {
 }
 
 pub fn app() {
-    iced::application(App::default, App::update, App::view)
+    iced::application(App::boot, App::update, App::view)
         .title(App::title)
         .antialiasing(true)
         .font(ICED_AW_FONT_BYTES)
         .subscription(App::subscription)
         .run()
         .unwrap()
+}
+
+fn load_startup_caches(allowed: AllowedDirectories) -> PersistedCaches {
+    let mut dirs = load_dir_cache_map();
+    let mut metadata = load_metadata_cache_map();
+    if !allowed.is_empty() {
+        let allowed = allowed.clone();
+        let before = dirs.len();
+        dirs.retain(|path, _| allowed.contains_path(path));
+        if dirs.len() != before {
+            DirCache::persist_map(&dirs);
+        }
+        let before = metadata.len();
+        metadata.retain(|path, _| allowed.contains_path(path));
+        if metadata.len() != before {
+            MetadataCache::persist_map(&metadata);
+        }
+    }
+    PersistedCaches { dirs, metadata }
+}
+
+async fn run_blocking<T>(f: impl FnOnce() -> T + Send + 'static) -> T
+where
+    T: Send + 'static,
+{
+    let (tx, rx) = oneshot::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(f());
+    });
+    rx.await.unwrap_or_else(|_| panic!("blocking task dropped"))
+}
+
+async fn load_startup_caches_async(allowed: AllowedDirectories) -> PersistedCaches {
+    run_blocking(move || load_startup_caches(allowed)).await
+}
+
+impl App {
+    fn boot() -> (Self, Task<Message>) {
+        let app = Self::default();
+        let allowed = app.allowed_directories.clone();
+        let volume = app.player.controls.volume;
+        let is_playing = app.player.controls.is_playing.clone();
+        (
+            app,
+            Task::batch([
+                Task::perform(
+                    load_startup_caches_async(allowed),
+                    Message::StartupCachesReady,
+                ),
+                Task::perform(
+                    async move {
+                        run_blocking(move || PlayerWorker::spawn(is_playing, volume)).await
+                    },
+                    |(worker, receiver)| {
+                        Message::PlayerWorkerReady(worker, Arc::new(receiver))
+                    },
+                ),
+            ]),
+        )
+    }
 }
 
 impl Default for App {
@@ -418,18 +497,18 @@ impl Default for App {
             .unwrap_or_else(startup_directory);
         let file_selector = FileSelector::new(&current_dir);
         let menu = MainMenu::new();
-        let (player, player_msgs) = Player::new(VolumeSettings::load());
+        let player = Player::new(VolumeSettings::load());
         let search_thread = AbortHandle::new_pair().0;
-        let dir_cache = DirCache::get_dir_cache();
-        let metadata_cache = MetadataCache::load();
-        let mut app = App {
+        let dir_cache = DirCache::new();
+        let metadata_cache = MetadataCache::new();
+        App {
             file_selector,
             menu,
             player,
             search_thread,
             dir_cache,
             metadata_cache,
-            player_msgs: Some(player_msgs),
+            player_msgs: None,
             player_events_started: false,
             drag_over: false,
             dialog: None,
@@ -458,13 +537,10 @@ impl Default for App {
             file_drag: None,
             native_drag: NativeDrag::new(),
             drag_ready: cfg!(any(windows, target_os = "macos")),
+            caches_ready: false,
             last_cursor: Point::ORIGIN,
             modifiers: Modifiers::default(),
-        };
-        if !app.allowed_directories.is_empty() {
-            app.prune_caches();
         }
-        app
     }
 }
 
@@ -765,9 +841,17 @@ impl App {
         if !self.player_events_started {
             self.player_events_started = true;
             if let Some(recv) = self.player_msgs.take() {
-                return Task::perform(recv.into_future(), |x| {
-                    Message::PlayerMsg((x.0, Arc::new(x.1)))
-                });
+                match Arc::try_unwrap(recv) {
+                    Ok(recv) => {
+                        return Task::perform(recv.into_future(), |x| {
+                            Message::PlayerMsg((x.0, Arc::new(x.1)))
+                        });
+                    }
+                    Err(recv) => {
+                        eprintln!("ensure_player_events: Arc::try_unwrap failed");
+                        self.player_msgs = Some(recv);
+                    }
+                }
             }
         }
         Task::none()
@@ -839,11 +923,18 @@ impl App {
 
     fn prune_caches(&mut self) {
         let allowed = self.allowed_directories.clone();
-        self.dir_cache
-            .retain(|path| allowed.contains_path(path));
-        self.dir_cache.persist();
-        self.metadata_cache
-            .retain(|path| allowed.contains_path(path));
+        if self
+            .dir_cache
+            .retain(|path| allowed.contains_path(path))
+        {
+            self.dir_cache.persist();
+        }
+        if self
+            .metadata_cache
+            .retain(|path| allowed.contains_path(path))
+        {
+            self.metadata_cache.persist();
+        }
     }
 
     fn warm_allowed_caches(&self) -> Task<Message> {
@@ -879,6 +970,10 @@ impl App {
 
         if self.allowed_directories.is_empty() {
             self.reset_file_list();
+            return Task::none();
+        }
+
+        if !self.caches_ready {
             return Task::none();
         }
 
@@ -1689,6 +1784,28 @@ impl App {
 
             Message::StopPlayback => {
                 self.player.stop();
+                Task::none()
+            }
+
+            Message::StartupCachesReady(caches) => {
+                self.dir_cache = DirCache::from_map(caches.dirs);
+                self.metadata_cache = MetadataCache::from_map(caches.metadata);
+                self.caches_ready = true;
+                let warm = self.warm_allowed_caches();
+                let search = if self.file_selector.search_active() {
+                    self.start_file_search()
+                } else {
+                    Task::none()
+                };
+                Task::batch([warm, search])
+            }
+
+            Message::PlayerWorkerReady(worker, receiver) => {
+                self.player.attach_worker(worker);
+                match Arc::try_unwrap(receiver) {
+                    Ok(recv) => self.player_msgs = Some(Arc::new(recv)),
+                    Err(recv) => self.player_msgs = Some(recv),
+                }
                 Task::none()
             }
 
