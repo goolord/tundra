@@ -3,10 +3,10 @@ use crate::auto_tag;
 use crate::bulk_auto_tag;
 use crate::drag_out::NativeDrag;
 use crate::metadata::{
-    filter_search_paths, filter_tag_paths, file_search_debounce_ms, index_paths, instrument_tag,
-    parse_tag_filter, refresh_cached_metadata, tag_field_best_match, tag_parse_message,
-    write_instrument_tag_if_untagged, CachedMetadata, TagParseError, FILE_SEARCH_MIN_QUERY_LEN,
-    TAG_SEARCH_DEBOUNCE_MS,
+    file_search_debounce_ms, index_paths, instrument_tag, parse_tag_filter, refresh_cached_metadata,
+    search_paths, tag_field_best_match, tag_parse_message, tag_search_paths,
+    write_instrument_tag_if_untagged, CachedMetadata, SearchResult, TagParseError,
+    FILE_SEARCH_MIN_QUERY_LEN, TAG_SEARCH_DEBOUNCE_MS,
 };
 use super::auto_tag::{auto_tag_view, AutoTagState};
 use super::bulk_auto_tag::{bulk_auto_tag_view, BulkAutoTagPhase, BulkAutoTagState};
@@ -25,10 +25,10 @@ use iced::mouse;
 use iced::window;
 use iced_aw::ICED_AW_FONT_BYTES;
 use futures::StreamExt;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::collections::hash_map::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use walkdir::WalkDir;
 
@@ -52,6 +52,64 @@ fn walk_directory(dir: &Path) -> Vec<PathBuf> {
             Err(_) => None,
         })
         .collect()
+}
+
+async fn execute_file_search(
+    debounce_ms: u64,
+    allowed_roots: Vec<PathBuf>,
+    dir_cache: Arc<RwLock<HashMap<PathBuf, Vec<PathBuf>>>>,
+    metadata_cache: Arc<RwLock<HashMap<PathBuf, CachedMetadata>>>,
+    file_query: String,
+    tag_filters: Vec<crate::metadata::TagFilter>,
+    case_sensitive: bool,
+    show_directories: bool,
+    tag_only: bool,
+) -> SearchResult {
+    async_io::Timer::after(Duration::from_millis(debounce_ms)).await;
+
+    let mut paths = Vec::new();
+    let mut cached_roots = HashMap::new();
+    let missing_roots = {
+        let cache = dir_cache.read().unwrap();
+        let mut missing = Vec::new();
+        for root in &allowed_roots {
+            if let Some(cached) = cache.get(root) {
+                paths.extend(cached.iter().cloned());
+            } else {
+                missing.push(root.clone());
+            }
+        }
+        missing
+    };
+
+    for root in missing_roots {
+        let children = walk_directory(&root);
+        paths.extend(children.iter().cloned());
+        cached_roots.insert(root, children);
+    }
+
+    paths.sort();
+    paths.dedup();
+    if tag_only {
+        paths.retain(|path| is_audio(path));
+    }
+
+    let metadata = Arc::new(metadata_cache.read().unwrap().clone());
+
+    let mut result = if tag_only {
+        tag_search_paths(&paths, &tag_filters, metadata)
+    } else {
+        search_paths(
+            &paths,
+            &file_query,
+            &tag_filters,
+            case_sensitive,
+            show_directories,
+            metadata,
+        )
+    };
+    result.cached_roots = cached_roots;
+    result
 }
 
 fn transport_shortcut_allowed(modifiers: Modifiers) -> bool {
@@ -128,6 +186,9 @@ pub struct App {
     bulk_apply_generation: u64,
     bulk_apply_active: Option<u64>,
     waveform_hovered: bool,
+    controls_hovered: bool,
+    file_list_hovered: bool,
+    file_list_focused: bool,
     search_focused: bool,
     tag_search_focused: bool,
     sidebar_width: f32,
@@ -140,29 +201,29 @@ pub struct App {
     modifiers: Modifiers,
 }
 
-pub struct DirCache(HashMap<PathBuf, Vec<PathBuf>>);
+pub struct DirCache(Arc<RwLock<HashMap<PathBuf, Vec<PathBuf>>>>);
 
-pub struct MetadataCache(HashMap<PathBuf, CachedMetadata>);
+pub struct MetadataCache(Arc<RwLock<HashMap<PathBuf, CachedMetadata>>>);
 
 impl DirCache {
     fn new() -> DirCache {
-        DirCache(HashMap::new())
+        DirCache(Arc::new(RwLock::new(HashMap::new())))
+    }
+
+    fn share(&self) -> Arc<RwLock<HashMap<PathBuf, Vec<PathBuf>>>> {
+        Arc::clone(&self.0)
     }
 
     fn insert(&mut self, k: PathBuf, v: Vec<PathBuf>) -> Option<Vec<PathBuf>> {
-        self.0.insert(k, v)
-    }
-
-    fn get(&self, k: &PathBuf) -> Option<&Vec<PathBuf>> {
-        self.0.get(k)
+        self.0.write().unwrap().insert(k, v)
     }
 
     fn contains_key(&self, k: &PathBuf) -> bool {
-        self.0.contains_key(k)
+        self.0.read().unwrap().contains_key(k)
     }
 
     fn retain(&mut self, mut keep: impl FnMut(&PathBuf) -> bool) {
-        self.0.retain(|path, _| keep(path));
+        self.0.write().unwrap().retain(|path, _| keep(path));
     }
 
     fn get_path() -> Option<std::path::PathBuf> {
@@ -176,7 +237,9 @@ impl DirCache {
     fn get_dir_cache() -> DirCache {
         match DirCache::get_path() {
             Some(dir_cache) => match std::fs::read(dir_cache) {
-                Ok(s) => bincode::deserialize(&s).map_or(DirCache::new(), DirCache),
+                Ok(s) => bincode::deserialize(&s)
+                    .map(|map| DirCache(Arc::new(RwLock::new(map))))
+                    .unwrap_or_else(|_| DirCache::new()),
                 Err(_) => DirCache::new(),
             },
             None => DirCache::new(),
@@ -184,10 +247,13 @@ impl DirCache {
     }
 
     fn persist(&self) {
+        let Ok(map) = self.0.read() else {
+            return;
+        };
         let Some(dir_cache) = DirCache::get_path() else {
             return;
         };
-        let Ok(bytes) = bincode::serialize(&self.0) else {
+        let Ok(bytes) = bincode::serialize(&*map) else {
             eprintln!("Failed to serialize directory cache");
             return;
         };
@@ -214,7 +280,11 @@ fn cache_file(name: &str) -> Option<PathBuf> {
 
 impl MetadataCache {
     fn new() -> Self {
-        Self(HashMap::new())
+        Self(Arc::new(RwLock::new(HashMap::new())))
+    }
+
+    fn share(&self) -> Arc<RwLock<HashMap<PathBuf, CachedMetadata>>> {
+        Arc::clone(&self.0)
     }
 
     fn get_path() -> Option<std::path::PathBuf> {
@@ -225,7 +295,7 @@ impl MetadataCache {
         match MetadataCache::get_path() {
             Some(path) => match std::fs::read(path) {
                 Ok(bytes) => bincode::deserialize::<HashMap<PathBuf, CachedMetadata>>(&bytes)
-                    .map(MetadataCache)
+                    .map(|map| MetadataCache(Arc::new(RwLock::new(map))))
                     .unwrap_or_else(|_| MetadataCache::new()),
                 Err(_) => MetadataCache::new(),
             },
@@ -234,11 +304,13 @@ impl MetadataCache {
     }
 
     fn persist(&self) {
+        let Ok(cache) = self.0.read() else {
+            return;
+        };
         let Some(path) = MetadataCache::get_path() else {
             return;
         };
-        let persistable: HashMap<PathBuf, CachedMetadata> = self
-            .0
+        let persistable: HashMap<PathBuf, CachedMetadata> = cache
             .iter()
             .filter(|(_, cached)| cached.mtime_secs != 0)
             .map(|(path, cached)| (path.clone(), cached.clone()))
@@ -253,19 +325,19 @@ impl MetadataCache {
     }
 
     fn snapshot(&self) -> Arc<HashMap<PathBuf, CachedMetadata>> {
-        Arc::new(self.0.clone())
+        Arc::new(self.0.read().unwrap().clone())
     }
 
     fn merge(&mut self, entries: HashMap<PathBuf, CachedMetadata>) {
         if entries.is_empty() {
             return;
         }
-        self.0.extend(entries);
+        self.0.write().unwrap().extend(entries);
         self.persist();
     }
 
     fn retain(&mut self, mut keep: impl FnMut(&PathBuf) -> bool) {
-        self.0.retain(|path, _| keep(path));
+        self.0.write().unwrap().retain(|path, _| keep(path));
         self.persist();
     }
 }
@@ -375,6 +447,9 @@ impl Default for App {
             bulk_apply_generation: 0,
             bulk_apply_active: None,
             waveform_hovered: false,
+            controls_hovered: false,
+            file_list_hovered: false,
+            file_list_focused: false,
             search_focused: false,
             tag_search_focused: false,
             sidebar_width: SidebarSettings::load(),
@@ -434,7 +509,10 @@ impl App {
             && !state.bulk_auto_tag.is_open()
             && !state.search_focused
             && !state.tag_search_focused
-            && state.waveform_hovered
+            && (state.waveform_hovered
+                || state.controls_hovered
+                || state.file_list_hovered
+                || state.file_list_focused)
         {
             event::listen_with(|event, status, _window| {
                 if status != event::Status::Ignored {
@@ -786,21 +864,6 @@ impl App {
         Task::batch(tasks)
     }
 
-    fn allowed_search_paths(&self) -> (Vec<PathBuf>, Vec<PathBuf>) {
-        let mut paths = Vec::new();
-        let mut missing_roots = Vec::new();
-        for root in self.allowed_directories.roots() {
-            if let Some(cached) = self.dir_cache.get(root) {
-                paths.extend(cached.iter().cloned());
-            } else {
-                missing_roots.push(root.clone());
-            }
-        }
-        paths.sort();
-        paths.dedup();
-        (paths, missing_roots)
-    }
-
     fn start_file_search(&mut self) -> Task<Message> {
         self.search_thread.abort();
         let file_query = self.file_selector.search_value.clone();
@@ -819,78 +882,30 @@ impl App {
             return Task::none();
         }
 
-        let (paths, missing_roots) = self.allowed_search_paths();
-        let (abort_handle, abort_reg) = AbortHandle::new_pair();
-        self.search_thread = abort_handle;
-        let metadata = self.metadata_cache.snapshot();
         let debounce_ms = if tag_only {
             TAG_SEARCH_DEBOUNCE_MS
         } else {
             file_search_debounce_ms(file_query.len())
         };
-
-        if missing_roots.is_empty() {
-            let paths = if tag_only {
-                paths.into_iter().filter(|path| is_audio(path)).collect()
-            } else {
-                paths
-            };
-            return Task::perform(
-                Abortable::new(
-                    async move {
-                        if tag_only {
-                            filter_tag_paths(debounce_ms, paths, tag_filters, metadata).await
-                        } else {
-                            filter_search_paths(
-                                debounce_ms,
-                                paths,
-                                file_query,
-                                tag_filters,
-                                case_sensitive,
-                                show_directories,
-                                metadata,
-                            )
-                            .await
-                        }
-                    },
-                    abort_reg,
-                ),
-                Message::SearchCompleted,
-            );
-        }
+        let allowed_roots = self.allowed_directories.roots().to_vec();
+        let dir_cache = self.dir_cache.share();
+        let metadata_cache = self.metadata_cache.share();
+        let (abort_handle, abort_reg) = AbortHandle::new_pair();
+        self.search_thread = abort_handle;
 
         Task::perform(
             Abortable::new(
-                async move {
-                    let mut paths = paths;
-                    let mut cached_roots = HashMap::new();
-                    for root in missing_roots {
-                        let children = walk_directory(&root);
-                        paths.extend(children.iter().cloned());
-                        cached_roots.insert(root, children);
-                    }
-                    paths.sort();
-                    paths.dedup();
-                    if tag_only {
-                        paths.retain(|path| is_audio(path));
-                    }
-                    let mut result = if tag_only {
-                        filter_tag_paths(debounce_ms.max(300), paths, tag_filters, metadata).await
-                    } else {
-                        filter_search_paths(
-                            debounce_ms.max(300),
-                            paths,
-                            file_query,
-                            tag_filters,
-                            case_sensitive,
-                            show_directories,
-                            metadata,
-                        )
-                        .await
-                    };
-                    result.cached_roots = cached_roots;
-                    result
-                },
+                execute_file_search(
+                    debounce_ms,
+                    allowed_roots,
+                    dir_cache,
+                    metadata_cache,
+                    file_query,
+                    tag_filters,
+                    case_sensitive,
+                    show_directories,
+                    tag_only,
+                ),
                 abort_reg,
             ),
             Message::SearchCompleted,
@@ -981,6 +996,7 @@ impl App {
         match message {
             Message::SelectedFile(selected_file) => {
                 self.search_focused = false;
+                self.file_list_focused = selected_file.is_some();
                 match &selected_file {
                 Some(file_path) => self.open_path(file_path),
                 None => {
@@ -1165,17 +1181,11 @@ impl App {
             Message::Search(search_str) => {
                 self.search_focused = true;
                 self.tag_search_focused = false;
-                let clear = search_str.is_empty();
                 self.file_selector.search_value = search_str;
-                let search_task = self.start_file_search();
-                if clear {
-                    Task::batch([
-                        search_task,
-                        operation::focus(Id::new(FILE_SEARCH_INPUT_ID)),
-                    ])
-                } else {
-                    search_task
-                }
+                Task::batch([
+                    self.start_file_search(),
+                    operation::focus(Id::new(FILE_SEARCH_INPUT_ID)),
+                ])
             }
 
             Message::ToggleSearchCaseSensitive => {
@@ -1557,6 +1567,7 @@ impl App {
                 self.search_focused = focused;
                 if focused {
                     self.tag_search_focused = false;
+                    self.file_list_focused = false;
                 }
                 Task::none()
             }
@@ -1795,6 +1806,19 @@ impl App {
                 self.waveform_hovered = hovered;
                 if hovered {
                     self.search_focused = false;
+                }
+                Task::none()
+            }
+
+            Message::ControlsHoverChanged(hovered) => {
+                self.controls_hovered = hovered;
+                Task::none()
+            }
+
+            Message::FileListHoverChanged(hovered) => {
+                self.file_list_hovered = hovered;
+                if !hovered {
+                    self.file_list_focused = false;
                 }
                 Task::none()
             }

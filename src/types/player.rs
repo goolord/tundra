@@ -570,7 +570,7 @@ impl Controls {
         }
     }
 
-    pub fn view(&self, track_name: Option<&str>) -> Container<'_, Message> {
+    pub fn view(&self, track_name: Option<&str>) -> Element<'_, Message> {
         let transport = self.transport_cluster();
         let footer: Element<Message> = if let Some(name) = track_name {
             row![
@@ -596,17 +596,22 @@ impl Controls {
             .into()
         };
 
-        Container::new(
-            Column::new()
-                .push(self.seek_bar())
-                .push(footer)
-                .spacing(8)
-                .width(Length::Fill),
+        mouse_area(
+            Container::new(
+                Column::new()
+                    .push(self.seek_bar())
+                    .push(footer)
+                    .spacing(8)
+                    .width(Length::Fill),
+            )
+            .padding([6, 8])
+            .width(Length::Fill)
+            .height(Length::Shrink)
+            .style(controls_panel_style),
         )
-        .padding([6, 8])
-        .width(Length::Fill)
-        .height(Length::Shrink)
-        .style(controls_panel_style)
+        .on_enter(Message::ControlsHoverChanged(true))
+        .on_exit(Message::ControlsHoverChanged(false))
+        .into()
     }
 }
 
