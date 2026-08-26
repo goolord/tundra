@@ -333,11 +333,17 @@ fn time_label(content: String, emphasized: bool, align: iced::alignment::Horizon
     .into()
 }
 
+#[derive(Debug, Clone)]
+pub struct PlayerWorker {
+    cmd_sender: UnboundedSender<PlayerCommand>,
+}
+
 pub struct Player {
     pub waveform: Option<WaveForm>,
     pub current_file: Option<PathBuf>,
     pub controls: Controls,
-    cmd_sender: UnboundedSender<PlayerCommand>,
+    cmd_sender: Option<UnboundedSender<PlayerCommand>>,
+    pending_commands: Vec<PlayerCommand>,
 }
 
 enum PlayerCommand {
@@ -615,33 +621,55 @@ impl Controls {
     }
 }
 
-impl Player {
-    pub fn new(volume: f32) -> (Self, UnboundedReceiver<PlayerMsg>) {
+impl PlayerWorker {
+    pub fn spawn(
+        is_playing: sync::Arc<sync::atomic::AtomicBool>,
+        volume: f32,
+    ) -> (Self, UnboundedReceiver<PlayerMsg>) {
         let volume = clamp_volume(volume);
-        let is_playing = sync::Arc::new(sync::atomic::AtomicBool::new(false));
-        let worker_is_playing = is_playing.clone();
         let (cmd_sender, cmd_receiver) = unbounded();
         let (msg_sender, msg_receiver) = unbounded();
         thread::spawn(move || {
-            run_audio_worker(cmd_receiver, msg_sender, worker_is_playing, volume);
+            run_audio_worker(cmd_receiver, msg_sender, is_playing, volume);
         });
+        (Self { cmd_sender }, msg_receiver)
+    }
+}
 
-        (
-            Player {
-                waveform: None,
-                current_file: None,
-                controls: Controls {
-                    is_playing,
-                    seekbar: None,
-                    playback_position: None,
-                    track_duration: None,
-                    scrubbing: false,
-                    volume,
-                },
-                cmd_sender,
+impl Player {
+    pub fn new(volume: f32) -> Self {
+        let volume = clamp_volume(volume);
+        Self {
+            waveform: None,
+            current_file: None,
+            controls: Controls {
+                is_playing: sync::Arc::new(sync::atomic::AtomicBool::new(false)),
+                seekbar: None,
+                playback_position: None,
+                track_duration: None,
+                scrubbing: false,
+                volume,
             },
-            msg_receiver,
-        )
+            cmd_sender: None,
+            pending_commands: Vec::new(),
+        }
+    }
+
+    pub fn attach_worker(&mut self, worker: PlayerWorker) {
+        self.cmd_sender = Some(worker.cmd_sender);
+        for command in std::mem::take(&mut self.pending_commands) {
+            if let Some(sender) = self.cmd_sender.as_ref() {
+                send_command(sender, command);
+            }
+        }
+    }
+
+    fn enqueue_command(&mut self, command: PlayerCommand) {
+        if let Some(sender) = self.cmd_sender.as_ref() {
+            send_command(sender, command);
+        } else {
+            self.pending_commands.push(command);
+        }
     }
 
     pub fn view(&self) -> Container<'_, Message> {
@@ -722,7 +750,10 @@ impl Player {
     }
 
     pub fn play_file(&mut self, file_path: &Path) -> Result<(), String> {
-        send_command(&self.cmd_sender, PlayerCommand::Stop);
+        let Some(cmd_sender) = self.cmd_sender.as_ref() else {
+            return Err("Audio is still starting. Try again in a moment.".into());
+        };
+        send_command(cmd_sender, PlayerCommand::Stop);
         let mut loaded = load_audio(file_path)?;
 
         let total_frames = loaded.playback.total_frames;
@@ -739,7 +770,7 @@ impl Player {
         self.waveform = Some(loaded.waveform);
 
         send_command(
-            &self.cmd_sender,
+            cmd_sender,
             PlayerCommand::Load(loaded.playback, playback_position),
         );
         self.play();
@@ -747,11 +778,11 @@ impl Player {
     }
 
     pub fn play(&mut self) {
-        send_command(&self.cmd_sender, PlayerCommand::Play);
+        self.enqueue_command(PlayerCommand::Play);
     }
 
     pub fn pause(&mut self) {
-        send_command(&self.cmd_sender, PlayerCommand::Pause);
+        self.enqueue_command(PlayerCommand::Pause);
     }
 
     pub fn stop(&mut self) {
@@ -765,7 +796,7 @@ impl Player {
         if let Some(waveform) = &mut self.waveform {
             waveform.set_scrub_progress(None);
         }
-        send_command(&self.cmd_sender, PlayerCommand::Stop);
+        self.enqueue_command(PlayerCommand::Stop);
     }
 
     pub fn seek(&mut self, p: f64) {
@@ -777,13 +808,13 @@ impl Player {
         if let Some(waveform) = &mut self.waveform {
             waveform.set_scrub_progress(None);
         }
-        send_command(&self.cmd_sender, PlayerCommand::Seek(p, resume));
+        self.enqueue_command(PlayerCommand::Seek(p, resume));
     }
 
     pub fn set_volume(&mut self, volume: f32) {
         let volume = clamp_volume(volume);
         self.controls.volume = volume;
-        send_command(&self.cmd_sender, PlayerCommand::SetVolume(volume));
+        self.enqueue_command(PlayerCommand::SetVolume(volume));
     }
 
     pub fn begin_scrub(&mut self, p: f64) {
@@ -819,7 +850,7 @@ impl Player {
     }
 
     pub fn reset_on_error(&mut self) {
-        send_command(&self.cmd_sender, PlayerCommand::Stop);
+        self.enqueue_command(PlayerCommand::Stop);
         self.controls.is_playing.store(false, Ordering::SeqCst);
         if let Some(position) = &self.controls.playback_position {
             position.reset();

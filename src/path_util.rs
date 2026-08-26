@@ -170,6 +170,26 @@ fn replace_existing_windows(from: &Path, to: &Path) -> io::Result<()> {
     }
 }
 
+/// Clear read-only attribute/permissions so writes and fsync succeed.
+pub fn ensure_writable(path: &Path) -> io::Result<()> {
+    let mut perms = std::fs::metadata(path)?.permissions();
+    if perms.readonly() {
+        perms.set_readonly(false);
+        std::fs::set_permissions(path, perms)?;
+    }
+    Ok(())
+}
+
+/// Flush file data/metadata to disk before atomic replace.
+pub fn sync_file(path: &Path) -> io::Result<()> {
+    use std::fs::OpenOptions;
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)?
+        .sync_all()
+}
+
 pub fn sync_parent_dir(path: &Path) -> io::Result<()> {
     let parent = path.parent().filter(|dir| !dir.as_os_str().is_empty());
     let parent = parent.unwrap_or_else(|| Path::new("."));
@@ -321,6 +341,38 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn replace_works_when_dest_readonly() {
+        let dir = ScratchDir::new();
+        let dest = dir.path().join("kick.wav");
+        fs::write(&dest, b"audio").unwrap();
+        let tmp = sidecar(&dest, TAG_TMP_SUFFIX);
+        fs::write(&tmp, b"tagged").unwrap();
+        let mut perms = fs::metadata(&dest).unwrap().permissions();
+        perms.set_readonly(true);
+        fs::set_permissions(&dest, perms).unwrap();
+
+        ensure_writable(&dest).unwrap();
+        replace_file(&tmp, &dest).unwrap();
+        assert_eq!(fs::read(&dest).unwrap(), b"tagged");
+    }
+
+    #[test]
+    fn sync_file_works_on_readonly_copy() {
+        let dir = ScratchDir::new();
+        let dest = dir.path().join("kick.wav");
+        fs::write(&dest, b"audio").unwrap();
+        let tmp = sidecar(&dest, TAG_TMP_SUFFIX);
+        fs::copy(&dest, &tmp).unwrap();
+        let mut perms = fs::metadata(&tmp).unwrap().permissions();
+        perms.set_readonly(true);
+        fs::set_permissions(&tmp, perms).unwrap();
+
+        ensure_writable(&tmp).unwrap();
+        fs::write(&tmp, b"tagged").unwrap();
+        sync_file(&tmp).unwrap();
     }
 
     #[test]

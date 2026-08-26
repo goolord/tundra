@@ -192,6 +192,13 @@ pub struct CachedMetadata {
     pub fields: TagFields,
 }
 
+/// Disk-backed caches loaded off the UI thread during startup.
+#[derive(Debug, Clone, Default)]
+pub struct PersistedCaches {
+    pub dirs: HashMap<PathBuf, Vec<PathBuf>>,
+    pub metadata: HashMap<PathBuf, CachedMetadata>,
+}
+
 #[derive(Debug, Clone)]
 pub struct SearchResult {
     pub paths: Vec<PathBuf>,
@@ -1041,16 +1048,28 @@ fn save_tags_atomically(path: &Path, tag: &lofty::tag::Tag) -> Result<(), String
     let tmp = crate::path_util::sidecar(path, crate::path_util::TAG_TMP_SUFFIX);
     std::fs::copy(path, &tmp)
         .map_err(|err| format!("Failed to stage {}: {err}", path.display()))?;
+    crate::path_util::ensure_writable(&tmp).map_err(|err| {
+        format!(
+            "Failed to prepare tagged file {}: {err}",
+            path.display()
+        )
+    })?;
 
     let write_result = tag
         .save_to_path(&tmp, WriteOptions::default())
         .map_err(|err| format!("Failed to write tags to {}: {err}", path.display()))
         .and_then(|_| {
-            std::fs::File::open(&tmp)
-                .and_then(|file| file.sync_all())
-                .map_err(|err| format!("Failed to sync tagged file {}: {err}", path.display()))
+            crate::path_util::sync_file(&tmp).map_err(|err| {
+                format!("Failed to sync tagged file {}: {err}", tmp.display())
+            })
         })
         .and_then(|_| {
+            crate::path_util::ensure_writable(path).map_err(|err| {
+                format!(
+                    "Cannot write tags to read-only file {}: {err}",
+                    path.display()
+                )
+            })?;
             crate::path_util::replace_file(&tmp, path)
                 .map_err(|err| format!("Failed to replace {}: {err}", path.display()))
         });
