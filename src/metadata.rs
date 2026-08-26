@@ -435,6 +435,9 @@ pub const TAG_SEARCH_DEBOUNCE_MS: u64 = 200;
 const FILE_SEARCH_DEBOUNCE_MS: u64 = 200;
 const FILE_SEARCH_DEBOUNCE_MS_SHORT: u64 = 450;
 const CONTAINS_NAME_MATCH_SCORE: i64 = 400;
+const FILE_SEARCH_MIN_FUZZY_SCORE: i32 = 70;
+const FILE_SEARCH_CONFIDENT_RESULT_CAP: usize = 2_000;
+const FILE_SEARCH_MAX_RESULTS: usize = 10_000;
 
 pub fn file_search_debounce_ms(query_len: usize) -> u64 {
     if query_len <= FILE_SEARCH_MIN_QUERY_LEN {
@@ -475,7 +478,42 @@ fn term_field_score(
     if text_contains(text, term, case_sensitive) {
         return CONTAINS_NAME_MATCH_SCORE + term.len() as i64;
     }
-    matcher.fuzzy_match(text, term).unwrap_or(0) as i64
+    matcher
+        .fuzzy_match(text, term)
+        .filter(|&score| score >= FILE_SEARCH_MIN_FUZZY_SCORE as i64)
+        .unwrap_or(0) as i64
+}
+
+fn path_name_fields(path: &Path) -> Vec<String> {
+    let mut name_fields = Vec::new();
+    if let Some(name) = crate::path_util::file_name_lossy(path) {
+        name_fields.push(name);
+    }
+    if let Some(stem) = crate::path_util::file_stem_lossy(path) {
+        if name_fields.last().is_none_or(|last| last != &stem) {
+            name_fields.push(stem);
+        }
+    }
+    name_fields
+}
+
+fn path_has_substring_match(path: &Path, query: &str, case_sensitive: bool) -> bool {
+    let terms = file_search_terms(query);
+    if terms.is_empty() {
+        return false;
+    }
+    let name_fields = path_name_fields(path);
+    let path_string = path.to_string_lossy();
+    terms.iter().all(|term| {
+        name_fields
+            .iter()
+            .any(|field| text_contains(field, term, case_sensitive))
+            || text_contains(&path_string, term, case_sensitive)
+    })
+}
+
+fn is_confident_file_match(name_score: i64, path_score: i64) -> bool {
+    name_score >= CONTAINS_NAME_MATCH_SCORE || path_score >= CONTAINS_NAME_MATCH_SCORE
 }
 
 fn path_match_scores(
@@ -489,16 +527,7 @@ fn path_match_scores(
         return (0, 0);
     }
 
-    let mut name_fields = Vec::new();
-    if let Some(name) = crate::path_util::file_name_lossy(path) {
-        name_fields.push(name);
-    }
-    if let Some(stem) = crate::path_util::file_stem_lossy(path) {
-        if name_fields.last().is_none_or(|last| last != &stem) {
-            name_fields.push(stem);
-        }
-    }
-
+    let name_fields = path_name_fields(path);
     let path_string = path.to_string_lossy().into_owned();
     let mut name_score = 0i64;
     let mut path_score = 0i64;
@@ -834,6 +863,87 @@ pub async fn filter_tag_paths(
     collect_tag_matches(&paths, &tag_filters, metadata)
 }
 
+fn collect_file_matches(
+    paths: &[PathBuf],
+    file_query: &str,
+    tag_filters: &[TagFilter],
+    case_sensitive: bool,
+    show_directories: bool,
+    metadata: Arc<HashMap<PathBuf, CachedMetadata>>,
+) -> SearchResult {
+    let file_matcher = file_search_matcher(case_sensitive);
+    let tag_matcher = tag_search_matcher();
+    let tag_active = !tag_filters.is_empty();
+    let mut lookup = MetadataLookup::new(metadata);
+    let mut matches = Vec::new();
+
+    for path in paths {
+        if !show_directories && !is_audio(path) {
+            continue;
+        }
+
+        if matches.len() >= FILE_SEARCH_CONFIDENT_RESULT_CAP
+            && !path_has_substring_match(path, file_query, case_sensitive)
+        {
+            continue;
+        }
+
+        let (name_score, path_score) =
+            path_match_scores(&file_matcher, path, file_query, case_sensitive);
+
+        if name_score == 0 && path_score == 0 {
+            continue;
+        }
+
+        if matches.len() >= FILE_SEARCH_CONFIDENT_RESULT_CAP
+            && !is_confident_file_match(name_score, path_score)
+        {
+            continue;
+        }
+
+        let tag_score = if tag_active {
+            tag_match_score(&tag_matcher, path, tag_filters, &mut lookup)
+        } else {
+            0
+        };
+
+        if tag_active && tag_score == 0 {
+            continue;
+        }
+
+        let rank = if tag_active {
+            SearchRank::for_combined_search(
+                path.clone(),
+                file_query,
+                name_score,
+                path_score,
+                tag_score,
+                case_sensitive,
+            )
+        } else {
+            SearchRank::for_file_search(
+                path.clone(),
+                file_query,
+                name_score,
+                path_score,
+                case_sensitive,
+            )
+        };
+        matches.push(rank);
+    }
+
+    matches.sort();
+    if matches.len() > FILE_SEARCH_MAX_RESULTS {
+        matches.truncate(FILE_SEARCH_MAX_RESULTS);
+    }
+    let paths = matches.into_iter().map(|entry| entry.path).collect();
+    SearchResult {
+        paths,
+        new_metadata: lookup.into_new_entries(),
+        cached_roots: HashMap::new(),
+    }
+}
+
 pub async fn filter_search_paths(
     debounce_ms: u64,
     paths: Vec<PathBuf>,
@@ -850,54 +960,14 @@ pub async fn filter_search_paths(
         return collect_tag_matches(&paths, &tag_filters, metadata);
     }
 
-    let file_matcher = file_search_matcher(case_sensitive);
-    let tag_matcher = tag_search_matcher();
-    let mut lookup = MetadataLookup::new(metadata);
-    let mut matches = Vec::new();
-
-    for path in paths {
-        if !show_directories && !is_audio(&path) {
-            continue;
-        }
-
-        let (name_score, path_score) = path_match_scores(&file_matcher, &path, &file_query, case_sensitive);
-
-        if name_score == 0 && path_score == 0 {
-            continue;
-        }
-
-        let tag_score = if tag_active {
-            tag_match_score(&tag_matcher, &path, &tag_filters, &mut lookup)
-        } else {
-            0
-        };
-
-        if tag_active && tag_score == 0 {
-            continue;
-        }
-
-        let rank = if tag_active {
-            SearchRank::for_combined_search(
-                path,
-                &file_query,
-                name_score,
-                path_score,
-                tag_score,
-                case_sensitive,
-            )
-        } else {
-            SearchRank::for_file_search(path, &file_query, name_score, path_score, case_sensitive)
-        };
-        matches.push(rank);
-    }
-
-    matches.sort();
-    let paths = matches.into_iter().map(|entry| entry.path).collect();
-    SearchResult {
-        paths,
-        new_metadata: lookup.into_new_entries(),
-        cached_roots: HashMap::new(),
-    }
+    collect_file_matches(
+        &paths,
+        &file_query,
+        &tag_filters,
+        case_sensitive,
+        show_directories,
+        metadata,
+    )
 }
 
 pub fn instrument_tag(path: &Path) -> Option<String> {
@@ -1030,6 +1100,48 @@ mod tests {
         assert!(both > 0);
         assert!(snare_only > 0);
         assert_eq!(missing, 0);
+    }
+
+    #[test]
+    fn file_search_rejects_weak_fuzzy_matches() {
+        let matcher = file_search_matcher(false);
+        let path = PathBuf::from(r"C:\Samples\Synth Pad 01.wav");
+        let (weak, _) = path_match_scores(&matcher, &path, "snare", false);
+        assert_eq!(weak, 0, "unrelated fuzzy matches should be rejected");
+    }
+
+    #[test]
+    fn file_search_confident_cap_skips_fuzzy_only_matches() {
+        let paths = vec![
+            PathBuf::from(r"C:\Samples\01 Snare.wav"),
+            PathBuf::from(r"C:\Samples\Synth Pad 01.wav"),
+        ];
+        let confident: Vec<_> = (0..FILE_SEARCH_CONFIDENT_RESULT_CAP)
+            .map(|index| PathBuf::from(format!(r"C:\Samples\snare-{index:04}.wav")))
+            .collect();
+        let mut all_paths = confident;
+        all_paths.extend(paths);
+
+        let result = collect_file_matches(
+            &all_paths,
+            "snare",
+            &[],
+            false,
+            true,
+            Arc::new(HashMap::new()),
+        );
+
+        assert!(
+            result.paths.iter().any(|path| path.ends_with("01 Snare.wav")),
+            "substring matches should remain"
+        );
+        assert!(
+            !result
+                .paths
+                .iter()
+                .any(|path| path.ends_with("Synth Pad 01.wav")),
+            "fuzzy-only matches should be dropped once the confident cap is full"
+        );
     }
 
     #[test]

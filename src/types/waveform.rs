@@ -88,6 +88,12 @@ impl WaveFormView {
         sample_count: usize,
         pending: &mut f32,
     ) -> bool {
+        if lines != 0.0 {
+            let pending_sign = pending.signum();
+            if pending_sign != 0.0 && pending_sign != lines.signum() {
+                *pending = 0.0;
+            }
+        }
         *pending += lines;
         if pending.abs() < WHEEL_ZOOM_TAIL {
             return false;
@@ -1314,5 +1320,53 @@ impl Program<Message> for WaveForm {
             return iced::mouse::Interaction::Pointer;
         }
         iced::mouse::Interaction::default()
+    }
+}
+
+#[cfg(test)]
+mod wheel_zoom_tests {
+    use super::WaveFormView;
+
+    #[test]
+    fn direction_change_does_not_zoom_same_way() {
+        let mut view = WaveFormView::default();
+        let mut pending = 0.0;
+        let samples = 10_000;
+
+        view.accumulate_wheel(0.55, 0.5, samples, &mut pending);
+        let zoom_before = view.zoom;
+        assert!(
+            pending > 0.0,
+            "expected leftover down-scroll pending, got {pending}"
+        );
+
+        view.accumulate_wheel(-0.05, 0.5, samples, &mut pending);
+        assert!(
+            view.zoom <= zoom_before,
+            "reverse scroll must not zoom further in (before={zoom_before}, after={})",
+            view.zoom
+        );
+    }
+
+    #[test]
+    fn scroll_down_then_up_changes_zoom_direction() {
+        let mut view = WaveFormView::default();
+        let mut pending = 0.0;
+        let samples = 10_000;
+
+        for _ in 0..5 {
+            view.accumulate_wheel(0.15, 0.5, samples, &mut pending);
+        }
+        let zoom_in = view.zoom;
+        assert!(zoom_in > 1.0);
+
+        for _ in 0..5 {
+            view.accumulate_wheel(-0.15, 0.5, samples, &mut pending);
+        }
+        assert!(
+            view.zoom < zoom_in,
+            "scroll up after scroll down must zoom out (in={zoom_in}, out={})",
+            view.zoom
+        );
     }
 }

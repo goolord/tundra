@@ -1,2 +1,27 @@
 [alias]
 xtask = "run --package xtask --"
+
+# Static CRT on Windows — no VCRUNTIME140.dll dependency.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.i686-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+# Drop unused sections; fully static musl binary on Linux-gnu alternative below still uses gtk rfd.
+[target.x86_64-unknown-linux-musl]
+linker = "rust-lld"
+rustflags = [
+    "-C", "target-feature=+crt-static",
+    "-C", "link-arg=-static",
+    "-C", "link-arg=-Wl,--gc-sections",
+]
+
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-Wl,--gc-sections"]
+
+[target.aarch64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-Wl,--gc-sections"]
