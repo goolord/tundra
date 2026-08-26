@@ -28,6 +28,26 @@ pub fn cache_key(path: PathBuf) -> PathBuf {
     }
 }
 
+/// Keys a cache lookup must try: the path as stored, then the stable `cache_key`.
+/// WalkDir and `canonicalize` disagree on the `\\?\` prefix, so one file can
+/// appear under both forms.
+pub fn cache_lookup_keys(path: &Path) -> Vec<PathBuf> {
+    let raw = path.to_path_buf();
+    let key = cache_key(raw.clone());
+    if key == raw {
+        vec![raw]
+    } else {
+        vec![raw, key]
+    }
+}
+
+/// True when `path` is `root` or a descendant, ignoring `\\?\` and case.
+pub fn is_under(path: &Path, root: &Path) -> bool {
+    let path = cache_key(path.to_path_buf());
+    let root = cache_key(root.to_path_buf());
+    path.starts_with(root)
+}
+
 pub fn file_name_lossy(path: &Path) -> Option<String> {
     path.file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -341,6 +361,26 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn is_under_ignores_verbatim_prefix_and_case() {
+        let root = PathBuf::from(r"\\?\F:\Samples");
+        let child = PathBuf::from(r"F:\Samples\ADM Samples - Copy\Snare\01_Snare.flac");
+        assert!(is_under(&child, &root));
+        assert!(is_under(&root, &root));
+        assert!(!is_under(
+            Path::new(r"F:\Other\snare.flac"),
+            &root
+        ));
+    }
+
+    #[test]
+    fn cache_lookup_keys_include_normalized_form() {
+        let path = PathBuf::from(r"\\?\F:\Samples\Snare\01_Snare.flac");
+        let keys = cache_lookup_keys(&path);
+        assert!(keys.contains(&path));
+        assert!(keys.contains(&cache_key(path)));
     }
 
     #[test]

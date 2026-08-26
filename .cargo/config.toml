@@ -1,15 +1,7 @@
 [alias]
 xtask = "run --package xtask --"
 
-# Static CRT on Windows — no VCRUNTIME140.dll dependency.
-[target.x86_64-pc-windows-msvc]
-rustflags = ["-C", "target-feature=+crt-static"]
-
-[target.i686-pc-windows-msvc]
-rustflags = ["-C", "target-feature=+crt-static"]
-
-[target.aarch64-pc-windows-msvc]
-rustflags = ["-C", "target-feature=+crt-static"]
+# Static CRT is required for the `release` profile on Windows (see build.rs). Dev and `release-fast` use dynamic CRT.
 
 # Drop unused sections; fully static musl binary on Linux-gnu alternative below still uses gtk rfd.
 [target.x86_64-unknown-linux-musl]

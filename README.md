@@ -52,11 +52,11 @@ Flags:
 - `--skip-lfs` — skip `git lfs pull` during setup
 - `--skip-dl` — skip Essentia TensorFlow env (tier 2 falls back to librosa)
 - `--no-setup` — skip setup before build/run
-- `--release` — release profile
+- `--release` — optimized build (`build`: full release + static CRT on Windows; `run`: fast `release-fast` profile)
 
 Models and SVG icons are copied next to the binary at build time.
 
-Release builds use a size-optimized profile (`opt-level = "z"`, LTO, stripped symbols) and static CRT on Windows (`+crt-static`), so the executable does not depend on the MSVC redistributable. GPU rendering uses `wgpu` with Vulkan on Windows/Linux or Metal on macOS, plus a `tiny-skia` software fallback when no GPU backend is available. DX12 is omitted to avoid a `windows` crate version conflict in the current dependency graph.
+`cargo xtask build --release` uses the full release profile: `opt-level = 3`, thin LTO, stripped symbols, and static CRT on Windows. Ship the binary from `target/release/` (or `target/<triple>/release/`). `cargo xtask run --release` uses the `release-fast` profile (same speed opts, no LTO, faster compiles, dynamic CRT) and runs from `target/release-fast/` — not for distribution. Plain `cargo build --release` on Windows also requires static CRT (`build.rs` enforces it). Debug builds use the dynamic CRT. GPU rendering uses `wgpu` with Vulkan on Windows/Linux or Metal on macOS, plus a `tiny-skia` software fallback when no GPU backend is available. DX12 is omitted to avoid a `windows` crate version conflict in the current dependency graph.
 
 ### Portable layout
 

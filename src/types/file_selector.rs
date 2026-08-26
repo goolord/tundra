@@ -771,7 +771,31 @@ fn tag_section_header(filter_count: usize) -> Element<'static, Message> {
         );
 
     if filter_count > 0 {
-        header = header.push(tag_count_badge(filter_count));
+        header = header
+            .push(tag_count_badge(filter_count))
+            .push(
+                container(
+                    text("active")
+                        .size(9)
+                        .font(iced::Font {
+                            weight: iced::font::Weight::Semibold,
+                            ..iced::Font::default()
+                        })
+                        .style(|_theme: &theme::Theme| iced::widget::text::Style {
+                            color: Some(TUNDRA_ACCENT.scale_alpha(0.95)),
+                        }),
+                )
+                .padding([2, 6])
+                .style(|_theme| container::Style {
+                    background: Some(TUNDRA_ACCENT.scale_alpha(0.18).into()),
+                    border: Border {
+                        radius: 8.0.into(),
+                        width: 1.0,
+                        color: TUNDRA_ACCENT.scale_alpha(0.28),
+                    },
+                    ..Default::default()
+                }),
+            );
     }
 
     header.push(Space::new().width(Length::Fill)).into()
@@ -1418,6 +1442,7 @@ impl FileButton {
                         Message::FileCopyName(path.clone()),
                         Message::FileCopyPath(path.clone()),
                         Message::FileRevealInFileManager(path.clone()),
+                        None,
                     )
                 })
                 .style(context_menu_style)
@@ -1448,6 +1473,7 @@ impl FileButton {
                         Message::FileCopyName(path.clone()),
                         Message::FileCopyPath(path.clone()),
                         Message::FileRevealInFileManager(path.clone()),
+                        None,
                     )
                 })
                 .style(context_menu_style)
@@ -1457,7 +1483,10 @@ impl FileButton {
         }
 
         let draggable = mouse_area(row_content)
-            .on_press(Message::FileDragPress(self.file_path.to_owned()))
+            .on_press(Message::FileDragPress {
+                path: self.file_path.to_owned(),
+                from_file_list: true,
+            })
             .on_move(|point| Message::CursorMoved(point))
             .on_enter(Message::FileRowHover(index))
             .on_exit(Message::FileRowLeave)
@@ -1469,6 +1498,7 @@ impl FileButton {
                     Message::FileCopyName(path.clone()),
                     Message::FileCopyPath(path.clone()),
                     Message::FileRevealInFileManager(path.clone()),
+                    Some(Message::OpenAutoTagFor(path.clone())),
                 )
             })
             .style(context_menu_style)

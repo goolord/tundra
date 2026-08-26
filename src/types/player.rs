@@ -209,31 +209,38 @@ fn transport_icon_color(primary: bool, active: bool, theme: &Theme) -> Color {
     }
 }
 
-fn track_name_label(name: String) -> Element<'static, Message> {
-    container(
-        row![
-            Svg::from_path(resource_path("music-solid.svg"))
-                .width(Length::Fixed(14.0))
-                .height(Length::Fixed(14.0))
-                .style(|theme: &Theme, _| iced::widget::svg::Style {
-                    color: Some(accent_color(theme).scale_alpha(0.85)),
-                }),
-            text(name)
-                .size(12)
-                .style(|theme: &Theme| iced::widget::text::Style {
-                    color: Some(
-                        theme
-                            .extended_palette()
-                            .background
-                            .base
-                            .text
-                            .scale_alpha(0.72),
-                    ),
-                }),
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center),
+fn track_name_label(name: String, path: PathBuf) -> Element<'static, Message> {
+    mouse_area(
+        container(
+            row![
+                Svg::from_path(resource_path("music-solid.svg"))
+                    .width(Length::Fixed(14.0))
+                    .height(Length::Fixed(14.0))
+                    .style(|theme: &Theme, _| iced::widget::svg::Style {
+                        color: Some(accent_color(theme).scale_alpha(0.85)),
+                    }),
+                text(name)
+                    .size(12)
+                    .style(|theme: &Theme| iced::widget::text::Style {
+                        color: Some(
+                            theme
+                                .extended_palette()
+                                .background
+                                .base
+                                .text
+                                .scale_alpha(0.72),
+                        ),
+                    }),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        ),
     )
+    .on_press(Message::FileDragPress {
+        path,
+        from_file_list: false,
+    })
+    .interaction(iced::mouse::Interaction::Grab)
     .into()
 }
 
@@ -357,7 +364,6 @@ enum PlayerCommand {
 
 #[derive(Debug, Clone, Copy)]
 pub enum PlayerMsg {
-    PlayingStored,
     SinkEmpty,
     StreamFailed,
 }
@@ -369,6 +375,7 @@ pub struct Controls {
     pub track_duration: Option<f64>,
     pub scrubbing: bool,
     pub volume: f32,
+    pub looping: bool,
 }
 
 pub struct Seekbar {
@@ -502,9 +509,25 @@ impl Controls {
         .style(|theme: &Theme, status| transport_button_style(theme, status, false, false))
     }
 
+    fn loop_button(&self) -> Button<'_, Message> {
+        let looping = self.looping;
+        Button::new(
+            Svg::from_path(resource_path("repeat.svg"))
+                .width(Length::Fixed(TRANSPORT_ICON))
+                .height(Length::Fixed(TRANSPORT_ICON))
+                .style(move |theme: &Theme, _| iced::widget::svg::Style {
+                    color: Some(transport_icon_color(looping, looping, theme)),
+                }),
+        )
+        .on_press(Message::ToggleLoop)
+        .width(Length::Fixed(TRANSPORT_BUTTON))
+        .height(Length::Fixed(TRANSPORT_BUTTON))
+        .style(move |theme: &Theme, status| transport_button_style(theme, status, looping, looping))
+    }
+
     fn transport_cluster(&self) -> Element<'_, Message> {
         container(
-            row![self.play_button(), self.stop_button()]
+            row![self.play_button(), self.stop_button(), self.loop_button()]
                 .spacing(6)
                 .align_y(Alignment::Center),
         )
@@ -576,11 +599,34 @@ impl Controls {
         }
     }
 
-    pub fn view(&self, track_name: Option<&str>) -> Element<'_, Message> {
+    pub fn view(&self, track_name: Option<&str>, track_path: Option<&Path>, tag_summary: Option<String>) -> Element<'_, Message> {
         let transport = self.transport_cluster();
-        let footer: Element<Message> = if let Some(name) = track_name {
+        let footer: Element<Message> = if let (Some(name), Some(path)) = (track_name, track_path) {
+            let track_label: Element<Message> = if let Some(tags) = tag_summary {
+                Column::new()
+                    .push(track_name_label(name.to_owned(), path.to_path_buf()))
+                    .push(
+                        text(tags)
+                            .size(11)
+                            .wrapping(Wrapping::Word)
+                            .style(|theme: &Theme| iced::widget::text::Style {
+                                color: Some(
+                                    theme
+                                        .extended_palette()
+                                        .background
+                                        .base
+                                        .text
+                                        .scale_alpha(0.72),
+                                ),
+                            }),
+                    )
+                    .spacing(2)
+                    .into()
+            } else {
+                track_name_label(name.to_owned(), path.to_path_buf())
+            };
             row![
-                container(track_name_label(name.to_owned()))
+                container(track_label)
                     .width(Length::FillPortion(2))
                     .height(Length::Shrink),
                 self.volume_control(),
@@ -637,7 +683,7 @@ impl PlayerWorker {
 }
 
 impl Player {
-    pub fn new(volume: f32) -> Self {
+    pub fn new(volume: f32, looping: bool) -> Self {
         let volume = clamp_volume(volume);
         Self {
             waveform: None,
@@ -649,6 +695,7 @@ impl Player {
                 track_duration: None,
                 scrubbing: false,
                 volume,
+                looping,
             },
             cmd_sender: None,
             pending_commands: Vec::new(),
@@ -672,7 +719,7 @@ impl Player {
         }
     }
 
-    pub fn view(&self) -> Container<'_, Message> {
+    pub fn view(&self, tag_summary: Option<String>) -> Container<'_, Message> {
         let mut column = Column::new()
             .width(Length::Fill)
             .height(Length::Fill);
@@ -724,6 +771,7 @@ impl Player {
                     Message::WaveformCopyName,
                     Message::WaveformCopyPath,
                     Message::WaveformRevealInFileManager,
+                    Some(Message::WaveformOpenAutoTag),
                 )
             })
             .style(context_menu_style);
@@ -742,7 +790,12 @@ impl Player {
             .current_file
             .as_ref()
             .and_then(|path| crate::path_util::file_name_lossy(path));
-        column = column.push(Controls::view(&self.controls, track_name.as_deref()));
+        column = column.push(Controls::view(
+            &self.controls,
+            track_name.as_deref(),
+            self.current_file.as_deref(),
+            tag_summary,
+        ));
         Container::new(column)
             .width(Length::Fill)
             .height(Length::Fill)
@@ -778,11 +831,35 @@ impl Player {
     }
 
     pub fn play(&mut self) {
+        self.controls
+            .is_playing
+            .store(true, Ordering::Release);
         self.enqueue_command(PlayerCommand::Play);
     }
 
     pub fn pause(&mut self) {
+        self.controls
+            .is_playing
+            .store(false, Ordering::Release);
         self.enqueue_command(PlayerCommand::Pause);
+    }
+
+    pub fn on_ended(&mut self) {
+        if let Some(position) = &self.controls.playback_position {
+            position.set_frame(position.total_frames());
+        }
+        if let Some(seekbar) = &mut self.controls.seekbar {
+            seekbar.seeking = 1.0;
+        }
+        self.pause();
+    }
+
+    pub fn restart_from_start(&mut self) {
+        self.seek(0.0);
+    }
+
+    pub fn toggle_loop(&mut self) {
+        self.controls.looping = !self.controls.looping;
     }
 
     pub fn stop(&mut self) {
@@ -910,10 +987,25 @@ fn run_audio_worker(
                 }
                 PlayerCommand::Play => {
                     let Some(data) = playback.as_ref() else {
+                        is_playing.store(false, Ordering::Release);
                         continue;
                     };
-                    let _ = msg_sender.unbounded_send(PlayerMsg::PlayingStored);
-                    if sink.empty() {
+                    let exhausted = playback_exhausted(
+                        play_offset,
+                        data.total_frames,
+                        data.channels as usize,
+                        data.samples.len(),
+                    );
+                    if sink.empty() || exhausted {
+                        if exhausted {
+                            play_offset = 0.0;
+                            if let Some(position) = &playback_position {
+                                position.reset();
+                            }
+                        }
+                        if !sink.empty() {
+                            sink.clear();
+                        }
                         append_playback(
                             &sink,
                             data,
@@ -923,27 +1015,26 @@ fn run_audio_worker(
                         );
                     }
                     sink.play();
-                    is_playing.store(true, Ordering::SeqCst);
+                    is_playing.store(true, Ordering::Release);
                 }
                 PlayerCommand::Pause => {
                     if let Some(position) = &playback_position {
                         play_offset = position.progress();
                     }
-                    let _ = msg_sender.unbounded_send(PlayerMsg::PlayingStored);
                     sink.pause();
-                    is_playing.store(false, Ordering::SeqCst);
+                    is_playing.store(false, Ordering::Release);
                 }
                 PlayerCommand::Stop => {
                     play_offset = 0.0;
                     if let Some(position) = &playback_position {
                         position.reset();
                     }
-                    let _ = msg_sender.unbounded_send(PlayerMsg::PlayingStored);
                     sink.clear();
-                    is_playing.store(false, Ordering::SeqCst);
+                    is_playing.store(false, Ordering::Release);
                 }
                 PlayerCommand::Seek(p, resume) => {
                     let Some(data) = playback.as_ref() else {
+                        is_playing.store(false, Ordering::Release);
                         continue;
                     };
                     play_offset = p.clamp(0.0, 1.0);
@@ -952,7 +1043,6 @@ fn run_audio_worker(
                             (play_offset * data.total_frames as f64).round() as u64;
                         position.set_frame(frame);
                     }
-                    let _ = msg_sender.unbounded_send(PlayerMsg::PlayingStored);
                     sink.clear();
                     append_playback(
                         &sink,
@@ -966,7 +1056,7 @@ fn run_audio_worker(
                     } else {
                         sink.pause();
                     }
-                    is_playing.store(resume, Ordering::SeqCst);
+                    is_playing.store(resume, Ordering::Release);
                 }
                 PlayerCommand::SetVolume(next) => {
                     sink.set_volume(clamp_volume(next));
@@ -974,6 +1064,17 @@ fn run_audio_worker(
             }
         }
     });
+}
+
+fn playback_exhausted(offset: f64, total_frames: u64, channels: usize, sample_len: usize) -> bool {
+    if !offset.is_finite() || offset >= 1.0 {
+        return true;
+    }
+    if channels == 0 || total_frames == 0 || sample_len == 0 {
+        return true;
+    }
+    let skip_frames = (offset.clamp(0.0, 1.0) * total_frames as f64).round() as usize;
+    skip_frames.saturating_mul(channels) >= sample_len
 }
 
 fn append_playback(
@@ -1063,4 +1164,40 @@ fn load_audio(path: &Path) -> Result<LoadedAudio, String> {
             total_frames,
         },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn play_from_start_when_offset_at_end() {
+        assert!(playback_exhausted(1.0, 100, 2, 200));
+        assert!(playback_exhausted(f64::NAN, 100, 2, 200));
+        assert!(!playback_exhausted(0.0, 100, 2, 200));
+        assert!(!playback_exhausted(0.5, 100, 2, 200));
+    }
+
+    #[test]
+    fn play_from_start_when_skip_consumes_all_samples() {
+        assert!(playback_exhausted(0.999, 100, 2, 200));
+        assert!(!playback_exhausted(0.99, 100, 2, 200));
+    }
+
+    #[test]
+    fn ended_position_reports_full_progress() {
+        let position = PlaybackPosition::new(44100);
+        position.set_frame(position.total_frames());
+        assert_eq!(position.progress(), 1.0);
+    }
+
+    #[test]
+    fn toggle_loop_flips_flag() {
+        let mut player = Player::new(1.0, false);
+        assert!(!player.controls.looping);
+        player.toggle_loop();
+        assert!(player.controls.looping);
+        player.toggle_loop();
+        assert!(!player.controls.looping);
+    }
 }

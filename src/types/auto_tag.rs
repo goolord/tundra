@@ -1,4 +1,5 @@
 use super::common::{truncate_path, Message};
+use crate::metadata::auto_tag_already_complete_message;
 use crate::auto_tag::ClassificationResult;
 use iced::widget::{button, container, row, text, Column, Space};
 use iced::widget::button::{Status as ButtonStatus, Style as ButtonStyle};
@@ -38,10 +39,6 @@ impl AutoTagState {
     pub fn set_error(&mut self, message: impl Into<String>) {
         self.error = Some(message.into());
         self.error_details = None;
-    }
-
-    pub fn is_untagged(&self) -> bool {
-        self.existing_instrument.as_ref().is_none_or(|value| value.trim().is_empty())
     }
 
     fn has_technical_details(&self) -> bool {
@@ -220,14 +217,20 @@ fn details_disclosure<'a>(state: &'a AutoTagState) -> Element<'a, Message> {
     section.into()
 }
 
-pub fn auto_tag_view<'a>(state: &'a AutoTagState) -> Element<'a, Message> {
-    let untagged = state.is_untagged();
+pub fn auto_tag_view<'a>(
+    state: &'a AutoTagState,
+    path_status: Option<crate::metadata::AutoTagFieldStatus>,
+) -> Element<'a, Message> {
+    let needs_any = path_status.is_some_and(|status| status.needs_any());
+    let needs_new_instrument = path_status.is_some_and(|status| status.needs_instrument);
+    let allows_instrument_work = path_status.is_some_and(|status| status.allows_instrument_work());
+    let can_retag = path_status.is_some_and(|status| status.can_retag_instrument);
 
     let mut body = Column::new()
         .spacing(12)
         .push(text("Auto Tag").size(18))
         .push(
-            text("Suggest an instrument tag for audio files that don't have one yet. Tag search is unchanged.")
+            text("Fill missing tags, or replace instrument labels Tundra wrote earlier. Other metadata is left alone.")
                 .size(13)
                 .width(Length::Fill),
         );
@@ -246,9 +249,25 @@ pub fn auto_tag_view<'a>(state: &'a AutoTagState) -> Element<'a, Message> {
         .unwrap_or("(none)");
     body = body.push(info_panel("Current tag", instrument_label));
 
-    if !untagged && state.target.is_some() {
+    if !needs_any && !allows_instrument_work && state.target.is_some() {
         body = body.push(
-            text("This file is already tagged. Pick another file or use tag search to filter by instrument.")
+            text(auto_tag_already_complete_message())
+                .size(12)
+                .style(|_theme: &Theme| iced::widget::text::Style {
+                    color: Some(Color::from_rgb(0.88, 0.78, 0.52)),
+                }),
+        );
+    } else if !allows_instrument_work && state.target.is_some() {
+        body = body.push(
+            text("Instrument tag already present. Apply to fill any missing artist or comment tags.")
+                .size(12)
+                .style(|_theme: &Theme| iced::widget::text::Style {
+                    color: Some(Color::from_rgb(0.88, 0.78, 0.52)),
+                }),
+        );
+    } else if path_status.is_some_and(|status| status.can_retag_instrument) && state.target.is_some() {
+        body = body.push(
+            text("This file has an older Tundra tag. Detect again to upgrade it.")
                 .size(12)
                 .style(|_theme: &Theme| iced::widget::text::Style {
                     color: Some(Color::from_rgb(0.88, 0.78, 0.52)),
@@ -295,12 +314,16 @@ pub fn auto_tag_view<'a>(state: &'a AutoTagState) -> Element<'a, Message> {
         body = body.push(details_disclosure(state));
     }
 
-    let can_run = state.target.is_some() && untagged && !state.running;
-    let can_apply = state.result.is_some() && untagged && !state.running && !state.applied;
+    let can_run = state.target.is_some() && allows_instrument_work && !state.running;
+    let can_apply = state.target.is_some()
+        && (needs_any || (can_retag && state.result.is_some()))
+        && !state.running
+        && !state.applied
+        && (!needs_new_instrument || state.result.is_some());
 
     if can_apply {
         body = body.push(
-            text("Apply writes the instrument tag permanently. There is no undo. Untagged files may get a new tag container (for example ID3 on WAV).")
+            text("Apply writes missing tags permanently. There is no undo. Files with other metadata keep their existing values.")
                 .size(11)
                 .style(|_theme: &Theme| iced::widget::text::Style {
                     color: Some(Color::from_rgb(0.88, 0.78, 0.52)),

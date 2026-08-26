@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, RwLock};
 use std::time::SystemTime;
 
-const CACHE_FILE: &str = "classify_cache_v2.bin";
+const CACHE_FILE: &str = "classify_cache_v4.bin";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 struct FileStamp {

@@ -24,6 +24,7 @@ fn copy_icons(src_dir: &Path, dst_dir: &Path) -> std::io::Result<()> {
     for name in RESOURCE_FILES {
         let src = src_dir.join(name);
         if src.is_file() {
+            warn_if_lfs_pointer(&src, name);
             fs::copy(&src, dst_dir.join(name))?;
         }
     }
@@ -60,7 +61,45 @@ fn exe_dirs(manifest: &Path) -> Vec<PathBuf> {
     dirs
 }
 
+fn is_release_fast_build() -> bool {
+    std::env::var("OUT_DIR")
+        .ok()
+        .is_some_and(|out| out.replace('\\', "/").contains("/release-fast/"))
+}
+
+fn require_windows_release_static_crt() {
+    if std::env::var("CARGO_CFG_WINDOWS").is_err() {
+        return;
+    }
+    if is_release_fast_build() {
+        return;
+    }
+    if std::env::var("PROFILE").ok().as_deref() != Some("release") {
+        return;
+    }
+    let features = std::env::var("CARGO_CFG_TARGET_FEATURE").unwrap_or_default();
+    if features.split(',').any(|feature| feature.trim() == "crt-static") {
+        return;
+    }
+    panic!(
+        "Windows release builds must link the static CRT. Set RUSTFLAGS=-C target-feature=+crt-static \
+         or use `cargo xtask build --release`."
+    );
+}
+
+fn warn_if_lfs_pointer(path: &Path, name: &str) {
+    let Ok(bytes) = fs::read(path) else {
+        return;
+    };
+    if bytes.starts_with(b"version https://git-lfs.github.com") {
+        println!(
+            "cargo:warning=Resource {name} is a Git LFS pointer; run `git lfs pull` or `cargo xtask setup`"
+        );
+    }
+}
+
 fn main() {
+    require_windows_release_static_crt();
     println!("cargo:rerun-if-changed=resources");
     println!("cargo:rerun-if-changed=resources/models");
     println!("cargo:rerun-if-changed=scripts");
