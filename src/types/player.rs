@@ -10,12 +10,13 @@ use futures::executor::block_on;
 use futures::StreamExt;
 use iced::widget::button::{Status as ButtonStatus, Style as ButtonStyle};
 use iced::widget::slider::{Handle, HandleShape, Rail, Status as SliderStatus, Style as SliderStyle};
+use iced::widget::scrollable::{Direction, Scrollbar};
 use iced::widget::{
-    button, container, mouse_area, row, text, Button, Canvas, Column, Container, Slider,
-    Space, Svg,
+    button, container, mouse_area, row, scrollable, text, Button, Canvas, Column, Container, Row,
+    Slider, Space, Svg,
 };
-use iced::widget::text::Wrapping;
 use iced::{Alignment, Border, Color, Element, Length, Shadow, Theme, theme};
+use crate::metadata::TagField;
 use iced_aw::ContextMenu;
 use std::path::PathBuf;
 use rodio::Source;
@@ -120,6 +121,82 @@ fn zoom_button(label: &'static str, message: Message) -> Button<'static, Message
         .on_press(message)
         .style(zoom_button_style)
 }
+
+fn tag_chip_accent(field: TagField) -> Color {
+    match field {
+        TagField::Instrument => Color::from_rgb8(0x52, 0xa8, 0x86),
+        TagField::Bpm => Color::from_rgb8(0xc8, 0x72, 0x48),
+        TagField::Key => Color::from_rgb8(0x9a, 0x68, 0xc0),
+        TagField::Genre => Color::from_rgb8(0x48, 0x96, 0xc8),
+        _ => Color::from_rgb8(0x50, 0x7a, 0xe0),
+    }
+}
+
+fn toolbar_tag_chip(field: TagField, value: String) -> Element<'static, Message> {
+    let accent = tag_chip_accent(field);
+    container(
+        row![
+            text(field.label())
+                .size(9)
+                .font(iced::Font {
+                    weight: iced::font::Weight::Semibold,
+                    ..iced::Font::default()
+                })
+                .style(move |_theme: &Theme| iced::widget::text::Style {
+                    color: Some(accent.scale_alpha(0.88)),
+                }),
+            text(value)
+                .size(11)
+                .font(iced::Font {
+                    weight: iced::font::Weight::Medium,
+                    ..iced::Font::default()
+                })
+                .style(|theme: &Theme| iced::widget::text::Style {
+                    color: Some(theme.extended_palette().background.base.text.scale_alpha(0.92)),
+                }),
+        ]
+        .spacing(4)
+        .align_y(Alignment::Center),
+    )
+    .padding([3, 8])
+    .style(move |theme| {
+        let palette = theme.extended_palette();
+        container::Style {
+            background: Some(accent.scale_alpha(0.12).into()),
+            border: Border {
+                radius: 6.0.into(),
+                width: 1.0,
+                color: accent.scale_alpha(0.28),
+            },
+            text_color: Some(palette.background.base.text),
+            ..Default::default()
+        }
+    })
+    .into()
+}
+
+const TOOLBAR_TAG_STRIP_MAX: f32 = 340.0;
+
+fn toolbar_tags(tags: Vec<(TagField, String)>) -> Element<'static, Message> {
+    let chips: Vec<Element<Message>> = tags
+        .into_iter()
+        .map(|(field, value)| toolbar_tag_chip(field, value))
+        .collect();
+    let row = Row::with_children(chips)
+        .spacing(6)
+        .align_y(Alignment::Center)
+        .padding([0, 2]);
+    container(
+        scrollable(row)
+            .direction(Direction::Horizontal(Scrollbar::new().width(3).scroller_width(3)))
+            .width(Length::Fill),
+    )
+    .width(Length::Fill)
+    .max_width(TOOLBAR_TAG_STRIP_MAX)
+    .align_x(iced::alignment::Horizontal::Right)
+    .into()
+}
+
 
 fn controls_panel_style(theme: &Theme) -> container::Style {
     let palette = theme.extended_palette();
@@ -599,34 +676,11 @@ impl Controls {
         }
     }
 
-    pub fn view(&self, track_name: Option<&str>, track_path: Option<&Path>, tag_summary: Option<String>) -> Element<'_, Message> {
+    pub fn view(&self, track_name: Option<&str>, track_path: Option<&Path>) -> Element<'_, Message> {
         let transport = self.transport_cluster();
         let footer: Element<Message> = if let (Some(name), Some(path)) = (track_name, track_path) {
-            let track_label: Element<Message> = if let Some(tags) = tag_summary {
-                Column::new()
-                    .push(track_name_label(name.to_owned(), path.to_path_buf()))
-                    .push(
-                        text(tags)
-                            .size(11)
-                            .wrapping(Wrapping::Word)
-                            .style(|theme: &Theme| iced::widget::text::Style {
-                                color: Some(
-                                    theme
-                                        .extended_palette()
-                                        .background
-                                        .base
-                                        .text
-                                        .scale_alpha(0.72),
-                                ),
-                            }),
-                    )
-                    .spacing(2)
-                    .into()
-            } else {
-                track_name_label(name.to_owned(), path.to_path_buf())
-            };
             row![
-                container(track_label)
+                container(track_name_label(name.to_owned(), path.to_path_buf()))
                     .width(Length::FillPortion(2))
                     .height(Length::Shrink),
                 self.volume_control(),
@@ -719,37 +773,27 @@ impl Player {
         }
     }
 
-    pub fn view(&self, tag_summary: Option<String>) -> Container<'_, Message> {
+    pub fn view(&self, tags: Vec<(TagField, String)>) -> Container<'_, Message> {
         let mut column = Column::new()
             .width(Length::Fill)
             .height(Length::Fill);
 
         if let Some(wf) = &self.waveform {
             let zoom = wf.view_state().zoom;
-            let toolbar = container(
-                row![
-                    zoom_label_badge(zoom),
-                    zoom_button("−", Message::WaveformZoomOut),
-                    zoom_button("+", Message::WaveformZoomIn),
-                    Space::new().width(Length::Fill),
-                    text("Click to seek. Scroll to zoom. Shift+scroll or drag to pan.")
-                        .size(11)
-                        .wrapping(Wrapping::None)
-                        .style(|theme: &Theme| text::Style {
-                            color: Some(
-                                theme
-                                    .extended_palette()
-                                    .background
-                                    .base
-                                    .text
-                                    .scale_alpha(0.62),
-                            ),
-                        }),
-                ]
-                .spacing(8)
-                .align_y(iced::Alignment::Center)
-                .padding([6, 10]),
-            )
+            let mut bar = row![
+                zoom_label_badge(zoom),
+                zoom_button("−", Message::WaveformZoomOut),
+                zoom_button("+", Message::WaveformZoomIn),
+                zoom_button("?", Message::WaveformHelp),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center)
+            .padding([6, 10]);
+            bar = bar.push(Space::new().width(Length::Fill));
+            if !tags.is_empty() {
+                bar = bar.push(toolbar_tags(tags));
+            }
+            let toolbar = container(bar)
             .width(Length::Fill)
             .style(waveform_toolbar_style);
 
@@ -794,7 +838,6 @@ impl Player {
             &self.controls,
             track_name.as_deref(),
             self.current_file.as_deref(),
-            tag_summary,
         ));
         Container::new(column)
             .width(Length::Fill)
