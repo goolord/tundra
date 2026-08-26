@@ -3,6 +3,7 @@ use futures::future::Aborted;
 use crate::metadata::SearchResult;
 use iced::widget::button::{Status as ButtonStatus, Style as ButtonStyle};
 use iced::widget::{button, column, text, Button};
+use iced::window::Direction;
 use iced::{Border, Element, Length, Padding, Shadow, Theme, theme};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -66,7 +67,8 @@ impl Dialog {
             title: "Waveform controls".into(),
             body: "Hover the waveform for +/− and arrow keys.".into(),
             rows: vec![
-                ("Click".into(), "Seek".into()),
+                ("Drag".into(), "Seek".into()),
+                ("Ctrl+drag".into(), "Drag file".into()),
                 ("Scroll".into(), "Zoom".into()),
                 ("Shift+scroll".into(), "Pan".into()),
                 ("Shift+drag".into(), "Pan".into()),
@@ -83,6 +85,14 @@ impl Dialog {
             body,
             rows: Vec::new(),
         }
+    }
+}
+
+/// Window / title-bar label: `Tundra` or `Tundra - {filename}`.
+pub fn window_title(active_file: Option<&str>) -> String {
+    match active_file {
+        Some(name) => format!("Tundra - {name}"),
+        None => "Tundra".into(),
     }
 }
 
@@ -115,11 +125,12 @@ pub enum Message {
     ),
     InsertDircache((PathBuf, Vec<PathBuf>)),
     InvalidateDircache,
-    Seek(f64),
-    SeekCommit,
     VolumeChanged(f32),
     VolumeCommit,
-    WaveformSeek(f64),
+    WaveformScrub(f64),
+    WaveformScrubEnd(f64),
+    WaveformScrubRelease,
+    WaveformFileDragStart,
     SidebarResizeStart,
     SidebarResizeMove(f32),
     SidebarResizeEnd,
@@ -234,6 +245,15 @@ pub enum Message {
     },
     /// Open a file or folder passed in from the OS (argv, Open With, etc.).
     OpenLaunchPath(PathBuf),
+    WindowTitleBarPress,
+    WindowTitleBarRelease,
+    WindowMinimize,
+    WindowToggleMaximize,
+    WindowMaximizedChanged(bool),
+    SyncWindowMaximized,
+    WindowResize(Direction),
+    /// Enables iced button hover styling where the bar handles clicks itself.
+    NoOp,
 }
 
 pub fn is_audio(path: &Path) -> bool {

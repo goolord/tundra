@@ -28,6 +28,7 @@ const AMPLITUDE_TICKS: [f32; 5] = [1.0, 0.5, 0.0, -0.5, -1.0];
 const MAX_OVERSCROLL: f32 = 0.14;
 const OVERSCROLL_SPRING: f32 = 0.78;
 const OVERSCROLL_STOP: f32 = 0.002;
+const FILE_DRAG_THRESHOLD: f32 = 8.0;
 const WHEEL_ZOOM_TAIL: f32 = 0.01;
 const WHEEL_ZOOM_MAX: f32 = 0.6;
 const WHEEL_SCROLL_PIXELS_PER_LINE: f32 = 28.0;
@@ -324,6 +325,10 @@ pub struct WaveFormState {
     pan_anchor: Option<PanAnchor>,
     last_pan_view: Option<WaveFormView>,
     last_pan_x: Option<f32>,
+    scrub_active: bool,
+    last_scrub_progress: f64,
+    file_drag_armed: bool,
+    file_drag_origin: Option<Point>,
     wheel_lines: f32,
     tracked_samples: usize,
 }
@@ -340,6 +345,7 @@ pub struct WaveForm {
     sample_rate: u32,
     playback_position: Option<Arc<PlaybackPosition>>,
     scrub_progress: Option<f64>,
+    ui_scrubbing: Cell<bool>,
     modifiers: Modifiers,
     pan_active: bool,
     cache: Cache,
@@ -427,6 +433,7 @@ impl WaveForm {
             sample_rate: 0,
             playback_position: None,
             scrub_progress: None,
+            ui_scrubbing: Cell::new(false),
             modifiers: Modifiers::default(),
             pan_active: false,
             cache: Cache::new(),
@@ -454,6 +461,10 @@ impl WaveForm {
         if self.scrub_progress != progress {
             self.scrub_progress = progress;
         }
+    }
+
+    pub fn set_ui_scrubbing(&self, scrubbing: bool) {
+        self.ui_scrubbing.set(scrubbing);
     }
 
     pub fn set_modifiers(&mut self, modifiers: Modifiers) {
@@ -1252,6 +1263,24 @@ impl Program<Message> for WaveForm {
             state.wheel_lines = 0.0;
         }
 
+        if !self.ui_scrubbing.get() && state.scrub_active {
+            state.scrub_active = false;
+        }
+
+        if let Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) = event {
+            state.file_drag_armed = false;
+            state.file_drag_origin = None;
+        }
+
+        if let Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) = event
+            && state.scrub_active
+        {
+            state.scrub_active = false;
+            return Some(
+                Action::publish(Message::WaveformScrubEnd(state.last_scrub_progress)).and_capture(),
+            );
+        }
+
         if let Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) = event
             && state.pan_anchor.is_some()
         {
@@ -1267,6 +1296,11 @@ impl Program<Message> for WaveForm {
             && cursor.is_over(bounds)
             && let Some(position) = cursor.position_in(bounds)
         {
+            if self.modifiers.control() {
+                state.file_drag_armed = true;
+                state.file_drag_origin = Some(position);
+                return Some(Action::capture());
+            }
             if self.modifiers.shift() {
                 state.pan_anchor = Some(PanAnchor {
                     view_offset: self.view.offset,
@@ -1275,13 +1309,43 @@ impl Program<Message> for WaveForm {
                 state.last_pan_x = Some(position.x);
                 state.last_pan_view = None;
                 return Some(Action::publish(Message::WaveformPanStarted).and_capture());
-            } else if let Some(progress) = self.progress_at_x(
+            }
+            if let Some(progress) = self.progress_at_x(
                 state.last_pan_view.unwrap_or(self.view),
                 PlotArea::from_size(bounds.size()),
                 position.x,
             ) {
-                return Some(Action::publish(Message::WaveformSeek(progress)).and_capture());
+                state.scrub_active = true;
+                state.last_scrub_progress = progress;
+                return Some(Action::publish(Message::WaveformScrub(progress)).and_capture());
             }
+        }
+
+        if state.file_drag_armed
+            && let Event::Mouse(mouse::Event::CursorMoved { .. }) = event
+            && let Some(position) = cursor.position_in(bounds)
+            && let Some(origin) = state.file_drag_origin
+        {
+            let dx = position.x - origin.x;
+            let dy = position.y - origin.y;
+            if dx * dx + dy * dy >= FILE_DRAG_THRESHOLD * FILE_DRAG_THRESHOLD {
+                state.file_drag_armed = false;
+                state.file_drag_origin = None;
+                return Some(Action::publish(Message::WaveformFileDragStart).and_capture());
+            }
+        }
+
+        if state.scrub_active
+            && let Event::Mouse(mouse::Event::CursorMoved { .. }) = event
+            && let Some(position) = cursor.position_in(bounds)
+            && let Some(progress) = self.progress_at_x(
+                state.last_pan_view.unwrap_or(self.view),
+                PlotArea::from_size(bounds.size()),
+                position.x,
+            )
+        {
+            state.last_scrub_progress = progress;
+            return Some(Action::publish(Message::WaveformScrub(progress)).and_capture());
         }
 
         if state.pan_anchor.is_some()
@@ -1322,8 +1386,14 @@ impl Program<Message> for WaveForm {
         cursor: Cursor,
     ) -> iced::mouse::Interaction {
         if cursor.is_over(bounds) {
+            if state.scrub_active {
+                return iced::mouse::Interaction::Pointer;
+            }
             if state.pan_anchor.is_some() {
                 return iced::mouse::Interaction::Grabbing;
+            }
+            if self.modifiers.control() {
+                return iced::mouse::Interaction::Grab;
             }
             if self.modifiers.shift() {
                 return iced::mouse::Interaction::Grab;
