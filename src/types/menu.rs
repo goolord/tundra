@@ -1,4 +1,4 @@
-use iced::widget::{button, container, text};
+use iced::widget::{button, container, row, text};
 use iced::{Border, Element, Length, Padding, Shadow, alignment, theme};
 use iced_aw::menu::{self, Menu};
 use iced_aw::style::{Status, menu_bar::primary};
@@ -14,8 +14,8 @@ impl MainMenu {
         MainMenu {}
     }
 
-    pub fn view(&self) -> Element<'_, Message> {
-        let bar = menu_bar_widget();
+    pub fn view(&self, always_on_top: bool) -> Element<'_, Message> {
+        let bar = menu_bar_widget(always_on_top);
 
         container(bar)
             .width(Length::Fill)
@@ -37,7 +37,7 @@ impl MainMenu {
     }
 }
 
-fn menu_bar_widget<'a>() -> Element<'a, Message> {
+fn menu_bar_widget<'a>(always_on_top: bool) -> Element<'a, Message> {
     let menu_tpl = |items| {
         Menu::new(items)
             .width(220.0)
@@ -57,6 +57,13 @@ fn menu_bar_widget<'a>() -> Element<'a, Message> {
             (menu_item("Bulk Auto Tag…", Message::OpenBulkAutoTag)),
             (menu_item("Invalidate Cache", Message::InvalidateDircache)),
             (menu_item("Quit", Message::Quit)),
+        ))),
+        (menu_root("View"), menu_tpl(menu_items!(
+            (menu_toggle_item(
+                "Always On Top",
+                always_on_top,
+                Message::SetAlwaysOnTop(!always_on_top),
+            )),
         ))),
         (menu_root("Help"), menu_tpl(menu_items!(
             (menu_item("About Tundra", Message::About)),
@@ -118,6 +125,32 @@ fn flat_button_style(theme: &theme::Theme, status: ButtonStatus) -> ButtonStyle 
         ButtonStatus::Hovered => base.with_background(palette.primary.weak.color.scale_alpha(0.35)),
         ButtonStatus::Pressed => base.with_background(palette.primary.weak.color.scale_alpha(0.55)),
     }
+}
+
+fn menu_toggle_item<'a>(
+    label: &'a str,
+    checked: bool,
+    message: Message,
+) -> button::Button<'a, Message> {
+    let mark = if checked { "x" } else { " " };
+    button(
+        row![
+            text(mark)
+                .size(14)
+                .width(Length::Fixed(14.0))
+                .align_x(alignment::Horizontal::Center),
+            text(label)
+                .size(14)
+                .width(Length::Fill)
+                .align_y(alignment::Vertical::Center),
+        ]
+        .spacing(6)
+        .align_y(alignment::Vertical::Center),
+    )
+    .width(Length::Fill)
+    .padding([4, 12])
+    .style(flat_button_style)
+    .on_press(message)
 }
 
 fn menu_item<'a>(label: &'a str, message: Message) -> button::Button<'a, Message> {

@@ -18,7 +18,15 @@ const ROW_HEIGHT: f32 = 36.0;
 const SELECTION_STRIPE_WIDTH: f32 = 3.0;
 const CHECKBOX_COLUMN_WIDTH: f32 = 28.0;
 const EXPAND_TOGGLE_WIDTH: f32 = 32.0;
-const EXPAND_TOGGLE_MARGIN: f32 = 3.0;
+
+fn list_row(content: Element<'static, Message>) -> Element<'static, Message> {
+    Row::new()
+        .align_y(Alignment::Center)
+        .height(Length::Fixed(ROW_HEIGHT))
+        .push(content)
+        .width(Length::Fill)
+        .into()
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BulkFileKey {
@@ -40,7 +48,7 @@ pub struct BulkAutoTagState {
     pub phase: Option<BulkAutoTagPhase>,
     pub root: Option<PathBuf>,
     pub groups: Vec<BulkDirGroup>,
-    pub skipped_tagged: usize,
+    pub skipped_complete: usize,
     pub failed: usize,
     pub status: String,
     pub error: Option<String>,
@@ -279,14 +287,14 @@ impl BulkAutoTagState {
         self.progress_detail = snapshot.detail();
     }
 
-    pub fn set_no_untagged_files(&mut self, root: PathBuf, skipped_tagged: usize) {
+    pub fn set_scan_all_complete(&mut self, root: PathBuf, skipped_complete: usize) {
         self.root = Some(root);
-        self.skipped_tagged = skipped_tagged;
+        self.skipped_complete = skipped_complete;
         self.phase = Some(BulkAutoTagPhase::PickDirectory);
-        self.status = if skipped_tagged > 0 {
-            format!("No untagged audio files found ({skipped_tagged} already tagged).")
+        self.status = if skipped_complete > 0 {
+            format!("No files need auto tags ({skipped_complete} already complete).")
         } else {
-            "No untagged audio files found.".into()
+            "No files need auto tags.".into()
         };
         self.error = None;
         self.groups.clear();
@@ -298,7 +306,7 @@ impl BulkAutoTagState {
     pub fn finish_scan(&mut self, summary: BulkScanSummary) {
         self.root = Some(summary.root);
         self.groups = summary.groups;
-        self.skipped_tagged = summary.skipped_tagged;
+        self.skipped_complete = summary.skipped_complete;
         self.failed = summary.failed;
         self.apply_summary = None;
         self.error = None;
@@ -653,32 +661,19 @@ fn expand_toggle_button_style(theme: &theme::Theme, status: ButtonStatus, expand
 
 fn expand_toggle_button(expanded: bool, dir_idx: usize) -> Element<'static, Message> {
     let chevron = if expanded { "▾" } else { "▸" };
-    container(
-        button(
-            container(
-                text(chevron)
-                    .size(17)
-                    .font(iced::Font {
-                        weight: iced::font::Weight::Semibold,
-                        ..iced::Font::default()
-                    }),
-            )
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .align_x(iced::alignment::Horizontal::Center)
-            .align_y(Alignment::Center),
-        )
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .padding(0)
-        .on_press(Message::BulkAutoTagToggleDirectoryExpanded(dir_idx))
-        .style(move |theme, status| expand_toggle_button_style(theme, status, expanded)),
+    button(
+        text(chevron)
+            .size(17)
+            .font(iced::Font {
+                weight: iced::font::Weight::Semibold,
+                ..iced::Font::default()
+            }),
     )
     .width(Length::Fixed(EXPAND_TOGGLE_WIDTH))
     .height(Length::Fixed(ROW_HEIGHT))
-    .padding(EXPAND_TOGGLE_MARGIN)
-    .align_x(iced::alignment::Horizontal::Center)
-    .align_y(Alignment::Center)
+    .padding(0)
+    .on_press(Message::BulkAutoTagToggleDirectoryExpanded(dir_idx))
+    .style(move |theme, status| expand_toggle_button_style(theme, status, expanded))
     .into()
 }
 
@@ -751,7 +746,9 @@ fn table_header() -> Element<'static, Message> {
         .align_y(Alignment::Center)
         .width(Length::Fill),
     )
-    .padding([8, 10])
+    .height(Length::Fixed(ROW_HEIGHT))
+    .align_y(Alignment::Center)
+    .padding([0, 10])
     .width(Length::Fill)
     .style(|theme: &Theme| {
         let palette = theme.extended_palette();
@@ -799,43 +796,53 @@ fn file_row(
     let control = modifiers.control() || modifiers.logo();
 
     if let Some(error) = file.error.clone() {
-        return container(
-            row![
-                Space::new().width(Length::Fixed(FILE_INDENT)),
-                Space::new().width(Length::Fixed(3.0)),
-                text("✕").size(11).style(|_theme: &Theme| iced::widget::text::Style {
-                    color: Some(Color::from_rgb(0.95, 0.62, 0.62)),
-                }),
-                text(name).size(11).width(Length::Fill),
-                text(error).size(10).style(|theme: &Theme| iced::widget::text::Style {
-                    color: Some(muted_text(theme)),
-                }),
-            ]
-            .spacing(8)
-            .align_y(Alignment::Center)
-            .width(Length::Fill),
+        return list_row(
+            Row::new()
+                .align_y(Alignment::Center)
+                .height(Length::Fixed(ROW_HEIGHT))
+                .push(Space::new().width(Length::Fixed(FILE_INDENT)))
+                .push(
+                    container(
+                        row![
+                            text("✕").size(11).style(|_theme: &Theme| iced::widget::text::Style {
+                                color: Some(Color::from_rgb(0.95, 0.62, 0.62)),
+                            }),
+                            text(name).size(11).width(Length::Fill),
+                            text(error).size(10).style(|theme: &Theme| iced::widget::text::Style {
+                                color: Some(muted_text(theme)),
+                            }),
+                        ]
+                        .spacing(8)
+                        .align_y(Alignment::Center)
+                        .width(Length::Fill),
+                    )
+                    .width(Length::Fill)
+                    .height(Length::Fixed(ROW_HEIGHT))
+                    .align_y(Alignment::Center)
+                    .padding([0, 10])
+                    .style(move |theme: &Theme| {
+                        let palette = theme.extended_palette();
+                        container::Style {
+                            background: Some(
+                                if zebra {
+                                    Color::from_rgb8(0xff, 0x66, 0x66).scale_alpha(0.06)
+                                } else {
+                                    Color::from_rgb8(0xff, 0x66, 0x66).scale_alpha(0.08)
+                                }
+                                .into(),
+                            ),
+                            border: Border {
+                                radius: 0.0.into(),
+                                width: 1.0,
+                                color: palette.background.strong.color.scale_alpha(0.10),
+                            },
+                            ..Default::default()
+                        }
+                    }),
+                )
+                .width(Length::Fill)
+                .into(),
         )
-        .padding([6, 10])
-        .width(Length::Fill)
-        .style(move |theme: &Theme| {
-            let palette = theme.extended_palette();
-            container::Style {
-                background: Some(
-                    if zebra {
-                        Color::from_rgb8(0xff, 0x66, 0x66).scale_alpha(0.06)
-                    } else {
-                        Color::from_rgb8(0xff, 0x66, 0x66).scale_alpha(0.08)
-                    }
-                    .into(),
-                ),
-                border: Border {
-                    radius: 0.0.into(),
-                    width: 1.0,
-                    color: palette.background.strong.color.scale_alpha(0.10),
-                },
-                ..Default::default()
-            }
-        })
         .into();
     }
 
@@ -878,36 +885,34 @@ fn file_row(
     .align_y(Alignment::Center)
     .width(Length::Fill);
 
-    container(
-        row![
-            Space::new().width(Length::Fixed(FILE_INDENT)),
-            Row::new()
-                .align_y(Alignment::Center)
-                .height(Length::Fixed(ROW_HEIGHT))
-                .push(selection_stripe(selected))
-                .push(checkbox_cell(
-                    checkbox(accepted)
-                        .on_toggle(move |checked| Message::BulkAutoTagSetFileAccepted {
-                            dir_idx,
-                            file_idx,
-                            accepted: checked,
-                        })
-                        .into(),
-                ))
-                .push(
-                    Button::new(label_row)
-                        .width(Length::Fill)
-                        .padding([7, 10])
-                        .on_press(select_message)
-                        .style(move |theme, status| {
-                            list_row_button_style(theme, status, selected, accepted, zebra)
-                        }),
-                )
-                .width(Length::Fill),
-        ]
-        .width(Length::Fill),
+    list_row(
+        Row::new()
+            .align_y(Alignment::Center)
+            .height(Length::Fixed(ROW_HEIGHT))
+            .push(Space::new().width(Length::Fixed(FILE_INDENT)))
+            .push(selection_stripe(selected))
+            .push(checkbox_cell(
+                checkbox(accepted)
+                    .on_toggle(move |checked| Message::BulkAutoTagSetFileAccepted {
+                        dir_idx,
+                        file_idx,
+                        accepted: checked,
+                    })
+                    .into(),
+            ))
+            .push(
+                Button::new(label_row)
+                    .width(Length::Fill)
+                    .height(Length::Fixed(ROW_HEIGHT))
+                    .padding([0, 10])
+                    .on_press(select_message)
+                    .style(move |theme, status| {
+                        list_row_button_style(theme, status, selected, accepted, zebra)
+                    }),
+            )
+            .width(Length::Fill)
+            .into(),
     )
-    .width(Length::Fill)
     .into()
 }
 
@@ -933,51 +938,55 @@ fn directory_group(
     let control = modifiers.control() || modifiers.logo();
 
     let header = container(
-        Row::new()
-            .align_y(Alignment::Center)
-            .height(Length::Fixed(ROW_HEIGHT))
-            .push(selection_stripe(dir_selected))
-            .push(expand_toggle_button(expanded, dir_idx))
-            .push(
-                Button::new(
-                    row![
-                        Svg::from_path(resource_path("folder-solid.svg"))
-                            .width(Length::Fixed(14.0))
-                            .height(Length::Fixed(14.0))
-                            .style(move |theme, _status| iced::widget::svg::Style {
-                                color: Some(if dir_selected || accepted > 0 {
-                                    TUNDRA_ACCENT.scale_alpha(0.95)
-                                } else {
-                                    muted_text(theme)
+        list_row(
+            Row::new()
+                .align_y(Alignment::Center)
+                .height(Length::Fixed(ROW_HEIGHT))
+                .push(selection_stripe(dir_selected))
+                .push(expand_toggle_button(expanded, dir_idx))
+                .push(
+                    Button::new(
+                        row![
+                            Svg::from_path(resource_path("folder-solid.svg"))
+                                .width(Length::Fixed(14.0))
+                                .height(Length::Fixed(14.0))
+                                .style(move |theme, _status| iced::widget::svg::Style {
+                                    color: Some(if dir_selected || accepted > 0 {
+                                        TUNDRA_ACCENT.scale_alpha(0.95)
+                                    } else {
+                                        muted_text(theme)
+                                    }),
                                 }),
-                            }),
-                        text(label)
-                            .size(12)
-                            .font(iced::Font {
-                                weight: iced::font::Weight::Semibold,
-                                ..iced::Font::default()
-                            })
-                            .width(Length::Fill),
-                        dir_count_badge(accepted, count),
-                    ]
-                    .spacing(8)
-                    .align_y(Alignment::Center)
-                    .width(Length::Fill),
+                            text(label)
+                                .size(12)
+                                .font(iced::Font {
+                                    weight: iced::font::Weight::Semibold,
+                                    ..iced::Font::default()
+                                })
+                                .width(Length::Fill),
+                            dir_count_badge(accepted, count),
+                        ]
+                        .spacing(8)
+                        .align_y(Alignment::Center)
+                        .width(Length::Fill),
+                    )
+                    .width(Length::Fill)
+                    .height(Length::Fixed(ROW_HEIGHT))
+                    .padding([0, 10])
+                    .on_press(Message::BulkAutoTagSelectDirectory {
+                        dir_idx,
+                        shift,
+                        control,
+                    })
+                    .style(move |theme, status| {
+                        list_row_button_style(theme, status, dir_selected, accepted > 0, false)
+                    }),
                 )
                 .width(Length::Fill)
-                .height(Length::Fixed(ROW_HEIGHT))
-                .padding([0, 10])
-                .on_press(Message::BulkAutoTagSelectDirectory {
-                    dir_idx,
-                    shift,
-                    control,
-                })
-                .style(move |theme, status| {
-                    list_row_button_style(theme, status, dir_selected, accepted > 0, false)
-                }),
-            )
-            .width(Length::Fill),
+                .into(),
+        ),
     )
+    .height(Length::Fixed(ROW_HEIGHT))
     .width(Length::Fill)
     .style(move |theme: &Theme| {
         let palette = theme.extended_palette();
@@ -1062,8 +1071,8 @@ fn review_body(state: &BulkAutoTagState, modifiers: Modifiers) -> Element<'stati
             stat_chip("Ready".to_string(), state.actionable_count(), true),
             stat_chip("Checked".to_string(), state.accepted_count(), true),
             stat_chip("Selected".to_string(), state.selected_count(), false),
-            stat_chip("Skipped".to_string(), state.skipped_tagged, false),
-            stat_chip("Failed".to_string(), state.failed, state.failed > 0),
+            stat_chip("Skipped".to_string(), state.skipped_complete, false),
+            stat_chip("Classify failed".to_string(), state.failed, state.failed > 0),
         ]
         .spacing(8)
         .align_y(Alignment::Center),
@@ -1083,6 +1092,11 @@ fn review_body(state: &BulkAutoTagState, modifiers: Modifiers) -> Element<'stati
                     color: Some(muted_text(theme)),
                 })
                 .width(Length::Fill),
+            small_button(
+                "Open folder".to_string(),
+                Message::FileRevealInFileManager(root.clone()),
+                false,
+            ),
         ]
         .spacing(6)
         .align_y(Alignment::Center)
@@ -1197,7 +1211,7 @@ pub fn bulk_auto_tag_view<'a>(
             .width(Length::Fill),
         )
         .push(
-            text("Pick a folder, analyze untagged audio, then review and apply instrument tags.")
+            text("Pick a folder, analyze audio, then review and apply missing instrument, artist, and comment tags.")
                 .size(13)
                 .style(|theme: &Theme| iced::widget::text::Style {
                     color: Some(muted_text(theme)),
@@ -1307,24 +1321,33 @@ pub fn bulk_auto_tag_view<'a>(
             if let Some(summary) = &state.apply_summary {
                 let (message, tone) = if summary.cancelled {
                     (
-                        if summary.applied == 0 {
-                            "Apply stopped. No files were tagged.".to_string()
+                        if summary.written == 0 {
+                            "Apply cancelled. No files were tagged.".to_string()
                         } else {
                             format!(
-                                "Partial apply: {} file{} already tagged. Apply stopped.",
-                                summary.applied,
-                                if summary.applied == 1 { "" } else { "s" }
+                                "Apply cancelled after {} file{}.",
+                                summary.written,
+                                if summary.written == 1 { "" } else { "s" }
                             )
                         },
                         Color::from_rgb(0.88, 0.78, 0.52),
                     )
                 } else {
-                    (
-                        format!(
-                            "Applied {} tags. {} failed.",
-                            summary.applied,
+                    let file_word = if summary.written == 1 { "file" } else { "files" };
+                    let mut message = format!("Wrote tags to {} {file_word}", summary.written);
+                    if summary.unchanged > 0 {
+                        message.push_str(&format!(". {} unchanged", summary.unchanged));
+                    }
+                    if summary.failed.is_empty() {
+                        message.push_str(". Done.");
+                    } else {
+                        message.push_str(&format!(
+                            ". {} failed. See errors below.",
                             summary.failed.len()
-                        ),
+                        ));
+                    }
+                    (
+                        message,
                         Color::from_rgb(0.62, 0.88, 0.68),
                     )
                 };
@@ -1373,6 +1396,33 @@ pub fn bulk_auto_tag_view<'a>(
                             .height(Length::Fixed(120.0)),
                     );
                 }
+            }
+            if let Some(root) = state.root.clone() {
+                let root_label = truncate_path(&root, 64);
+                done = done.push(
+                    row![
+                        Svg::from_path(resource_path("folder-solid.svg"))
+                            .width(Length::Fixed(12.0))
+                            .height(Length::Fixed(12.0))
+                            .style(|_theme, _status| iced::widget::svg::Style {
+                                color: Some(TUNDRA_ACCENT.scale_alpha(0.75)),
+                            }),
+                        text(root_label)
+                            .size(11)
+                            .style(|theme: &Theme| iced::widget::text::Style {
+                                color: Some(muted_text(theme)),
+                            })
+                            .width(Length::Fill),
+                        small_button(
+                            "Open folder".to_string(),
+                            Message::FileRevealInFileManager(root),
+                            false,
+                        ),
+                    ]
+                    .spacing(6)
+                    .align_y(Alignment::Center)
+                    .width(Length::Fill),
+                );
             }
             done.into()
         }

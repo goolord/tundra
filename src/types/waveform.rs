@@ -28,7 +28,8 @@ const MAX_OVERSCROLL: f32 = 0.14;
 const OVERSCROLL_SPRING: f32 = 0.78;
 const OVERSCROLL_STOP: f32 = 0.002;
 const WHEEL_ZOOM_TAIL: f32 = 0.01;
-const WHEEL_ZOOM_MAX: f32 = 0.35;
+const WHEEL_ZOOM_MAX: f32 = 0.6;
+const WHEEL_SCROLL_PIXELS_PER_LINE: f32 = 28.0;
 const EDGE_RUBBER_BAND: f32 = 0.35;
 const WAVEFORM_CORNER_RADIUS: f32 = 8.0;
 
@@ -47,7 +48,7 @@ fn theme_cache_key(theme: &Theme) -> u32 {
 fn scroll_lines(delta: ScrollDelta) -> (f32, f32) {
     match delta {
         ScrollDelta::Lines { x, y } => (x, y),
-        ScrollDelta::Pixels { x, y } => (x / 48.0, y / 48.0),
+        ScrollDelta::Pixels { x, y } => (x / WHEEL_SCROLL_PIXELS_PER_LINE, y / WHEEL_SCROLL_PIXELS_PER_LINE),
     }
 }
 
@@ -1333,7 +1334,7 @@ mod wheel_zoom_tests {
         let mut pending = 0.0;
         let samples = 10_000;
 
-        view.accumulate_wheel(0.55, 0.5, samples, &mut pending);
+        view.accumulate_wheel(0.75, 0.5, samples, &mut pending);
         let zoom_before = view.zoom;
         assert!(
             pending > 0.0,

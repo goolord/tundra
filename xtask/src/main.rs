@@ -216,22 +216,42 @@ fn setup_classifiers(skip_dl: bool) -> Result<()> {
     Ok(())
 }
 
-fn cargo_build(release: bool) -> Result<()> {
+fn apply_release_link_flags(cmd: &mut Command) {
+    if cfg!(windows) {
+        const FLAG: &str = "-C target-feature=+crt-static";
+        let flags = match std::env::var("RUSTFLAGS") {
+            Ok(existing) if !existing.trim().is_empty() => format!("{existing} {FLAG}"),
+            _ => FLAG.to_string(),
+        };
+        cmd.env("RUSTFLAGS", flags);
+    }
+}
+
+fn cargo_build_command(release: bool) -> Command {
     let mut cmd = Command::new("cargo");
     cmd.arg("build").current_dir(project_root());
     if release {
         cmd.arg("--release");
+        apply_release_link_flags(&mut cmd);
     }
-    run_command(&mut cmd, "cargo build")
+    cmd
 }
 
-fn cargo_run(release: bool) -> Result<()> {
+fn cargo_run_command(release: bool) -> Command {
     let mut cmd = Command::new("cargo");
     cmd.arg("run").current_dir(project_root());
     if release {
-        cmd.arg("--release");
+        cmd.args(["--profile", "release-fast"]);
     }
-    run_command(&mut cmd, "cargo run")
+    cmd
+}
+
+fn cargo_build(release: bool) -> Result<()> {
+    run_command(&mut cargo_build_command(release), "cargo build")
+}
+
+fn cargo_run(release: bool) -> Result<()> {
+    run_command(&mut cargo_run_command(release), "cargo run")
 }
 
 fn ensure_tool(name: &str) -> Result<()> {

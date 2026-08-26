@@ -46,10 +46,12 @@ struct Tier2CliResponse {
 
 const INSTALL_HINT: &str = "Install classifiers with: cargo xtask setup";
 pub const UV_PYTHON: &str = if cfg!(windows) { "3.12" } else { "3.14" };
+/// Matches the bulk-tagger high-confidence badge (>= 85%).
+const HIGH_CLASSIFIER_CONFIDENCE: f64 = 0.85;
 
 /// Single-file path persists cache immediately so manual Auto Tag survives app restarts.
 pub fn classify_file(path: &Path) -> Result<ClassificationResult, ClassifyError> {
-    if let Some(cached) = classify_cache::get_cached(path) {
+    if let Some(cached) = cached_with_path_hint(path) {
         return Ok(cached);
     }
     let result = classify_file_inner(path)?;
@@ -61,8 +63,12 @@ pub fn classify_file_bulk(path: &Path) -> Result<ClassificationResult, ClassifyE
     classify_file_inner(path)
 }
 
+fn cached_with_path_hint(path: &Path) -> Option<ClassificationResult> {
+    classify_cache::get_cached(path).map(|result| with_path_hint(path, result))
+}
+
 fn classify_file_inner(path: &Path) -> Result<ClassificationResult, ClassifyError> {
-    if let Some(cached) = classify_cache::get_cached(path) {
+    if let Some(cached) = cached_with_path_hint(path) {
         return Ok(cached);
     }
 
@@ -87,7 +93,7 @@ fn classify_file_inner(path: &Path) -> Result<ClassificationResult, ClassifyErro
             ),
         };
         classify_cache::store_cached(path, &result);
-        return Ok(result);
+        return Ok(with_path_hint(path, result));
     }
 
     let tier2 = classify_tier2(path, tier1.zcr)?;
@@ -106,7 +112,7 @@ fn classify_file_inner(path: &Path) -> Result<ClassificationResult, ClassifyErro
         ),
     };
     classify_cache::store_cached(path, &result);
-    Ok(result)
+    Ok(with_path_hint(path, result))
 }
 
 fn classify_tier2(
@@ -139,6 +145,72 @@ fn format_confidence(confidence: Option<f64>) -> String {
     confidence
         .map(|value| format!(" ({value:.0}%)", value = value * 100.0))
         .unwrap_or_default()
+}
+
+fn choose_instrument(
+    hint: Option<&str>,
+    classified: &str,
+    confidence: Option<f64>,
+    tier: u8,
+    source: crate::metadata::HintSource,
+) -> (String, bool) {
+    let Some(hint) = hint.filter(|value| !value.is_empty()) else {
+        return (classified.to_string(), false);
+    };
+    if classified.is_empty() {
+        return (hint.to_string(), true);
+    }
+    if crate::metadata::instruments_related(hint, classified) {
+        return (classified.to_string(), false);
+    }
+    if source == crate::metadata::HintSource::Path {
+        return (hint.to_string(), true);
+    }
+    if confidence.is_some_and(|value| value >= HIGH_CLASSIFIER_CONFIDENCE) {
+        return (classified.to_string(), false);
+    }
+    if tier <= 1 {
+        return (classified.to_string(), false);
+    }
+    (hint.to_string(), true)
+}
+
+fn with_path_hint(path: &Path, result: ClassificationResult) -> ClassificationResult {
+    let hint = crate::metadata::instrument_hint(path);
+    let source = hint
+        .as_ref()
+        .map(|(_, source)| *source)
+        .unwrap_or(crate::metadata::HintSource::Path);
+    apply_hint(hint.map(|(label, _)| label), source, result)
+}
+
+fn apply_hint(
+    hint: Option<String>,
+    source: crate::metadata::HintSource,
+    mut result: ClassificationResult,
+) -> ClassificationResult {
+    let classified = result.instrument.clone();
+    let (instrument, used_hint) =
+        choose_instrument(hint.as_deref(), &classified, result.confidence, result.tier, source);
+    if used_hint {
+        result.summary = format!(
+            "{source} · {instrument} · classifier {classified}{confidence} below high-confidence",
+            source = source.label(),
+            confidence = format_confidence(result.confidence),
+        );
+        result.instrument = instrument;
+        result.confidence = None;
+    } else if hint.as_deref().is_some_and(|hint| {
+        hint != classified && !crate::metadata::instruments_related(hint, &classified)
+    }) {
+        result.summary = format!(
+            "{summary} · {source} {hint} overridden",
+            summary = result.summary,
+            source = source.label().to_ascii_lowercase(),
+            hint = hint.unwrap_or_default(),
+        );
+    }
+    result
 }
 
 pub fn scripts_dir() -> PathBuf {
@@ -300,4 +372,93 @@ fn run_tier2_subprocess(path: &Path) -> Result<classifier_pool::Tier2Response, C
 
 pub fn classify_file_blocking(path: PathBuf) -> Result<ClassificationResult, ClassifyError> {
     classify_file(&path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn path_hint_wins_when_classifier_is_not_high_confidence() {
+        let (instrument, used_hint) =
+            choose_instrument(Some("Snare"), "Cymbal", Some(0.74), 2, crate::metadata::HintSource::Tags);
+        assert_eq!(instrument, "Snare");
+        assert!(used_hint);
+    }
+
+    #[test]
+    fn classifier_wins_when_confidence_is_high() {
+        let (instrument, used_hint) =
+            choose_instrument(Some("Snare"), "Cymbal", Some(0.90), 2, crate::metadata::HintSource::Tags);
+        assert_eq!(instrument, "Cymbal");
+        assert!(!used_hint);
+    }
+
+    #[test]
+    fn related_hint_keeps_classifier_label() {
+        let (instrument, used_hint) =
+            choose_instrument(Some("Hat"), "Hi-Hat", Some(0.72), 2, crate::metadata::HintSource::Tags);
+        assert_eq!(instrument, "Hi-Hat");
+        assert!(!used_hint);
+    }
+
+    #[test]
+    fn missing_confidence_uses_path_hint_for_tier2() {
+        let (instrument, used_hint) =
+            choose_instrument(Some("Snare"), "Cymbal", None, 2, crate::metadata::HintSource::Tags);
+        assert_eq!(instrument, "Snare");
+        assert!(used_hint);
+    }
+
+    #[test]
+    fn tier1_without_confidence_keeps_classifier_label_for_tag_hints() {
+        let (instrument, used_hint) =
+            choose_instrument(Some("Snare"), "Cymbal", None, 1, crate::metadata::HintSource::Tags);
+        assert_eq!(instrument, "Cymbal");
+        assert!(!used_hint);
+    }
+
+    #[test]
+    fn path_hint_overrides_tier1_when_folder_names_instrument() {
+        let (instrument, used_hint) =
+            choose_instrument(Some("Percussion"), "Kick", Some(0.90), 1, crate::metadata::HintSource::Path);
+        assert_eq!(instrument, "Percussion");
+        assert!(used_hint);
+    }
+
+    #[test]
+    fn empty_classifier_uses_path_hint() {
+        let (instrument, used_hint) =
+            choose_instrument(Some("Snare"), "", None, 2, crate::metadata::HintSource::Path);
+        assert_eq!(instrument, "Snare");
+        assert!(used_hint);
+    }
+
+    #[test]
+    fn path_hint_overrides_tier1_kick_for_bongo_folder() {
+        let result = ClassificationResult {
+            instrument: "Kick".into(),
+            tier: 1,
+            zcr: Some(0.01),
+            confidence: Some(0.90),
+            summary: "Tier 1 · Kick (90%)".into(),
+        };
+        let result = with_path_hint(Path::new(r"F:\Samples\Bongo\hit_01.wav"), result);
+        assert_eq!(result.instrument, "Percussion");
+        assert!(result.summary.contains("Path hint"));
+    }
+
+    #[test]
+    fn related_hint_does_not_mark_summary_overridden() {
+        let result = ClassificationResult {
+            instrument: "Closed Hat".into(),
+            tier: 1,
+            zcr: Some(0.1),
+            confidence: Some(0.9),
+            summary: "Tier 1 · Closed Hat (90%)".into(),
+        };
+        let result = with_path_hint(Path::new(r"C:\hats\tight_01.wav"), result);
+        assert_eq!(result.instrument, "Closed Hat");
+        assert!(!result.summary.contains("overridden"));
+    }
 }

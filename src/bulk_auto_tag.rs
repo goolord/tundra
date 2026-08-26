@@ -1,5 +1,8 @@
 use crate::auto_tag::{self, ClassificationResult, ClassifyError};
-use crate::metadata::{index_paths, write_instrument_tag_if_untagged, CachedMetadata};
+use crate::metadata::{
+    auto_tag_field_status, auto_tag_field_status_from_fields, index_paths, instrument_tag,
+    write_auto_tags, AutoTagFieldStatus, CachedMetadata,
+};
 use crate::types::is_audio;
 use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
@@ -201,7 +204,7 @@ impl BulkDirGroup {
 pub struct BulkScanSummary {
     pub root: PathBuf,
     pub groups: Vec<BulkDirGroup>,
-    pub skipped_tagged: usize,
+    pub skipped_complete: usize,
     pub failed: usize,
 }
 
@@ -214,16 +217,67 @@ pub fn groups_start_collapsed(dir_count: usize, file_count: usize) -> bool {
 
 #[derive(Debug, Clone)]
 pub struct BulkApplySummary {
-    pub applied: usize,
-    pub applied_paths: Vec<PathBuf>,
+    pub written: usize,
+    pub unchanged: usize,
+    pub written_paths: Vec<PathBuf>,
     pub failed: Vec<(PathBuf, String)>,
     pub cancelled: bool,
 }
 
-fn has_explicit_instrument(path: &Path, metadata: &HashMap<PathBuf, CachedMetadata>) -> bool {
+fn auto_tag_status(path: &Path, metadata: &HashMap<PathBuf, CachedMetadata>) -> Option<AutoTagFieldStatus> {
     metadata
         .get(path)
-        .is_some_and(|cached| !cached.fields.explicit_instrument.is_empty())
+        .map(|cached| auto_tag_field_status_from_fields(path, &cached.fields))
+        .or_else(|| auto_tag_field_status(path))
+}
+
+fn existing_instrument_label(
+    path: &Path,
+    metadata: &HashMap<PathBuf, CachedMetadata>,
+) -> Result<String, ClassifyError> {
+    if let Some(cached) = metadata.get(path) {
+        let label = cached.fields.explicit_instrument.trim();
+        if !label.is_empty() {
+            return Ok(label.to_string());
+        }
+    }
+    instrument_tag(path).ok_or_else(|| {
+        ClassifyError::new(
+            "Could not read existing instrument tag.",
+            "Metadata-only auto tag requires an instrument label in the file.",
+        )
+    })
+}
+
+fn partition_auto_tag_candidates(
+    paths: &[PathBuf],
+    metadata: &HashMap<PathBuf, CachedMetadata>,
+) -> (Vec<PathBuf>, Vec<PathBuf>, usize) {
+    let mut to_classify = Vec::new();
+    let mut metadata_only = Vec::new();
+    let mut skipped_complete = 0usize;
+
+    for path in paths {
+        let Some(status) = auto_tag_status(path, metadata) else {
+            to_classify.push(path.clone());
+            continue;
+        };
+        if !status.needs_any() {
+            if status.can_retag_instrument {
+                to_classify.push(path.clone());
+            } else {
+                skipped_complete += 1;
+            }
+            continue;
+        }
+        if status.needs_instrument {
+            to_classify.push(path.clone());
+        } else {
+            metadata_only.push(path.clone());
+        }
+    }
+
+    (to_classify, metadata_only, skipped_complete)
 }
 
 fn enrich_metadata(
@@ -306,24 +360,6 @@ fn collect_audio_paths(
     Ok(paths)
 }
 
-fn partition_untagged(
-    paths: &[PathBuf],
-    metadata: &HashMap<PathBuf, CachedMetadata>,
-) -> (Vec<PathBuf>, usize) {
-    let mut untagged = Vec::new();
-    let mut skipped_tagged = 0usize;
-
-    for path in paths {
-        if has_explicit_instrument(path, metadata) {
-            skipped_tagged += 1;
-        } else {
-            untagged.push(path.clone());
-        }
-    }
-
-    (untagged, skipped_tagged)
-}
-
 pub fn classify_files_with_progress(
     paths: Vec<PathBuf>,
     progress: &BulkScanProgress,
@@ -383,19 +419,35 @@ pub fn scan_and_classify(
         return Err("Scan cancelled.".into());
     }
     let metadata_map = enrich_metadata(&audio_paths, metadata);
-    let (paths, skipped_tagged) = partition_untagged(&audio_paths, metadata_map.as_ref());
-    let results = if paths.is_empty() {
+    let (to_classify, metadata_only, skipped_complete) =
+        partition_auto_tag_candidates(&audio_paths, metadata_map.as_ref());
+    let mut results = if to_classify.is_empty() {
         Vec::new()
     } else {
-        classify_files_with_progress(paths, &progress, &cancel)?
+        classify_files_with_progress(to_classify, &progress, &cancel)?
     };
+    for path in metadata_only {
+        if scan_cancelled(&cancel) {
+            return Err("Scan cancelled.".into());
+        }
+        let result = existing_instrument_label(&path, metadata_map.as_ref()).map(|instrument| {
+            auto_tag::ClassificationResult {
+                instrument,
+                tier: 0,
+                zcr: None,
+                confidence: None,
+                summary: "Existing instrument tag".into(),
+            }
+        });
+        results.push((path, result));
+    }
     auto_tag::flush_classify_cache();
-    Ok(build_scan_summary(root, skipped_tagged, results))
+    Ok(build_scan_summary(root, skipped_complete, results))
 }
 
 pub fn build_scan_summary(
     root: PathBuf,
-    skipped_tagged: usize,
+    skipped_complete: usize,
     results: Vec<(PathBuf, Result<ClassificationResult, ClassifyError>)>,
 ) -> BulkScanSummary {
     let mut grouped: BTreeMap<PathBuf, Vec<BulkFileProposal>> = BTreeMap::new();
@@ -450,7 +502,7 @@ pub fn build_scan_summary(
     BulkScanSummary {
         root,
         groups,
-        skipped_tagged,
+        skipped_complete,
         failed,
     }
 }
@@ -483,8 +535,9 @@ pub fn apply_items(
     progress: Option<&BulkScanProgress>,
     cancel: &AtomicBool,
 ) -> BulkApplySummary {
-    let mut applied = 0usize;
-    let mut applied_paths = Vec::new();
+    let mut written = 0usize;
+    let mut unchanged = 0usize;
+    let mut written_paths = Vec::new();
     let mut failed = Vec::new();
     let mut cancelled = false;
 
@@ -493,11 +546,12 @@ pub fn apply_items(
             cancelled = true;
             break;
         }
-        match write_instrument_tag_if_untagged(&item.path, &item.instrument) {
-            Ok(()) => {
-                applied += 1;
-                applied_paths.push(item.path.clone());
+        match write_auto_tags(&item.path, &item.instrument) {
+            Ok(true) => {
+                written += 1;
+                written_paths.push(item.path.clone());
             }
+            Ok(false) => unchanged += 1,
             Err(err) => failed.push((item.path.clone(), err)),
         }
         if let Some(progress) = progress {
@@ -507,8 +561,9 @@ pub fn apply_items(
     }
 
     BulkApplySummary {
-        applied,
-        applied_paths,
+        written,
+        unchanged,
+        written_paths,
         failed,
         cancelled,
     }
@@ -530,4 +585,105 @@ pub fn set_all_accepted(groups: &mut [BulkDirGroup], accepted: bool) {
 
 pub fn is_empty_scan(summary: &BulkScanSummary) -> bool {
     summary.groups.is_empty() && summary.failed == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::metadata::{tag_search_paths, TagField, TagFilter};
+    use std::sync::Arc;
+
+    const FORMATS: [&str; 4] = ["wav", "flac", "mp3", "ogg"];
+
+    /// Builds `<scratch>/Kicks/` holding one real file per supported format.
+    fn kick_folder(label: &str) -> (PathBuf, Vec<PathBuf>) {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|value| value.as_nanos())
+            .unwrap_or_default();
+        let root = std::env::temp_dir().join(format!("{label}_{nanos}"));
+        let kicks = root.join("Kicks");
+        std::fs::create_dir_all(&kicks).expect("create scratch dirs");
+
+        let assets = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/assets");
+        let paths = FORMATS
+            .iter()
+            .map(|ext| {
+                let target = kicks.join(format!("sample.{ext}"));
+                std::fs::copy(assets.join(format!("tone.{ext}")), &target)
+                    .unwrap_or_else(|err| panic!("copy {ext} fixture: {err}"));
+                target
+            })
+            .collect();
+        (root, paths)
+    }
+
+    fn instrument_hits(paths: &[PathBuf], value: &str) -> usize {
+        tag_search_paths(
+            paths,
+            &[TagFilter {
+                field: TagField::Instrument,
+                value: value.to_string(),
+            }],
+            Arc::new(HashMap::new()),
+        )
+        .paths
+        .len()
+    }
+
+    /// The user-facing contract for the bulk tagger: every untagged file of
+    /// every format is proposed, applying writes them all, and the result is
+    /// what an `instrument:Kick` search returns.
+    #[test]
+    fn bulk_apply_makes_every_format_findable_by_instrument() {
+        let (root, paths) = kick_folder("tundra_bulk_apply");
+        let metadata = HashMap::new();
+
+        let (to_classify, metadata_only, skipped_complete) =
+            partition_auto_tag_candidates(&paths, &metadata);
+        assert_eq!(
+            to_classify.len(),
+            FORMATS.len(),
+            "every untagged file should be queued for classification"
+        );
+        assert!(metadata_only.is_empty(), "nothing is already tagged yet");
+        assert_eq!(skipped_complete, 0);
+        assert_eq!(
+            instrument_hits(&paths, "Kick"),
+            0,
+            "nothing should match before tagging"
+        );
+
+        let items: Vec<_> = paths
+            .iter()
+            .map(|path| BulkApplyItem {
+                path: path.clone(),
+                instrument: "Kick".to_string(),
+            })
+            .collect();
+        let summary = apply_items(&items, None, &AtomicBool::new(false));
+
+        assert_eq!(summary.failed, Vec::new(), "no format should fail to tag");
+        assert_eq!(summary.written, FORMATS.len());
+        assert_eq!(summary.unchanged, 0);
+        assert!(!summary.cancelled);
+        assert_eq!(
+            instrument_hits(&paths, "Kick"),
+            FORMATS.len(),
+            "instrument:Kick must return every tagged file"
+        );
+
+        // Same tag version: bulk scan should skip already-tagged files.
+        let (to_classify, metadata_only, skipped_complete) =
+            partition_auto_tag_candidates(&paths, &metadata);
+        assert!(
+            to_classify.is_empty(),
+            "current-version tags should not be re-classified"
+        );
+        assert!(metadata_only.is_empty());
+        assert_eq!(skipped_complete, FORMATS.len());
+        assert_eq!(apply_items(&items, None, &AtomicBool::new(false)).written, 0);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

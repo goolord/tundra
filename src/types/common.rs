@@ -108,6 +108,7 @@ pub enum Message {
         Arc<UnboundedReceiver<super::PlayerMsg>>,
     )),
     TogglePlaying,
+    ToggleLoop,
     StopPlayback,
     DismissDialog,
     OpenFolder,
@@ -133,9 +134,13 @@ pub enum Message {
     WaveformCopyName,
     WaveformCopyPath,
     WaveformRevealInFileManager,
+    WaveformOpenAutoTag,
     PlaybackTick,
     ModifiersChanged(iced::keyboard::Modifiers),
-    FileDragPress(PathBuf),
+    FileDragPress {
+        path: PathBuf,
+        from_file_list: bool,
+    },
     FileDragMove(iced::Point),
     FileDragRelease,
     FileDragTick,
@@ -151,12 +156,14 @@ pub enum Message {
     FileRevealInFileManager(PathBuf),
     OpenSettings,
     CloseSettings,
+    SetAlwaysOnTop(bool),
     PickAllowedDirectory,
     AllowedDirectoryPicked(Option<PathBuf>),
     RemoveAllowedDirectory(PathBuf),
     ToggleSearchCaseSensitive,
     ToggleSearchShowDirectories,
     OpenAutoTag,
+    OpenAutoTagFor(PathBuf),
     CloseAutoTag,
     AutoTagPickFile,
     AutoTagFilePicked(Option<PathBuf>),
@@ -297,17 +304,22 @@ pub fn reveal_in_file_manager(path: &Path) {
     {
         use std::os::windows::process::CommandExt;
         let mut command = std::process::Command::new("explorer");
-        command.raw_arg(format!("/select,\"{}\"", path.display()));
+        if path.is_dir() {
+            command.arg(path);
+        } else {
+            command.raw_arg(format!("/select,\"{}\"", path.display()));
+        }
         crate::path_util::hide_console(&mut command);
         let _ = command.spawn();
     }
 
     #[cfg(target_os = "macos")]
     {
-        let _ = std::process::Command::new("open")
-            .arg("-R")
-            .arg(path)
-            .spawn();
+        let mut command = std::process::Command::new("open");
+        if path.is_file() {
+            command.arg("-R");
+        }
+        let _ = command.arg(path).spawn();
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -369,14 +381,18 @@ pub fn file_context_menu(
     copy_name: Message,
     copy_path: Message,
     reveal: Message,
+    auto_tag: Option<Message>,
 ) -> Element<'static, Message> {
-    column![
-        context_menu_button("Copy name", copy_name),
-        context_menu_button("Copy full path", copy_path),
-        context_menu_button(file_manager_label(), reveal),
-    ]
-    .spacing(2)
-    .padding(Padding::from([4, 0]))
-    .width(220)
-    .into()
+    let mut items = column![].spacing(2);
+    if let Some(message) = auto_tag {
+        items = items.push(context_menu_button("Auto-tag", message));
+    }
+    items = items
+        .push(context_menu_button("Copy name", copy_name))
+        .push(context_menu_button("Copy full path", copy_path))
+        .push(context_menu_button(file_manager_label(), reveal));
+    items
+        .padding(Padding::from([4, 0]))
+        .width(220)
+        .into()
 }
