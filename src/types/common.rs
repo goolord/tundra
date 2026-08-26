@@ -64,12 +64,15 @@ impl Dialog {
     pub fn waveform_help() -> Self {
         Self {
             title: "Waveform controls".into(),
-            body: String::new(),
+            body: "Hover the waveform for +/− and arrow keys.".into(),
             rows: vec![
                 ("Click".into(), "Seek".into()),
                 ("Scroll".into(), "Zoom".into()),
                 ("Shift+scroll".into(), "Pan".into()),
-                ("Drag".into(), "Pan".into()),
+                ("Shift+drag".into(), "Pan".into()),
+                ("Space".into(), "Play/pause".into()),
+                ("+ / −".into(), "Zoom".into()),
+                ("Left / Right".into(), "Pan".into()),
             ],
         }
     }

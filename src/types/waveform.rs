@@ -21,6 +21,7 @@ const MAX_COLUMNS_FACTOR: f32 = 4.0;
 const SAMPLE_POINTS_MIN_PX: f32 = 1.0;
 const PAN_STEP: f32 = 0.08;
 const TIME_MARKER_HEIGHT: f32 = 16.0;
+const MIN_TICK_GAP_PX: f32 = 8.0;
 const AMPLITUDE_GUTTER: f32 = 36.0;
 const AMPLITUDE_PAD_TOP: f32 = 11.0;
 const AMPLITUDE_TICKS: [f32; 5] = [1.0, 0.5, 0.0, -0.5, -1.0];
@@ -917,16 +918,23 @@ impl WaveForm {
         (nice * magnitude).max(0.001)
     }
 
-    fn minor_time_step(major_step: f64) -> Option<f64> {
-        if major_step >= 1.0 {
-            Some(0.1)
-        } else if major_step >= 0.2 {
-            Some(0.05)
-        } else if major_step >= 0.05 {
-            Some(0.01)
-        } else {
-            None
+    fn tick_spacing_px(step_secs: f64, visible_secs: f64, width: f32) -> f32 {
+        if step_secs <= 0.0 || visible_secs <= 0.0 || width <= 0.0 {
+            return 0.0;
         }
+        (step_secs as f32 / visible_secs as f32) * width
+    }
+
+    fn tick_step_visible(step_secs: f64, visible_secs: f64, width: f32) -> bool {
+        Self::tick_spacing_px(step_secs, visible_secs, width) >= MIN_TICK_GAP_PX
+    }
+
+    fn minor_time_step(major_step: f64, visible_secs: f64, width: f32) -> Option<f64> {
+        const CANDIDATES: [f64; 11] =
+            [60.0, 30.0, 10.0, 5.0, 2.0, 1.0, 0.5, 0.2, 0.1, 0.05, 0.01];
+        CANDIDATES.into_iter().rev().find(|&step| {
+            step < major_step && Self::tick_step_visible(step, visible_secs, width)
+        })
     }
 
     fn format_time(secs: f64, step: f64) -> String {
@@ -1072,7 +1080,7 @@ impl WaveForm {
                 let x = (offset as f32 + 0.5 - phase) * px_per_sample;
                 draw_if_visible(frame, x, TimeMarkerTier::Sample, None);
             }
-        } else if let Some(minor_step) = Self::minor_time_step(major_step) {
+        } else if let Some(minor_step) = Self::minor_time_step(major_step, visible_secs, size.width) {
             let mut tick = ((start_secs / minor_step).ceil() * minor_step).max(0.0);
             while tick <= end_secs + minor_step * 0.001 {
                 if !Self::is_on_time_grid(tick, major_step)
@@ -1089,12 +1097,14 @@ impl WaveForm {
             }
         }
 
-        let mut second = ((start_secs / 1.0).ceil() * 1.0).max(0.0);
-        while second <= end_secs + 0.001 {
-            if !Self::is_on_time_grid(second, major_step) {
-                draw_if_visible(frame, tick_x(second), TimeMarkerTier::Second, None);
+        if Self::tick_step_visible(1.0, visible_secs, size.width) {
+            let mut second = ((start_secs / 1.0).ceil() * 1.0).max(0.0);
+            while second <= end_secs + 0.001 {
+                if !Self::is_on_time_grid(second, major_step) {
+                    draw_if_visible(frame, tick_x(second), TimeMarkerTier::Second, None);
+                }
+                second += 1.0;
             }
-            second += 1.0;
         }
 
         let mut major = (start_secs / major_step).ceil() * major_step;
@@ -1369,5 +1379,45 @@ mod wheel_zoom_tests {
             "scroll up after scroll down must zoom out (in={zoom_in}, out={})",
             view.zoom
         );
+    }
+}
+
+#[cfg(test)]
+mod time_marker_tests {
+    use super::{WaveForm, MIN_TICK_GAP_PX};
+
+    #[test]
+    fn far_zoom_hides_subsecond_and_second_ticks() {
+        let visible_secs = 200.0;
+        let width = 800.0;
+        assert!(!WaveForm::tick_step_visible(0.1, visible_secs, width));
+        assert!(!WaveForm::tick_step_visible(1.0, visible_secs, width));
+        assert!(WaveForm::tick_step_visible(10.0, visible_secs, width));
+        assert!(
+            WaveForm::tick_spacing_px(1.0, visible_secs, width) < MIN_TICK_GAP_PX
+        );
+    }
+
+    #[test]
+    fn close_zoom_keeps_subsecond_ticks() {
+        let visible_secs = 2.0;
+        let width = 800.0;
+        assert!(WaveForm::tick_step_visible(0.1, visible_secs, width));
+        let minor = WaveForm::minor_time_step(1.0, visible_secs, width)
+            .expect("close zoom should keep subsecond ticks");
+        assert!(minor < 1.0);
+        assert!(WaveForm::tick_step_visible(minor, visible_secs, width));
+    }
+
+    #[test]
+    fn far_zoom_picks_minor_step_that_still_has_gap() {
+        let visible_secs = 200.0;
+        let width = 800.0;
+        let major = WaveForm::nice_time_step(visible_secs);
+        let minor = WaveForm::minor_time_step(major, visible_secs, width)
+            .expect("far zoom should still have a sparse minor grid");
+        assert!(minor < major);
+        assert!(WaveForm::tick_step_visible(minor, visible_secs, width));
+        assert!(minor >= 1.0, "blended 0.1s/1s ticks must not be chosen");
     }
 }
