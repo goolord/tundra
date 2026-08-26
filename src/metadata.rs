@@ -853,14 +853,36 @@ fn collect_tag_matches(
     }
 }
 
-pub async fn filter_tag_paths(
-    debounce_ms: u64,
-    paths: Vec<PathBuf>,
-    tag_filters: Vec<TagFilter>,
+pub fn tag_search_paths(
+    paths: &[PathBuf],
+    tag_filters: &[TagFilter],
     metadata: Arc<HashMap<PathBuf, CachedMetadata>>,
 ) -> SearchResult {
-    async_io::Timer::after(std::time::Duration::from_millis(debounce_ms)).await;
-    collect_tag_matches(&paths, &tag_filters, metadata)
+    collect_tag_matches(paths, tag_filters, metadata)
+}
+
+pub fn search_paths(
+    paths: &[PathBuf],
+    file_query: &str,
+    tag_filters: &[TagFilter],
+    case_sensitive: bool,
+    show_directories: bool,
+    metadata: Arc<HashMap<PathBuf, CachedMetadata>>,
+) -> SearchResult {
+    let file_active = file_query.len() >= FILE_SEARCH_MIN_QUERY_LEN;
+    let tag_active = !tag_filters.is_empty();
+    if tag_active && !file_active {
+        return collect_tag_matches(paths, tag_filters, metadata);
+    }
+
+    collect_file_matches(
+        paths,
+        file_query,
+        tag_filters,
+        case_sensitive,
+        show_directories,
+        metadata,
+    )
 }
 
 fn collect_file_matches(
@@ -942,32 +964,6 @@ fn collect_file_matches(
         new_metadata: lookup.into_new_entries(),
         cached_roots: HashMap::new(),
     }
-}
-
-pub async fn filter_search_paths(
-    debounce_ms: u64,
-    paths: Vec<PathBuf>,
-    file_query: String,
-    tag_filters: Vec<TagFilter>,
-    case_sensitive: bool,
-    show_directories: bool,
-    metadata: Arc<HashMap<PathBuf, CachedMetadata>>,
-) -> SearchResult {
-    async_io::Timer::after(std::time::Duration::from_millis(debounce_ms)).await;
-    let file_active = file_query.len() >= FILE_SEARCH_MIN_QUERY_LEN;
-    let tag_active = !tag_filters.is_empty();
-    if tag_active && !file_active {
-        return collect_tag_matches(&paths, &tag_filters, metadata);
-    }
-
-    collect_file_matches(
-        &paths,
-        &file_query,
-        &tag_filters,
-        case_sensitive,
-        show_directories,
-        metadata,
-    )
 }
 
 pub fn instrument_tag(path: &Path) -> Option<String> {

@@ -4,6 +4,7 @@ use iced::widget::button::{Status as ButtonStatus, Style as ButtonStyle};
 use iced::widget::canvas::{self, Action, Event, Frame, Program};
 use iced::widget::canvas::Path as CanvasPath;
 use iced::widget::scrollable::Scrollbar;
+use iced::widget::text::Wrapping;
 use iced::widget::{button, container, mouse_area, row, scrollable, stack, text, Button, Column, Row, Space, Svg, TextInput};
 use iced::widget::Id;
 use iced::{Alignment, Border, Color, Element, Length, Rectangle, Shadow, theme};
@@ -915,11 +916,16 @@ fn filter_input_with_clear(
     show_clear: bool,
     on_clear: Message,
 ) -> Element<'_, Message> {
-    if !show_clear {
-        return container(input).width(Length::Fill).into();
-    }
+    let clear_slot: Element<'_, Message> = if show_clear {
+        filter_clear_button(on_clear)
+    } else {
+        Space::new()
+            .width(Length::Fixed(filter_clear_inset()))
+            .height(Length::Fixed(0.0))
+            .into()
+    };
 
-    let clear_overlay = row![Space::new().width(Length::Fill), filter_clear_button(on_clear)]
+    let clear_overlay = row![Space::new().width(Length::Fill), clear_slot]
         .align_y(Alignment::Center)
         .width(Length::Fill)
         .height(Length::Fill);
@@ -929,20 +935,19 @@ fn filter_input_with_clear(
         .into()
 }
 
+fn filter_input_padding() -> iced::Padding {
+    iced::Padding::from([8.0, 10.0]).right(filter_clear_inset())
+}
+
 fn file_search_input(search_value: &str) -> Element<'_, Message> {
     let show_clear = !search_value.is_empty();
-    let padding = if show_clear {
-        iced::Padding::from([8.0, 10.0]).right(filter_clear_inset())
-    } else {
-        iced::Padding::from([8.0, 10.0])
-    };
 
     let input = mouse_area(
         TextInput::new("Search files…", search_value)
             .id(Id::new(FILE_SEARCH_INPUT_ID))
             .on_input(Message::Search)
             .size(13)
-            .padding(padding)
+            .padding(filter_input_padding())
             .width(Length::Fill),
     )
     .on_press(Message::SearchFocused(true));
@@ -952,11 +957,6 @@ fn file_search_input(search_value: &str) -> Element<'_, Message> {
 
 fn tag_search_input(tag_search_value: &str) -> Element<'_, Message> {
     let show_clear = !tag_search_value.is_empty();
-    let padding = if show_clear {
-        iced::Padding::from([8.0, 10.0]).right(filter_clear_inset())
-    } else {
-        iced::Padding::from([8.0, 10.0])
-    };
 
     let input = mouse_area(
         TextInput::new("title:value — Enter or Tab", tag_search_value)
@@ -964,7 +964,7 @@ fn tag_search_input(tag_search_value: &str) -> Element<'_, Message> {
             .on_input(Message::TagSearchInput)
             .on_submit(Message::TagSearchSubmit)
             .size(12)
-            .padding(padding)
+            .padding(filter_input_padding())
             .width(Length::Fill),
     )
     .on_press(Message::TagSearchFocused(true));
@@ -1219,12 +1219,16 @@ impl FileSelector {
             .on_scroll(Message::FileListScrolled)
             .height(Length::Fill);
 
-        let list_with_scrollbar = row![
-            fs.width(Length::Fill),
-            file_list_scrollbar(total, self.list_scroll_offset, self.list_viewport_height),
-        ]
-        .spacing(0)
-        .height(Length::Fill);
+        let list_with_scrollbar = mouse_area(
+            row![
+                fs.width(Length::Fill),
+                file_list_scrollbar(total, self.list_scroll_offset, self.list_viewport_height),
+            ]
+            .spacing(0)
+            .height(Length::Fill),
+        )
+        .on_enter(Message::FileListHoverChanged(true))
+        .on_exit(Message::FileListHoverChanged(false));
 
         let file_search_active =
             self.search_value.len() >= crate::metadata::FILE_SEARCH_MIN_QUERY_LEN;
@@ -1307,6 +1311,40 @@ impl FileSelector {
     }
 }
 
+fn file_tree_label(
+    label: &str,
+    selected: bool,
+    hovered: bool,
+    is_dir: bool,
+) -> Element<'_, Message> {
+    let selected_copy = selected;
+    let hovered_copy = hovered;
+    container(
+        text(label)
+            .size(13)
+            .wrapping(Wrapping::None)
+            .width(Length::Fill)
+            .style(move |theme: &theme::Theme| iced::widget::text::Style {
+                color: Some(if selected_copy || hovered_copy {
+                    theme.extended_palette().background.base.text
+                } else {
+                    muted_text(theme)
+                }),
+            })
+            .font(iced::Font {
+                weight: if is_dir {
+                    iced::font::Weight::Medium
+                } else {
+                    iced::font::Weight::Normal
+                },
+                ..iced::Font::default()
+            }),
+    )
+    .width(Length::Fill)
+    .clip(true)
+    .into()
+}
+
 impl FileButton {
     pub fn with_kind(path: PathBuf, base_path: &Path, is_dir: bool) -> Self {
         let label = path
@@ -1326,23 +1364,7 @@ impl FileButton {
     pub fn view(&self, index: usize, selected: bool, hovered: bool) -> Element<'_, Message> {
         let selected_copy = selected;
         let hovered_copy = hovered;
-        let label_text = text(&self.label)
-            .size(13)
-            .style(move |theme: &theme::Theme| iced::widget::text::Style {
-                color: Some(if selected_copy || hovered_copy {
-                    theme.extended_palette().background.base.text
-                } else {
-                    muted_text(theme)
-                }),
-            })
-            .font(iced::Font {
-                weight: if self.is_dir {
-                    iced::font::Weight::Medium
-                } else {
-                    iced::font::Weight::Normal
-                },
-                ..iced::Font::default()
-            });
+        let label = file_tree_label(&self.label, selected, hovered, self.is_dir);
 
         let label = if self.is_dir {
             row![
@@ -1352,10 +1374,11 @@ impl FileButton {
                     .style(move |theme, _status| iced::widget::svg::Style {
                         color: Some(tree_icon_color(theme, selected_copy || hovered_copy)),
                     }),
-                label_text,
+                label,
             ]
             .spacing(10)
             .align_y(Alignment::Center)
+            .width(Length::Fill)
         } else if is_audio(&self.file_path) {
             row![
                 Svg::from_path(resource_path("music-solid.svg"))
@@ -1364,12 +1387,13 @@ impl FileButton {
                     .style(move |theme, _status| iced::widget::svg::Style {
                         color: Some(tree_icon_color(theme, selected_copy || hovered_copy)),
                     }),
-                label_text,
+                label,
             ]
             .spacing(10)
             .align_y(Alignment::Center)
+            .width(Length::Fill)
         } else {
-            row![label_text].align_y(Alignment::Center)
+            row![label].align_y(Alignment::Center).width(Length::Fill)
         };
 
         let row_status = if hovered {
