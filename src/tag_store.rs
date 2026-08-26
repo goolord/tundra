@@ -23,17 +23,9 @@ struct SidecarTag {
     tag_version: u32,
 }
 
-/// Canonical map key. Paths are compared case-insensitively on Windows, where
-/// the filesystem is, so a lookup matches regardless of how the path was typed.
+/// Canonical map key. Same as metadata/dir cache keys so `\\?\` and case match.
 fn key(path: &Path) -> PathBuf {
-    #[cfg(windows)]
-    {
-        PathBuf::from(path.to_string_lossy().to_ascii_lowercase())
-    }
-    #[cfg(not(windows))]
-    {
-        path.to_path_buf()
-    }
+    crate::path_util::cache_key(path.to_path_buf())
 }
 
 fn db_path() -> Option<PathBuf> {
@@ -48,6 +40,11 @@ fn open() -> Result<Connection, String> {
     let path = db_path().ok_or_else(|| "No cache directory available".to_string())?;
     let connection = Connection::open(&path)
         .map_err(|err| format!("Failed to open {}: {err}", path.display()))?;
+    prepare_schema(&connection)?;
+    Ok(connection)
+}
+
+fn prepare_schema(connection: &Connection) -> Result<(), String> {
     connection
         .execute_batch(
             "PRAGMA journal_mode = WAL;
@@ -58,11 +55,36 @@ fn open() -> Result<Connection, String> {
              );",
         )
         .map_err(|err| format!("Failed to prepare tag store: {err}"))?;
-    let _ = connection.execute(
-        "ALTER TABLE instrument_tags ADD COLUMN tag_version INTEGER NOT NULL DEFAULT 0",
-        [],
-    );
-    Ok(connection)
+    if !has_column(connection, "instrument_tags", "tag_version")? {
+        connection
+            .execute(
+                "ALTER TABLE instrument_tags ADD COLUMN tag_version INTEGER NOT NULL DEFAULT 0",
+                [],
+            )
+            .map_err(|err| format!("Failed to migrate tag store: {err}"))?;
+    }
+    Ok(())
+}
+
+fn has_column(connection: &Connection, table: &str, column: &str) -> Result<bool, String> {
+    let mut statement = connection
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(|err| format!("Failed to inspect {table}: {err}"))?;
+    let mut rows = statement
+        .query([])
+        .map_err(|err| format!("Failed to read {table} schema: {err}"))?;
+    while let Some(row) = rows
+        .next()
+        .map_err(|err| format!("Failed to read {table} schema: {err}"))?
+    {
+        let name: String = row
+            .get(1)
+            .map_err(|err| format!("Failed to read {table} column name: {err}"))?;
+        if name == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 type Cache = RwLock<HashMap<PathBuf, SidecarTag>>;
@@ -200,6 +222,57 @@ mod tests {
             )
             .expect("select");
         assert_eq!(stored, ("Kick".to_string(), 1));
+
+        drop(connection);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn sidecar_key_matches_cache_key_including_verbatim_prefix() {
+        let bare = Path::new(r"C:\Samples\kick.wav");
+        let verbatim = Path::new(r"\\?\C:\Samples\kick.wav");
+        assert_eq!(key(bare), key(verbatim));
+        assert_eq!(key(bare), crate::path_util::cache_key(bare.to_path_buf()));
+    }
+
+    #[test]
+    fn prepare_schema_adds_missing_tag_version_column() {
+        let dir = std::env::temp_dir().join(format!(
+            "tundra_tag_store_migrate_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|value| value.as_nanos())
+                .unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let db = dir.join("tags.db");
+        let connection = Connection::open(&db).expect("open db");
+        connection
+            .execute_batch(
+                "CREATE TABLE instrument_tags (
+                     path TEXT PRIMARY KEY,
+                     instrument TEXT NOT NULL
+                 );",
+            )
+            .expect("create pre-version table");
+        connection
+            .execute(
+                "INSERT INTO instrument_tags (path, instrument) VALUES (?1, ?2)",
+                ("c:/samples/kick.wav", "Kick"),
+            )
+            .expect("insert");
+
+        prepare_schema(&connection).expect("migrate");
+        assert!(has_column(&connection, "instrument_tags", "tag_version").expect("column"));
+        let version: u32 = connection
+            .query_row(
+                "SELECT tag_version FROM instrument_tags WHERE path = ?1",
+                ["c:/samples/kick.wav"],
+                |row| row.get(0),
+            )
+            .expect("select version");
+        assert_eq!(version, 0);
+        prepare_schema(&connection).expect("migrate is idempotent");
 
         drop(connection);
         let _ = std::fs::remove_dir_all(dir);

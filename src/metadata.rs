@@ -179,11 +179,7 @@ impl TagFields {
 /// Compact tag line for the transport bar (instrument, bpm, key, genre).
 pub fn format_control_bar_tags(fields: &TagFields) -> Option<String> {
     let mut parts = Vec::new();
-    let instrument = if !fields.explicit_instrument.is_empty() {
-        fields.explicit_instrument.as_str()
-    } else {
-        fields.instrument.as_str()
-    };
+    let instrument = fields.field_value(TagField::Instrument);
     if !instrument.is_empty() {
         parts.push(format!("Instrument: {instrument}"));
     }
@@ -409,12 +405,18 @@ fn parse_tundra_comment_version(comment: &str) -> Option<u32> {
     None
 }
 
-fn file_tundra_tag_version(path: &Path, comment: &str) -> Option<u32> {
-    parse_tundra_comment_version(comment).or_else(|| crate::tag_store::tag_version(path))
+fn file_tundra_tag_version(path: &Path, comment: &str, native_instrument: &str) -> Option<u32> {
+    parse_tundra_comment_version(comment).or_else(|| {
+        native_instrument
+            .trim()
+            .is_empty()
+            .then(|| crate::tag_store::tag_version(path))
+            .flatten()
+    })
 }
 
 pub fn tundra_tag_is_current(path: &Path, comment: &str) -> bool {
-    file_tundra_tag_version(path, comment) == Some(TUNDRA_TAG_VERSION)
+    file_tundra_tag_version(path, comment, "") == Some(TUNDRA_TAG_VERSION)
 }
 
 fn is_tundra_written_comment(comment: &str) -> bool {
@@ -426,8 +428,11 @@ fn tundra_owns_tags(comment: &str) -> bool {
 }
 
 /// True when Tundra wrote (or owns) the on-file tags and may replace them.
-pub fn tundra_tagged_file(path: &Path, comment: &str) -> bool {
-    tundra_owns_tags(comment) || crate::tag_store::instrument(path).is_some()
+/// A sidecar row is fallback-only: it does not own a file that already has a
+/// native instrument from the user or another tagger.
+pub fn tundra_tagged_file(path: &Path, comment: &str, native_instrument: &str) -> bool {
+    tundra_owns_tags(comment)
+        || (native_instrument.trim().is_empty() && crate::tag_store::instrument(path).is_some())
 }
 
 /// Containers Tundra tags natively. Each maps the instrument label to the one
@@ -885,16 +890,22 @@ impl AutoTagFieldStatus {
         self.needs_instrument || self.can_retag_instrument
     }
 
+    pub fn is_complete(self) -> bool {
+        !self.needs_any() && !self.can_retag_instrument
+    }
+
     pub fn from_parts(
         path: &Path,
         explicit_instrument: &str,
+        native_instrument: &str,
         file_artist: &str,
         comment: &str,
         native_writable: bool,
     ) -> Self {
-        let tundra_tagged = tundra_tagged_file(path, comment);
+        let tundra_tagged = tundra_tagged_file(path, comment, native_instrument);
         let has_instrument = !explicit_instrument.trim().is_empty();
-        let current_tag = tundra_tag_is_current(path, comment);
+        let current_tag =
+            file_tundra_tag_version(path, comment, native_instrument) == Some(TUNDRA_TAG_VERSION);
         Self {
             needs_instrument: !has_instrument,
             can_retag_instrument: tundra_tagged && has_instrument && !current_tag,
@@ -920,6 +931,7 @@ pub fn auto_tag_field_status(path: &Path) -> Option<AutoTagFieldStatus> {
     Some(AutoTagFieldStatus::from_parts(
         path,
         durable_instrument(path, &native, None).unwrap_or_default().as_str(),
+        native.instrument.as_deref().unwrap_or_default(),
         native.artist.as_deref().unwrap_or_default(),
         native.comment.as_deref().unwrap_or_default(),
         native_writable,
@@ -927,12 +939,17 @@ pub fn auto_tag_field_status(path: &Path) -> Option<AutoTagFieldStatus> {
 }
 
 pub fn auto_tag_field_status_from_fields(path: &Path, fields: &TagFields) -> AutoTagFieldStatus {
+    let native = read_native_tags(path);
     AutoTagFieldStatus::from_parts(
         path,
         &fields.explicit_instrument,
+        native
+            .as_ref()
+            .and_then(|tags| tags.instrument.as_deref())
+            .unwrap_or(""),
         &fields.file_artist,
         &fields.file_comment,
-        read_native_tags(path).is_some(),
+        native.is_some(),
     )
 }
 
@@ -1336,23 +1353,19 @@ fn instrument_alias_matches(needle: &str, alias_norm: &str) -> bool {
     if needle.is_empty() || alias_norm.is_empty() {
         return false;
     }
-    if needle == alias_norm {
+    if needle == alias_norm || is_simple_plural(needle, alias_norm) || is_simple_plural(alias_norm, needle)
+    {
         return true;
     }
-    if needle.len() < MIN_INSTRUMENT_SUBSTRING_LEN
+    // Short tokens only: "hat"/"hh". Prefix on longer names made `bass` hit
+    // `bassdrum` (Kick) and `shot` hit `rimshot`.
+    needle.len() < MIN_INSTRUMENT_SUBSTRING_LEN
         && alias_norm.len() < MIN_INSTRUMENT_SUBSTRING_LEN
         && (alias_norm.starts_with(needle) || needle.starts_with(alias_norm))
-    {
-        return true;
-    }
-    if needle.len() >= MIN_INSTRUMENT_SUBSTRING_LEN && alias_norm.len() >= MIN_INSTRUMENT_SUBSTRING_LEN
-    {
-        return alias_norm.starts_with(needle)
-            || alias_norm.ends_with(needle)
-            || needle.starts_with(alias_norm)
-            || needle.ends_with(alias_norm);
-    }
-    false
+}
+
+fn is_simple_plural(plural: &str, singular: &str) -> bool {
+    plural.len() == singular.len() + 1 && plural.starts_with(singular) && plural.ends_with('s')
 }
 
 fn normalize_instrument_term(term: &str) -> String {
@@ -1936,11 +1949,12 @@ pub fn write_auto_tags(path: &Path, instrument: &str) -> Result<bool, String> {
     let status = AutoTagFieldStatus::from_parts(
         path,
         durable.as_deref().unwrap_or_default(),
+        native.instrument.as_deref().unwrap_or_default(),
         native.artist.as_deref().unwrap_or_default(),
         comment,
         native_writable,
     );
-    if !status.needs_any() && !status.can_retag_instrument {
+    if status.is_complete() {
         return Ok(false);
     }
 
@@ -1974,10 +1988,15 @@ pub fn write_auto_tags(path: &Path, instrument: &str) -> Result<bool, String> {
         Err(native_error) => {
             // Container refused the write (unsupported layout, unwritable file).
             // Record the label in the sidecar store so search still finds it.
+            // Never stamp a sidecar over a native instrument: durable reads
+            // prefer native, and a sidecar vN would skip retag forever.
             if let Some(instrument) = &pending.instrument {
-                crate::tag_store::set_instrument(path, instrument, TUNDRA_TAG_VERSION)
-                    .map_err(|store_error| format!("{native_error} (sidecar: {store_error})"))?;
-                return Ok(true);
+                if native.instrument.as_ref().is_none_or(|value| value.trim().is_empty()) {
+                    crate::tag_store::set_instrument(path, instrument, TUNDRA_TAG_VERSION)
+                        .map_err(|store_error| format!("{native_error} (sidecar: {store_error})"))?;
+                    return Ok(true);
+                }
+                return Err(native_error);
             }
             // The instrument is already covered, and the remaining fields have
             // nowhere to go in a container this broken. Report the file as done
@@ -2530,6 +2549,20 @@ mod tests {
             Some("Percussion"),
             "Perc must not false-match Kick"
         );
+        assert_eq!(
+            instrument_hint_from_path(Path::new(r"F:\Samples\Bass\low.wav")).as_deref(),
+            Some("Bass"),
+            "Bass must not false-match Kick via bassdrum"
+        );
+    }
+
+    #[test]
+    fn bass_is_not_related_to_kick() {
+        assert!(!instruments_related("Bass", "Kick"));
+        assert!(!instruments_related("bass", "bassdrum"));
+        assert!(!instruments_related("shot", "Rim"));
+        assert!(instruments_related("Hat", "Hi-Hat"));
+        assert!(instruments_related("kick", "kickdrum"));
     }
 
     #[test]
@@ -2986,6 +3019,59 @@ mod tests {
                 .expect("status")
                 .can_retag_instrument,
             "current sidecar version should skip auto tag"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn sidecar_row_does_not_own_user_native_instrument() {
+        let dir = unique_temp_dir("tundra_sidecar_user_native");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let audio = dir.join("snare.wav");
+        write_minimal_wav(&audio);
+        {
+            use lofty::config::WriteOptions;
+            use lofty::file::AudioFile;
+            use lofty::iff::wav::RiffInfoList;
+
+            let mut wav = {
+                let mut file = std::fs::File::open(&audio).expect("open");
+                lofty::iff::wav::WavFile::read_from(&mut file, lofty::config::ParseOptions::new())
+                    .expect("parse")
+            };
+            let mut info = RiffInfoList::new();
+            info.insert(WAV_INSTRUMENT_KEY.to_string(), "Snare".to_string());
+            info.insert(WAV_COMMENT_KEY.to_string(), "Recorded live".to_string());
+            wav.set_riff_info(info);
+            wav.save_to_path(&audio, WriteOptions::default())
+                .expect("save user tags");
+        }
+
+        crate::tag_store::set_instrument(&audio, "Kick", 0).expect("stale sidecar");
+
+        let status = auto_tag_field_status(&audio).expect("status");
+        assert!(!status.can_retag_instrument);
+        assert!(
+            !write_auto_tags(&audio, "Kick").expect("user tag write attempt"),
+            "sidecar must not unlock overwrite of a native user instrument"
+        );
+        assert_eq!(instrument_tag(&audio).as_deref(), Some("Snare"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn instrument_bass_search_does_not_match_kick() {
+        let dir = unique_temp_dir("tundra_bass_not_kick");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let audio = dir.join("kick.wav");
+        write_minimal_wav(&audio);
+        assert!(write_auto_tags(&audio, "Kick").expect("tag kick"));
+        assert!(finds_by_instrument(&audio, "Kick"));
+        assert!(
+            !finds_by_instrument(&audio, "Bass"),
+            "instrument:bass must not match a Kick via bassdrum"
         );
 
         let _ = std::fs::remove_dir_all(dir);

@@ -66,12 +66,23 @@ fn cached_paths_for_root(
     root: &Path,
 ) -> (Vec<PathBuf>, bool) {
     let root_key = crate::path_util::cache_key(root.to_path_buf());
-    let mut paths = Vec::new();
+    let mut listings: HashMap<PathBuf, &Vec<PathBuf>> = HashMap::new();
     for (key, cached) in cache {
-        let key = crate::path_util::cache_key(key.clone());
-        if key == root_key || key.starts_with(&root_key) {
-            paths.extend(cached.iter().cloned());
+        let listing_key = crate::path_util::cache_key(key.clone());
+        if listing_key != root_key && !listing_key.starts_with(&root_key) {
+            continue;
         }
+        if listings
+            .get(&listing_key)
+            .is_some_and(|existing| existing.len() >= cached.len())
+        {
+            continue;
+        }
+        listings.insert(listing_key, cached);
+    }
+    let mut paths = Vec::new();
+    for cached in listings.into_values() {
+        paths.extend(cached.iter().cloned());
     }
     let found = !paths.is_empty();
     (paths, found)
@@ -254,11 +265,25 @@ impl DirCache {
     }
 
     fn insert(&mut self, k: PathBuf, v: Vec<PathBuf>) -> Option<Vec<PathBuf>> {
-        self.0.write().unwrap().insert(k, v)
+        let key = crate::path_util::cache_key(k);
+        let mut map = self.0.write().unwrap();
+        let aliases: Vec<PathBuf> = map
+            .keys()
+            .filter(|existing| *existing != &key && crate::path_util::cache_key((*existing).clone()) == key)
+            .cloned()
+            .collect();
+        let mut previous = None;
+        for alias in aliases {
+            if let Some(old) = map.remove(&alias) {
+                previous = Some(old);
+            }
+        }
+        map.insert(key, v).or(previous)
     }
 
     fn contains_key(&self, k: &PathBuf) -> bool {
-        self.0.read().unwrap().contains_key(k)
+        let key = crate::path_util::cache_key(k.clone());
+        self.0.read().unwrap().contains_key(&key)
     }
 
     fn retain(&mut self, mut keep: impl FnMut(&PathBuf) -> bool) -> bool {
@@ -269,7 +294,15 @@ impl DirCache {
     }
 
     fn from_map(map: HashMap<PathBuf, Vec<PathBuf>>) -> Self {
-        DirCache(Arc::new(RwLock::new(map)))
+        let mut normalized: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+        for (key, paths) in map {
+            let key = crate::path_util::cache_key(key);
+            let entry = normalized.entry(key).or_default();
+            if paths.len() > entry.len() {
+                *entry = paths;
+            }
+        }
+        DirCache(Arc::new(RwLock::new(normalized)))
     }
 
     fn get_path() -> Option<std::path::PathBuf> {
@@ -737,6 +770,31 @@ mod always_on_top_tests {
             "stale parent listing must not hide a later child cache"
         );
         assert!(paths.iter().any(|p| p.ends_with("kick.wav")));
+    }
+
+    #[test]
+    fn cached_paths_for_root_keeps_one_listing_per_cache_key() {
+        let root = PathBuf::from(r"F:\Samples");
+        let verbatim = PathBuf::from(r"\\?\F:\Samples");
+        let mut cache = HashMap::new();
+        cache.insert(
+            root.clone(),
+            vec![
+                PathBuf::from(r"F:\Samples\a.wav"),
+                PathBuf::from(r"F:\Samples\b.wav"),
+            ],
+        );
+        cache.insert(
+            verbatim,
+            vec![PathBuf::from(r"\\?\F:\Samples\stale.wav")],
+        );
+
+        let (paths, found) = cached_paths_for_root(&cache, &root);
+        assert!(found);
+        assert_eq!(paths.len(), 2, "same directory under two spellings must not union");
+        assert!(paths.iter().any(|p| p.ends_with("a.wav")));
+        assert!(paths.iter().any(|p| p.ends_with("b.wav")));
+        assert!(paths.iter().all(|p| !p.ends_with("stale.wav")));
     }
 }
 
@@ -1648,7 +1706,7 @@ impl App {
                     return Task::none();
                 }
                 let needs = auto_tag_field_status(&path);
-                if needs.is_none_or(|status| !status.needs_any() && !status.can_retag_instrument) {
+                if needs.is_none_or(|status| status.is_complete()) {
                     self.auto_tag
                         .set_error(auto_tag_already_complete_message());
                     return Task::none();
