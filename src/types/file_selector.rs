@@ -3,11 +3,11 @@ use crate::metadata::{tag_field_match_score, tag_field_suggestions, TagField, Ta
 use iced::widget::button::{Status as ButtonStatus, Style as ButtonStyle};
 use iced::widget::canvas::{self, Action, Event, Frame, Program};
 use iced::widget::canvas::Path as CanvasPath;
-use iced::widget::scrollable::Scrollbar;
+use iced::widget::scrollable::{self, Scrollbar, Status as ScrollableStatus};
 use iced::widget::text::Wrapping;
-use iced::widget::{button, container, mouse_area, row, scrollable, stack, text, Button, Column, Row, Space, TextInput};
+use iced::widget::{button, container, mouse_area, row, scrollable as scrollable_widget, stack, text, Button, Column, Row, Space, TextInput};
 use iced::widget::Id;
-use iced::{Alignment, Border, Color, Element, Length, Rectangle, Shadow, theme};
+use iced::{Alignment, Background, Border, Color, Element, Length, Rectangle, Shadow, theme};
 use iced::mouse::{self, Cursor};
 use iced_aw::ContextMenu;
 
@@ -30,6 +30,38 @@ pub const FILE_LIST_SCROLLBAR_WIDTH: f32 = 10.0;
 pub const FILE_LIST_SCROLLBAR_MIN_THUMB: f32 = 36.0;
 pub const TAG_SEARCH_INPUT_ID: &str = "tag-search-input";
 pub const FILE_SEARCH_INPUT_ID: &str = "file-search-input";
+
+fn file_list_scrollable_style(_theme: &theme::Theme, _status: ScrollableStatus) -> scrollable::Style {
+    let transparent_scroller = scrollable::Scroller {
+        background: Background::Color(Color::TRANSPARENT),
+        border: Border {
+            width: 0.0,
+            color: Color::TRANSPARENT,
+            radius: 0.0.into(),
+        },
+    };
+    let transparent_rail = scrollable::Rail {
+        background: None,
+        border: Border {
+            width: 0.0,
+            color: Color::TRANSPARENT,
+            radius: 0.0.into(),
+        },
+        scroller: transparent_scroller,
+    };
+    scrollable::Style {
+        container: container::Style::default(),
+        vertical_rail: transparent_rail,
+        horizontal_rail: transparent_rail,
+        gap: None,
+        auto_scroll: scrollable::AutoScroll {
+            background: Background::Color(Color::TRANSPARENT),
+            border: Border::default(),
+            shadow: Shadow::default(),
+            icon: Color::TRANSPARENT,
+        },
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct FileListScrollMetrics {
@@ -1236,9 +1268,10 @@ impl FileSelector {
                     .into(),
             );
         }
-        let fs = scrollable(Column::with_children(new_col).spacing(0))
+        let fs = scrollable_widget(Column::with_children(new_col).spacing(0))
             .id(Id::new(FILE_LIST_SCROLL_ID))
-            .direction(iced::widget::scrollable::Direction::Vertical(Scrollbar::hidden()))
+            .direction(scrollable::Direction::Vertical(Scrollbar::hidden()))
+            .style(file_list_scrollable_style)
             .on_scroll(Message::FileListScrolled)
             .height(Length::Fill);
 
