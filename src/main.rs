@@ -13,6 +13,11 @@ mod source;
 mod tag_store;
 mod types;
 
+#[cfg(test)]
+mod data_safety_tests;
+#[cfg(test)]
+mod test_fixtures;
+
 use types::*;
 
 pub fn main() {

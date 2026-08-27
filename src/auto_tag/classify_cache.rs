@@ -94,11 +94,15 @@ impl ClassifyCache {
         let Some(path) = Self::cache_path() else {
             return;
         };
+        self.persist_to(&path);
+    }
+
+    fn persist_to(&mut self, path: &Path) {
         let Ok(bytes) = bincode::serialize(&self.entries) else {
             eprintln!("Failed to serialize classify cache");
             return;
         };
-        if let Err(err) = path_util::write_atomic(&path, &bytes) {
+        if let Err(err) = path_util::write_atomic(path, &bytes) {
             eprintln!("Failed to write classify cache: {err}");
             return;
         }
@@ -213,4 +217,43 @@ pub fn flush_cache() {
 
 pub fn clear_cache() {
     let _ = with_cache_write(|cache| cache.clear());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auto_tag::ClassificationResult;
+    use crate::path_util::{reclaim_write_sidecars, sidecar, REPLACE_OLD_SUFFIX};
+    use crate::test_fixtures::ScratchDir;
+
+    #[test]
+    fn classify_cache_persist_recovers_from_crash_aside() {
+        let dir = ScratchDir::new("classify-persist");
+        let path = dir.path().join("classify_cache_v4.bin");
+        let audio = dir.path().join("kick.wav");
+        std::fs::write(&audio, b"audio").expect("audio");
+
+        let mut cache = ClassifyCache::new();
+        cache.insert(
+            &audio,
+            &ClassificationResult {
+                instrument: "Kick".into(),
+                tier: 1,
+                zcr: None,
+                confidence: Some(0.9),
+                summary: "kick".into(),
+            },
+        );
+        cache.persist_to(&path);
+        let bytes = std::fs::read(&path).expect("persisted");
+
+        std::fs::write(sidecar(&path, REPLACE_OLD_SUFFIX), &bytes).expect("crash aside");
+        std::fs::remove_file(&path).expect("crash delete");
+
+        reclaim_write_sidecars(dir.path());
+        assert_eq!(std::fs::read(&path).expect("restored"), bytes);
+
+        cache.persist_to(&path);
+        assert_eq!(dir.sidecar_count(), 0);
+    }
 }

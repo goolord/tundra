@@ -93,6 +93,10 @@ fn try_resolve_path(path: &Path) -> Option<PathBuf> {
 }
 
 fn settings_file_path() -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(path) = test_settings_path() {
+        return Some(path);
+    }
     let mut config_dir = dirs::config_dir()?;
     config_dir.push("tundra");
     let _ = std::fs::create_dir_all(&config_dir);
@@ -297,4 +301,60 @@ pub fn settings_view(
             }
         })
         .into()
+}
+
+#[cfg(test)]
+use std::cell::RefCell;
+
+#[cfg(test)]
+thread_local! {
+    static TEST_SETTINGS_PATH: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn test_settings_path() -> Option<PathBuf> {
+    TEST_SETTINGS_PATH.with(|slot| slot.borrow().clone())
+}
+
+#[cfg(test)]
+pub(crate) fn with_test_settings_path<F, R>(path: PathBuf, f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    TEST_SETTINGS_PATH.with(|slot| {
+        *slot.borrow_mut() = Some(path);
+        let result = f();
+        *slot.borrow_mut() = None;
+        result
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::path_util::{reclaim_write_sidecars, sidecar, REPLACE_OLD_SUFFIX};
+    use crate::test_fixtures::ScratchDir;
+
+    #[test]
+    fn allowed_directories_persist_recovers_from_crash_aside() {
+        let dir = ScratchDir::new("settings-persist");
+        let path = dir.path().join("allowed_directories.bin");
+        let samples = dir.path().join("samples");
+        std::fs::create_dir_all(&samples).expect("samples dir");
+        let mut allowed = AllowedDirectories::default();
+        let (added, _) = allowed.add(samples);
+        assert_eq!(added, AddDirectoryResult::Added);
+
+        with_test_settings_path(path.clone(), || allowed.persist());
+        let bytes = std::fs::read(&path).expect("persisted");
+
+        std::fs::write(sidecar(&path, REPLACE_OLD_SUFFIX), &bytes).expect("crash aside");
+        std::fs::remove_file(&path).expect("crash delete");
+
+        reclaim_write_sidecars(dir.path());
+        assert_eq!(std::fs::read(&path).expect("restored"), bytes);
+
+        with_test_settings_path(path, || allowed.persist());
+        assert_eq!(dir.sidecar_count(), 0);
+    }
 }
