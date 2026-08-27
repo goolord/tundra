@@ -587,7 +587,7 @@ mod tests {
     use crate::metadata::{tag_search_paths, TagField, TagFilter};
     use std::sync::Arc;
 
-    const FORMATS: [&str; 4] = ["wav", "flac", "mp3", "ogg"];
+    const FORMATS: [&str; 5] = ["wav", "flac", "mp3", "ogg", "aiff"];
 
     /// Builds `<scratch>/Kicks/` holding one real file per supported format.
     fn kick_folder(label: &str) -> (PathBuf, Vec<PathBuf>) {

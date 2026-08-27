@@ -1,5 +1,7 @@
-use crate::source::arc_samples::{ArcSamplesSource, PlaybackPosition};
+use crate::source::arc_samples::PlaybackPosition;
 use crate::source::callback::Callback;
+use crate::source::streaming::{append_stream, probe_decoder};
+use crate::waveform_peaks::{spawn_peak_build, WaveformPeaks};
 
 pub use super::common::*;
 pub use super::waveform::*;
@@ -20,15 +22,11 @@ use crate::metadata::TagField;
 use iced_aw::ContextMenu;
 use std::path::PathBuf;
 use rodio::buffer::SamplesBuffer;
-use rodio::source::UniformSourceIterator;
-use rodio::Source;
-use std::fs::File;
 use std::path::Path;
-use std::sync;
+use std::sync::{self, Arc, Mutex};
 use std::sync::atomic::Ordering;
 use std::thread;
 
-const MAX_AUDIO_BYTES: u64 = 100 * 1024 * 1024;
 const TRANSPORT_BUTTON: f32 = 42.0;
 const TRANSPORT_ICON: f32 = 18.0;
 const VOLUME_SLIDER_WIDTH: f32 = 72.0;
@@ -421,6 +419,7 @@ fn volume_slider_style(theme: &Theme, status: SliderStatus) -> SliderStyle {
 #[derive(Debug, Clone)]
 pub struct PlayerWorker {
     cmd_sender: UnboundedSender<PlayerCommand>,
+    msg_sender: UnboundedSender<PlayerMsg>,
 }
 
 pub struct Player {
@@ -428,6 +427,7 @@ pub struct Player {
     pub current_file: Option<PathBuf>,
     pub controls: Controls,
     cmd_sender: Option<UnboundedSender<PlayerCommand>>,
+    msg_sender: Option<UnboundedSender<PlayerMsg>>,
     pending_commands: Vec<PlayerCommand>,
 }
 
@@ -438,12 +438,15 @@ enum PlayerCommand {
     Stop,
     Seek(f64, bool),
     SetVolume(f32),
+    LoopRestart,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub enum PlayerMsg {
     SinkEmpty,
     StreamFailed,
+    WaveformPeaksReady,
+    Looped,
 }
 
 pub struct Controls {
@@ -453,7 +456,7 @@ pub struct Controls {
     pub track_duration: Option<f64>,
     pub scrubbing: bool,
     pub volume: f32,
-    pub looping: bool,
+    pub looping: sync::Arc<sync::atomic::AtomicBool>,
 }
 
 pub struct PlaybackProgress {
@@ -461,7 +464,7 @@ pub struct PlaybackProgress {
 }
 
 struct PlaybackData {
-    samples: sync::Arc<Vec<f32>>,
+    path: PathBuf,
     channels: u16,
     sample_rate: u32,
     total_frames: u64,
@@ -470,6 +473,7 @@ struct PlaybackData {
 struct LoadedAudio {
     waveform: WaveForm,
     playback: PlaybackData,
+    peaks: Arc<Mutex<WaveformPeaks>>,
 }
 
 impl Controls {
@@ -547,7 +551,7 @@ impl Controls {
     }
 
     fn loop_button(&self) -> Button<'_, Message> {
-        let looping = self.looping;
+        let looping = self.looping.load(Ordering::Relaxed);
         Button::new(
             resource_svg("repeat.svg")
                 .width(Length::Fixed(TRANSPORT_ICON))
@@ -658,15 +662,31 @@ impl Controls {
 impl PlayerWorker {
     pub fn spawn(
         is_playing: sync::Arc<sync::atomic::AtomicBool>,
+        looping: sync::Arc<sync::atomic::AtomicBool>,
         volume: f32,
     ) -> (Self, UnboundedReceiver<PlayerMsg>) {
         let volume = clamp_volume(volume);
         let (cmd_sender, cmd_receiver) = unbounded();
         let (msg_sender, msg_receiver) = unbounded();
+        let worker_msg_sender = msg_sender.clone();
+        let worker_cmd_sender = cmd_sender.clone();
         thread::spawn(move || {
-            run_audio_worker(cmd_receiver, msg_sender, is_playing, volume);
+            run_audio_worker(
+                cmd_receiver,
+                worker_cmd_sender,
+                msg_sender,
+                is_playing,
+                looping,
+                volume,
+            );
         });
-        (Self { cmd_sender }, msg_receiver)
+        (
+            Self {
+                cmd_sender,
+                msg_sender: worker_msg_sender,
+            },
+            msg_receiver,
+        )
     }
 }
 
@@ -683,15 +703,17 @@ impl Player {
                 track_duration: None,
                 scrubbing: false,
                 volume,
-                looping,
+                looping: sync::Arc::new(sync::atomic::AtomicBool::new(looping)),
             },
             cmd_sender: None,
+            msg_sender: None,
             pending_commands: Vec::new(),
         }
     }
 
     pub fn attach_worker(&mut self, worker: PlayerWorker) {
         self.cmd_sender = Some(worker.cmd_sender);
+        self.msg_sender = Some(worker.msg_sender);
         for command in std::mem::take(&mut self.pending_commands) {
             if let Some(sender) = self.cmd_sender.as_ref() {
                 send_command(sender, command);
@@ -733,8 +755,8 @@ impl Player {
                 bar = bar.push(toolbar_tags(tags));
             }
             let toolbar = container(bar)
-            .width(Length::Fill)
-            .style(waveform_toolbar_style);
+                .width(Length::Fill)
+                .style(waveform_toolbar_style);
 
             let underlay = Column::new()
                 .push(toolbar)
@@ -755,6 +777,8 @@ impl Player {
                     Message::WaveformCopyPath,
                     Message::WaveformRevealInFileManager,
                     Some(Message::WaveformOpenAutoTag),
+                    None,
+                    Some(Message::WaveformEditTags),
                 )
             })
             .style(context_menu_style);
@@ -803,6 +827,15 @@ impl Player {
         self.current_file = Some(file_path.to_path_buf());
         self.waveform = Some(loaded.waveform);
 
+        if let Some(msg_sender) = self.msg_sender.clone() {
+            let peaks = loaded.peaks.clone();
+            let path = file_path.to_path_buf();
+            let hint = total_frames as usize;
+            spawn_peak_build(path, hint, peaks, move || {
+                let _ = msg_sender.unbounded_send(PlayerMsg::WaveformPeaksReady);
+            });
+        }
+
         send_command(
             cmd_sender,
             PlayerCommand::Load(loaded.playback, playback_position),
@@ -825,6 +858,24 @@ impl Player {
         self.enqueue_command(PlayerCommand::Pause);
     }
 
+    pub fn on_waveform_peaks_ready(&mut self) {
+        let Some(waveform) = &mut self.waveform else {
+            return;
+        };
+        let Some(sample_count) = waveform.apply_peaks_ready() else {
+            waveform.invalidate_cache();
+            return;
+        };
+        let total_frames = sample_count as u64;
+        if let Some(position) = &self.controls.playback_position {
+            position.set_total_frames(total_frames);
+        }
+        if waveform.sample_rate() > 0 {
+            self.controls.track_duration =
+                Some(total_frames as f64 / f64::from(waveform.sample_rate()));
+        }
+    }
+
     pub fn on_ended(&mut self) {
         if let Some(position) = &self.controls.playback_position {
             position.set_frame(position.total_frames());
@@ -835,12 +886,10 @@ impl Player {
         self.pause();
     }
 
-    pub fn restart_from_start(&mut self) {
-        self.seek(0.0);
-    }
-
     pub fn toggle_loop(&mut self) {
-        self.controls.looping = !self.controls.looping;
+        self.controls
+            .looping
+            .fetch_xor(true, Ordering::Relaxed);
     }
 
     pub fn stop(&mut self) {
@@ -881,12 +930,12 @@ impl Player {
             return false;
         };
         let progress = position.progress();
-        let changed = self
+        if self
             .controls
             .playback_progress
             .as_ref()
-            .is_some_and(|state| (state.progress - progress).abs() > 0.000_1);
-        if !changed {
+            .is_some_and(|state| state.progress == progress)
+        {
             return false;
         }
         if let Some(state) = &mut self.controls.playback_progress {
@@ -907,11 +956,6 @@ impl Player {
         self.current_file = None;
         self.waveform = None;
     }
-
-    pub fn clear_waveform(&mut self) {
-        self.waveform = None;
-        self.current_file = None;
-    }
 }
 
 fn send_command(sender: &UnboundedSender<PlayerCommand>, command: PlayerCommand) {
@@ -928,8 +972,10 @@ struct OutputFormat {
 
 fn run_audio_worker(
     mut cmd_receiver: UnboundedReceiver<PlayerCommand>,
+    cmd_sender: UnboundedSender<PlayerCommand>,
     msg_sender: UnboundedSender<PlayerMsg>,
     is_playing: sync::Arc<sync::atomic::AtomicBool>,
+    looping: sync::Arc<sync::atomic::AtomicBool>,
     initial_volume: f32,
 ) {
     let stream = match rodio::OutputStreamBuilder::open_default_stream() {
@@ -971,7 +1017,9 @@ fn run_audio_worker(
                             data,
                             play_offset,
                             playback_position.as_ref(),
+                            &cmd_sender,
                             &msg_sender,
+                            &looping,
                             output,
                         );
                         sink_revision = playback_revision;
@@ -985,9 +1033,7 @@ fn run_audio_worker(
                     };
                     let exhausted = playback_exhausted(
                         play_offset,
-                        data.total_frames,
-                        data.channels as usize,
-                        data.samples.len(),
+                        playback_total_frames(playback_position.as_ref()),
                     );
                     let stale = sink_revision != playback_revision;
                     if stale || should_reappend_on_play(sink.empty(), exhausted) {
@@ -1006,7 +1052,9 @@ fn run_audio_worker(
                             data,
                             play_offset,
                             playback_position.as_ref(),
+                            &cmd_sender,
                             &msg_sender,
+                            &looping,
                             output,
                         );
                         sink_revision = playback_revision;
@@ -1036,8 +1084,12 @@ fn run_audio_worker(
                     };
                     play_offset = p.clamp(0.0, 1.0);
                     if let Some(position) = &playback_position {
-                        let frame =
-                            (play_offset * data.total_frames as f64).round() as u64;
+                        let total = position.total_frames();
+                        let frame = if total > 0 {
+                            (play_offset * total as f64).round() as u64
+                        } else {
+                            0
+                        };
                         position.set_frame(frame);
                     }
                     sink.clear();
@@ -1047,7 +1099,9 @@ fn run_audio_worker(
                         data,
                         play_offset,
                         playback_position.as_ref(),
+                        &cmd_sender,
                         &msg_sender,
+                        &looping,
                         output,
                     );
                     if resume {
@@ -1057,6 +1111,35 @@ fn run_audio_worker(
                     }
                     sink_revision = playback_revision;
                     is_playing.store(resume, Ordering::Release);
+                }
+                PlayerCommand::LoopRestart => {
+                    let Some(data) = playback.as_ref() else {
+                        continue;
+                    };
+                    if !looping.load(Ordering::Acquire) {
+                        is_playing.store(false, Ordering::Release);
+                        let _ = msg_sender.unbounded_send(PlayerMsg::SinkEmpty);
+                        continue;
+                    }
+                    play_offset = 0.0;
+                    if let Some(position) = &playback_position {
+                        position.reset();
+                    }
+                    sink.clear();
+                    prime_output_queue(&sink, output);
+                    let _ = msg_sender.unbounded_send(PlayerMsg::Looped);
+                    append_playback(
+                        &sink,
+                        data,
+                        play_offset,
+                        playback_position.as_ref(),
+                        &cmd_sender,
+                        &msg_sender,
+                        &looping,
+                        output,
+                    );
+                    sink.play();
+                    is_playing.store(true, Ordering::Release);
                 }
                 PlayerCommand::SetVolume(next) => {
                     sink.set_volume(clamp_volume(next));
@@ -1080,19 +1163,19 @@ fn prime_output_queue(sink: &rodio::Sink, output: OutputFormat) {
     sink.append(SamplesBuffer::new(output.channels, output.sample_rate, silence));
 }
 
-fn prime_silence_frame_len(channels: u16) -> usize {
-    channels as usize
+fn playback_total_frames(position: Option<&sync::Arc<PlaybackPosition>>) -> u64 {
+    position.map(|position| position.total_frames()).unwrap_or(0)
 }
 
-fn playback_exhausted(offset: f64, total_frames: u64, channels: usize, sample_len: usize) -> bool {
+fn playback_exhausted(offset: f64, total_frames: u64) -> bool {
     if !offset.is_finite() || offset >= 1.0 {
         return true;
     }
-    if channels == 0 || total_frames == 0 || sample_len == 0 {
-        return true;
+    if total_frames == 0 {
+        return false;
     }
-    let skip_frames = (offset.clamp(0.0, 1.0) * total_frames as f64).round() as usize;
-    skip_frames.saturating_mul(channels) >= sample_len
+    let skip_frames = (offset.clamp(0.0, 1.0) * total_frames as f64).round() as u64;
+    skip_frames >= total_frames
 }
 
 fn append_playback(
@@ -1100,105 +1183,69 @@ fn append_playback(
     data: &PlaybackData,
     offset: f64,
     position: Option<&sync::Arc<PlaybackPosition>>,
+    cmd_sender: &UnboundedSender<PlayerCommand>,
     msg_sender: &UnboundedSender<PlayerMsg>,
+    looping: &sync::Arc<sync::atomic::AtomicBool>,
     output: OutputFormat,
 ) {
-    let channels = data.channels as usize;
-    if channels == 0 || data.total_frames == 0 {
+    if data.channels == 0 {
         return;
     }
 
-    let skip_frames = (offset.clamp(0.0, 1.0) * data.total_frames as f64).round() as usize;
-    let skip_samples = skip_frames.saturating_mul(channels).min(data.samples.len());
-    if skip_samples >= data.samples.len() {
-        return;
-    }
-
-    if let Some(position) = position {
-        position.set_frame(skip_frames as u64);
-    }
-
-    let source = ArcSamplesSource::new(
-        sync::Arc::clone(&data.samples),
-        data.channels,
-        data.sample_rate,
-        skip_samples,
+    if let Err(err) = append_stream(
+        sink,
+        &data.path,
+        offset,
+        playback_total_frames(position),
         position.cloned(),
-    );
-    // Resample to the device rate before queuing. Rodio's sink queue can report a
-    // stale sample rate briefly when switching sources; normalizing here avoids
-    // wrong pitch when browsing between files at different native rates.
-    sink.append(UniformSourceIterator::new(
-        source,
         output.channels,
         output.sample_rate,
-    ));
+    ) {
+        eprintln!("Stream append failed: {err}");
+        let _ = msg_sender.unbounded_send(PlayerMsg::StreamFailed);
+        return;
+    }
 
-    let sender = msg_sender.clone();
+    let cmd_sender = cmd_sender.clone();
+    let msg_sender = msg_sender.clone();
+    let looping = sync::Arc::clone(looping);
     sink.append(Callback::new(
-        Box::new(move |msg| {
-            sender.unbounded_send(msg).unwrap_or(());
+        Box::new(move |_| {
+            if looping.load(Ordering::Acquire) {
+                let _ = cmd_sender.unbounded_send(PlayerCommand::LoopRestart);
+            } else {
+                let _ = msg_sender.unbounded_send(PlayerMsg::SinkEmpty);
+            }
         }),
-        PlayerMsg::SinkEmpty,
+        (),
         output.sample_rate,
     ));
 }
 
 fn load_audio(path: &Path) -> Result<LoadedAudio, String> {
-    let file = File::open(path)
-        .map_err(|err| format!("Cannot open {}: {err}", path.display()))?;
-    let file_len = file
-        .metadata()
-        .map_err(|err| format!("Cannot read metadata for {}: {err}", path.display()))?
-        .len();
-    if file_len > MAX_AUDIO_BYTES {
-        return Err(format!(
-            "{} is too large ({} MB; limit is {} MB)",
-            path.display(),
-            file_len / (1024 * 1024),
-            MAX_AUDIO_BYTES / (1024 * 1024)
-        ));
-    }
-
-    let decoder = rodio::Decoder::try_from(file)
-        .map_err(|err| format!("Cannot decode {}: {err}", path.display()))?;
-
-    let channels = decoder.channels();
-    let sample_rate = decoder.sample_rate();
-    if sample_rate == 0 {
-        return Err(format!("{} has an invalid sample rate", path.display()));
-    }
-    let interleaved: Vec<f32> = decoder.collect();
-
-    if channels == 0 {
-        return Err(format!("{} has no audio channels", path.display()));
-    }
-
-    let channels_usize = channels as usize;
-    if !interleaved.len().is_multiple_of(channels_usize) {
-        return Err(format!("{} has corrupt sample data", path.display()));
-    }
-
-    let total_frames = (interleaved.len() / channels_usize) as u64;
-    let mut mono = Vec::with_capacity(interleaved.len() / channels_usize);
-    for chunk in interleaved.chunks_exact(channels_usize) {
-        mono.push(chunk.iter().sum::<f32>() / channels as f32);
-    }
-
+    let info = probe_decoder(path)?;
+    let sample_count = info.total_frames as usize;
+    let peaks = Arc::new(Mutex::new(WaveformPeaks::empty()));
+    let waveform = WaveForm::new_pending(sample_count, peaks.clone());
     Ok(LoadedAudio {
-        waveform: WaveForm::new(mono),
+        waveform,
         playback: PlaybackData {
-            samples: sync::Arc::new(interleaved),
-            channels,
-            sample_rate,
-            total_frames,
+            path: path.to_path_buf(),
+            channels: info.channels,
+            sample_rate: info.sample_rate,
+            total_frames: info.total_frames,
         },
+        peaks,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn prime_silence_frame_len(channels: u16) -> usize {
+        channels as usize
+    }
 
     #[test]
     fn prime_silence_matches_output_channels() {
@@ -1216,16 +1263,16 @@ mod tests {
 
     #[test]
     fn play_from_start_when_offset_at_end() {
-        assert!(playback_exhausted(1.0, 100, 2, 200));
-        assert!(playback_exhausted(f64::NAN, 100, 2, 200));
-        assert!(!playback_exhausted(0.0, 100, 2, 200));
-        assert!(!playback_exhausted(0.5, 100, 2, 200));
+        assert!(playback_exhausted(1.0, 100));
+        assert!(playback_exhausted(f64::NAN, 100));
+        assert!(!playback_exhausted(0.0, 100));
+        assert!(!playback_exhausted(0.5, 100));
     }
 
     #[test]
-    fn play_from_start_when_skip_consumes_all_samples() {
-        assert!(playback_exhausted(0.999, 100, 2, 200));
-        assert!(!playback_exhausted(0.99, 100, 2, 200));
+    fn play_from_start_when_skip_consumes_all_frames() {
+        assert!(playback_exhausted(0.999, 100));
+        assert!(!playback_exhausted(0.99, 100));
     }
 
     #[test]
@@ -1238,10 +1285,10 @@ mod tests {
     #[test]
     fn toggle_loop_flips_flag() {
         let mut player = Player::new(1.0, false);
-        assert!(!player.controls.looping);
+        assert!(!player.controls.looping.load(Ordering::Relaxed));
         player.toggle_loop();
-        assert!(player.controls.looping);
+        assert!(player.controls.looping.load(Ordering::Relaxed));
         player.toggle_loop();
-        assert!(!player.controls.looping);
+        assert!(!player.controls.looping.load(Ordering::Relaxed));
     }
 }

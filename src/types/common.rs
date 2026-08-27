@@ -89,7 +89,11 @@ pub fn window_title(active_file: Option<&str>) -> String {
 
 #[derive(Debug, Clone)]
 pub enum Message {
-    SelectedFile(Option<PathBuf>),
+    FileListSelect {
+        index: usize,
+        shift: bool,
+        control: bool,
+    },
     ChangeDirectory(PathBuf),
     FileListScrolled(iced::widget::scrollable::Viewport),
     FileListScrollbarPress {
@@ -107,7 +111,10 @@ pub enum Message {
     TagSearchFocused(bool),
     TagFilterRemove(crate::metadata::TagField),
     TagSuggestionSelect(crate::metadata::TagField),
-    SearchCompleted(Result<SearchResult, Aborted>),
+    SearchCompleted {
+        generation: u64,
+        result: Result<SearchResult, Aborted>,
+    },
     MetadataIndexed(std::collections::HashMap<std::path::PathBuf, crate::metadata::CachedMetadata>),
     StartupCachesReady(crate::metadata::PersistedCaches),
     PlayerWorkerReady(
@@ -158,6 +165,7 @@ pub enum Message {
     WaveformCopyPath,
     WaveformRevealInFileManager,
     WaveformOpenAutoTag,
+    WaveformEditTags,
     PlaybackTick,
     ModifiersChanged(iced::keyboard::Modifiers),
     FileDragPress {
@@ -185,6 +193,8 @@ pub enum Message {
     RemoveAllowedDirectory(PathBuf),
     ToggleSearchCaseSensitive,
     ToggleSearchShowDirectories,
+    ToggleFavoritesOnly,
+    ToggleFavorite(PathBuf),
     OpenAutoTag,
     OpenAutoTagFor(PathBuf),
     CloseAutoTag,
@@ -194,6 +204,10 @@ pub enum Message {
     AutoTagCompleted(Result<crate::auto_tag::ClassificationResult, crate::auto_tag::ClassifyError>),
     AutoTagApply,
     ToggleAutoTagDetails,
+    OpenTagEditorFor(PathBuf),
+    CloseTagEditor,
+    TagEditorInput(super::tag_editor::TagEditorField, String),
+    TagEditorSave,
     OpenBulkAutoTag,
     CloseBulkAutoTag,
     BulkAutoTagPickDirectory,
@@ -234,8 +248,6 @@ pub enum Message {
         generation: u64,
         summary: crate::bulk_auto_tag::BulkApplySummary,
     },
-    /// Open a file or folder passed in from the OS (argv, Open With, etc.).
-    OpenLaunchPath(PathBuf),
     WindowTitleBarPress,
     WindowTitleBarRelease,
     WindowMinimize,
@@ -247,11 +259,13 @@ pub enum Message {
     NoOp,
 }
 
+pub const AUDIO_EXTENSIONS: &[&str] = &["flac", "wav", "mp3", "ogg", "aiff", "aif"];
+
 pub fn is_audio(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
         .map(str::to_ascii_lowercase)
-        .is_some_and(|ext| ext == "flac" || ext == "wav" || ext == "mp3" || ext == "ogg")
+        .is_some_and(|ext| AUDIO_EXTENSIONS.iter().any(|supported| ext == *supported))
 }
 
 pub fn is_hidden(entry: &Path) -> bool {
@@ -369,7 +383,8 @@ pub fn reveal_in_file_manager(path: &Path) {
     }
 }
 
-pub fn context_menu_button<'a>(label: &'a str, message: Message) -> Button<'a, Message> {
+pub fn context_menu_button(label: impl Into<String>, message: Message) -> Button<'static, Message> {
+    let label = label.into();
     button(
         text(label)
             .size(14)
@@ -416,10 +431,18 @@ pub fn file_context_menu(
     copy_path: Message,
     reveal: Message,
     auto_tag: Option<Message>,
+    favorite: Option<(String, Message)>,
+    edit_tags: Option<Message>,
 ) -> Element<'static, Message> {
     let mut items = column![].spacing(2);
     if let Some(message) = auto_tag {
         items = items.push(context_menu_button("Auto-tag", message));
+    }
+    if let Some(message) = edit_tags {
+        items = items.push(context_menu_button("Edit tags…", message));
+    }
+    if let Some((label, message)) = favorite {
+        items = items.push(context_menu_button(&label, message));
     }
     items = items
         .push(context_menu_button("Copy name", copy_name))

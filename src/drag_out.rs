@@ -814,9 +814,5 @@ impl NativeDrag {
         false
     }
 
-    pub fn start(&mut self, _path: PathBuf) -> Result<(), String> {
-        Err("use platform drag".to_string())
-    }
-
     pub fn update(&mut self, _pointer_down: bool, _pointer_released: bool) {}
 }

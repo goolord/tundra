@@ -1,5 +1,6 @@
 pub use super::common::*;
 use crate::metadata::{tag_field_match_score, tag_field_suggestions, TagField, TagFilter};
+use super::settings::FavoritesStore;
 use iced::widget::button::{Status as ButtonStatus, Style as ButtonStyle};
 use iced::widget::canvas::{self, Action, Event, Frame, Program};
 use iced::widget::canvas::Path as CanvasPath;
@@ -8,10 +9,12 @@ use iced::widget::text::Wrapping;
 use iced::widget::{button, container, mouse_area, row, scrollable as scrollable_widget, stack, text, Button, Column, Row, Space, TextInput};
 use iced::widget::Id;
 use iced::{Alignment, Background, Border, Color, Element, Length, Rectangle, Shadow, theme};
+use iced::keyboard::Modifiers;
 use iced::mouse::{self, Cursor};
 use iced_aw::ContextMenu;
 
 use std::cmp::Ordering;
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -271,11 +274,13 @@ fn file_list_scrollbar(
 pub struct FileSelector {
     pub current_dir: PathBuf,
     pub file_list: Vec<FileButton>,
-    pub selected_file: Option<usize>,
+    selected: HashSet<usize>,
+    selection_anchor: Option<usize>,
     pub hovered_file: Option<usize>,
     pub search_value: String,
     pub search_case_sensitive: bool,
     pub search_show_directories: bool,
+    pub favorites_only: bool,
     pub tag_search_value: String,
     pub tag_filters: Vec<TagFilter>,
     pub tag_search_error: Option<String>,
@@ -595,10 +600,39 @@ fn filter_section_divider() -> Element<'static, Message> {
     .into()
 }
 
+fn file_list_select_message(index: usize, modifiers: Modifiers) -> Message {
+    Message::FileListSelect {
+        index,
+        shift: modifiers.shift(),
+        control: modifiers.control() || modifiers.logo(),
+    }
+}
+
+fn selection_status_label(count: usize) -> Element<'static, Message> {
+    container(
+        text(format!("{count} selected · Shift/Ctrl+click to extend"))
+            .size(10)
+            .style(|theme: &theme::Theme| iced::widget::text::Style {
+                color: Some(
+                    theme
+                        .extended_palette()
+                        .background
+                        .base
+                        .text
+                        .scale_alpha(0.58),
+                ),
+            }),
+    )
+    .padding([4, 10])
+    .width(Length::Fill)
+    .into()
+}
+
 fn file_search_header(
     active: bool,
     case_sensitive: bool,
     show_directories: bool,
+    favorites_only: bool,
 ) -> Element<'static, Message> {
     let mut header = Row::new()
         .spacing(8)
@@ -651,9 +685,156 @@ fn file_search_header(
 
     header
         .push(Space::new().width(Length::Fill))
+        .push(file_search_favorites_button(favorites_only))
         .push(file_search_directories_button(show_directories))
         .push(file_search_case_button(case_sensitive))
         .into()
+}
+
+fn file_search_favorites_button(favorites_only: bool) -> Element<'static, Message> {
+    button(
+        text(if favorites_only { "★" } else { "☆" })
+            .size(13)
+            .style(move |_theme: &theme::Theme| iced::widget::text::Style {
+                color: Some(if favorites_only {
+                    TUNDRA_ACCENT.scale_alpha(0.95)
+                } else {
+                    TUNDRA_MUTED_ICON
+                }),
+            }),
+    )
+    .padding([2, 6])
+    .on_press(Message::ToggleFavoritesOnly)
+    .style(move |theme: &theme::Theme, status| {
+        let palette = theme.extended_palette();
+        let mut style = ButtonStyle {
+            text_color: palette.background.base.text,
+            border: Border {
+                radius: 6.0.into(),
+                width: 1.0,
+                color: if favorites_only {
+                    TUNDRA_ACCENT.scale_alpha(0.35)
+                } else {
+                    palette.background.strong.color.scale_alpha(0.24)
+                },
+            },
+            ..ButtonStyle::default()
+        };
+        match status {
+            ButtonStatus::Active | ButtonStatus::Disabled => {
+                style.background = Some(
+                    if favorites_only {
+                        TUNDRA_ACCENT.scale_alpha(0.14)
+                    } else {
+                        Color::TRANSPARENT
+                    }
+                    .into(),
+                );
+            }
+            ButtonStatus::Hovered => {
+                style.background = Some(TUNDRA_ACCENT.scale_alpha(0.18).into());
+            }
+            ButtonStatus::Pressed => {
+                style.background = Some(TUNDRA_ACCENT.scale_alpha(0.26).into());
+            }
+        }
+        style
+    })
+    .into()
+}
+
+fn favorites_list_header() -> Element<'static, Message> {
+    container(
+        row![
+            text("★")
+                .size(12)
+                .style(|_theme: &theme::Theme| iced::widget::text::Style {
+                    color: Some(TUNDRA_ACCENT.scale_alpha(0.95)),
+                }),
+            text("Favorites")
+                .size(11)
+                .font(iced::Font {
+                    weight: iced::font::Weight::Semibold,
+                    ..iced::Font::default()
+                })
+                .style(|theme: &theme::Theme| iced::widget::text::Style {
+                    color: Some(muted_text(theme)),
+                }),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center),
+    )
+    .width(Length::Fill)
+    .padding([8, 10])
+    .style(move |theme| {
+        let mut style = section_divider(theme);
+        style.background = Some(sidebar_panel(theme).into());
+        style
+    })
+    .into()
+}
+
+fn favorite_star_button(path: PathBuf, favorite: bool) -> Element<'static, Message> {
+    const STAR_ICON: f32 = 11.0;
+    const STAR_BTN: f32 = 15.0;
+    let star = resource_svg("star-solid.svg")
+        .width(Length::Fixed(STAR_ICON))
+        .height(Length::Fixed(STAR_ICON))
+        .style(move |_theme, _status| iced::widget::svg::Style {
+            color: Some(if favorite {
+                TUNDRA_ACCENT.scale_alpha(0.95)
+            } else {
+                TUNDRA_MUTED_ICON.scale_alpha(0.42)
+            }),
+        });
+    button(
+        container(star)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center_x(Length::Fill)
+            .center_y(Length::Fill),
+    )
+    .padding(0)
+    .width(Length::Fixed(STAR_BTN))
+    .height(Length::Fixed(STAR_BTN))
+    .on_press(Message::ToggleFavorite(path))
+    .style(move |_theme: &theme::Theme, status| {
+        let show_border = favorite
+            || matches!(status, ButtonStatus::Hovered | ButtonStatus::Pressed);
+        let mut style = ButtonStyle {
+            text_color: TUNDRA_MUTED_ICON,
+            border: Border {
+                radius: 4.0.into(),
+                width: 1.0,
+                color: if show_border {
+                    TUNDRA_ACCENT.scale_alpha(if favorite { 0.28 } else { 0.16 })
+                } else {
+                    Color::TRANSPARENT
+                },
+            },
+            ..ButtonStyle::default()
+        };
+        match status {
+            ButtonStatus::Active | ButtonStatus::Disabled => {
+                style.background = Some(
+                    if favorite {
+                        TUNDRA_ACCENT.scale_alpha(0.10)
+                    } else {
+                        Color::TRANSPARENT
+                    }
+                    .into(),
+                );
+            }
+            ButtonStatus::Hovered => {
+                style.background = Some(TUNDRA_ACCENT.scale_alpha(0.15).into());
+            }
+            ButtonStatus::Pressed => {
+                style.background = Some(TUNDRA_ACCENT.scale_alpha(0.22).into());
+            }
+        }
+        style
+    })
+    .into()
 }
 
 fn file_search_directories_button(show_directories: bool) -> Element<'static, Message> {
@@ -1135,11 +1316,13 @@ impl FileSelector {
         FileSelector {
             current_dir: dir.to_owned(),
             file_list,
-            selected_file: None,
+            selected: HashSet::new(),
+            selection_anchor: None,
             hovered_file: None,
             search_value: String::new(),
             search_case_sensitive: false,
             search_show_directories: true,
+            favorites_only: false,
             tag_search_value: String::new(),
             tag_filters: Vec::new(),
             tag_search_error: None,
@@ -1153,18 +1336,21 @@ impl FileSelector {
         let search_value = self.search_value.clone();
         let search_case_sensitive = self.search_case_sensitive;
         let search_show_directories = self.search_show_directories;
+        let favorites_only = self.favorites_only;
         let tag_search_value = self.tag_search_value.clone();
         let tag_filters = self.tag_filters.clone();
         let tag_search_error = self.tag_search_error.clone();
         let (file_list, list_error) = FileList::list_buttons(dir);
         self.current_dir = dir.to_owned();
         self.file_list = file_list;
-        self.selected_file = None;
+        self.selected.clear();
+        self.selection_anchor = None;
         self.hovered_file = None;
         self.list_error = list_error;
         self.search_value = search_value;
         self.search_case_sensitive = search_case_sensitive;
         self.search_show_directories = search_show_directories;
+        self.favorites_only = favorites_only;
         self.tag_search_value = tag_search_value;
         self.tag_filters = tag_filters;
         self.tag_search_error = tag_search_error;
@@ -1178,8 +1364,70 @@ impl FileSelector {
         !self.tag_filters.is_empty() && self.search_value.trim().is_empty()
     }
 
+    pub fn selected_count(&self) -> usize {
+        self.selected.len()
+    }
+
+    pub fn is_selected(&self, index: usize) -> bool {
+        self.selected.contains(&index)
+    }
+
+    pub fn select_row(&mut self, index: usize, shift: bool, control: bool) {
+        if index >= self.file_list.len() {
+            return;
+        }
+
+        if control {
+            if self.selected.contains(&index) {
+                self.selected.remove(&index);
+            } else {
+                self.selected.insert(index);
+            }
+            self.selection_anchor = Some(index);
+            return;
+        }
+
+        if shift {
+            if let Some(anchor) = self.selection_anchor {
+                let lo = anchor.min(index);
+                let hi = anchor.max(index);
+                self.selected.clear();
+                for i in lo..=hi {
+                    self.selected.insert(i);
+                }
+                return;
+            }
+        }
+
+        self.selected.clear();
+        self.selected.insert(index);
+        self.selection_anchor = Some(index);
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.selected.clear();
+        self.selection_anchor = None;
+    }
+
+    pub fn sync_selection_for_path(&mut self, path: &Path) {
+        let key = crate::path_util::cache_key(path.to_path_buf());
+        let Some(index) = self.file_list.iter().position(|entry| {
+            crate::path_util::cache_key(entry.file_path.clone()) == key
+        }) else {
+            return;
+        };
+        self.selected.clear();
+        self.selected.insert(index);
+        self.selection_anchor = Some(index);
+    }
+
+    fn primary_index(&self) -> Option<usize> {
+        self.selection_anchor
+            .or_else(|| self.selected.iter().copied().min())
+    }
+
     pub fn selected_audio_path(&self) -> Option<PathBuf> {
-        self.selected_file
+        self.primary_index()
             .and_then(|index| self.file_list.get(index))
             .filter(|entry| !entry.is_dir && is_audio(&entry.file_path))
             .map(|entry| entry.file_path.clone())
@@ -1214,11 +1462,23 @@ impl FileSelector {
             .collect()
     }
 
-    pub fn view(&self, search_enabled: bool) -> Column<'_, Message> {
-        let mut column = Column::new()
-            .push(DirUp.view(self.current_dir.to_owned()))
-            .spacing(0)
-            .height(Length::Fill);
+    pub fn view(
+        &self,
+        search_enabled: bool,
+        favorites: &FavoritesStore,
+        modifiers: Modifiers,
+    ) -> Column<'_, Message> {
+        let mut column = Column::new().spacing(0).height(Length::Fill);
+
+        if self.favorites_only {
+            column = column.push(favorites_list_header());
+        } else {
+            column = column.push(DirUp.view(self.current_dir.to_owned()));
+        }
+
+        if self.selected_count() > 1 {
+            column = column.push(selection_status_label(self.selected_count()));
+        }
 
         if let Some(error) = &self.list_error {
             column = column.push(
@@ -1255,9 +1515,11 @@ impl FileSelector {
             let index = start + index;
             new_col.push(button.view(
                 index,
-                self.selected_file == Some(index),
+                self.is_selected(index),
                 self.hovered_file == Some(index),
                 search_enabled,
+                favorites.contains(&button.file_path),
+                modifiers,
             ));
         }
         if end < total {
@@ -1296,6 +1558,7 @@ impl FileSelector {
                 file_search_active,
                 self.search_case_sensitive,
                 self.search_show_directories,
+                self.favorites_only,
             )))
             .push(file_search_input(&self.search_value))
             .push(filter_section_divider())
@@ -1428,7 +1691,11 @@ impl FileButton {
         selected: bool,
         hovered: bool,
         search_enabled: bool,
+        is_favorite: bool,
+        modifiers: Modifiers,
     ) -> Element<'_, Message> {
+        let multi_select = modifiers.shift() || modifiers.control() || modifiers.logo();
+        let select_message = file_list_select_message(index, modifiers);
         let selected_copy = selected;
         let hovered_copy = hovered;
         let label = file_tree_label(&self.label, selected, hovered, self.is_dir);
@@ -1448,15 +1715,20 @@ impl FileButton {
             .width(Length::Fill)
         } else if is_audio(&self.file_path) {
             row![
-                resource_svg("music-solid.svg")
-                    .width(Length::Fixed(16.0))
-                    .height(Length::Fixed(16.0))
-                    .style(move |theme, _status| iced::widget::svg::Style {
-                        color: Some(tree_icon_color(theme, selected_copy || hovered_copy)),
-                    }),
-                label,
+                favorite_star_button(self.file_path.clone(), is_favorite),
+                row![
+                    resource_svg("music-solid.svg")
+                        .width(Length::Fixed(12.0))
+                        .height(Length::Fixed(12.0))
+                        .style(move |theme, _status| iced::widget::svg::Style {
+                            color: Some(tree_icon_color(theme, selected_copy || hovered_copy)),
+                        }),
+                    label,
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
             ]
-            .spacing(10)
+            .spacing(1)
             .align_y(Alignment::Center)
             .width(Length::Fill)
         } else {
@@ -1472,7 +1744,7 @@ impl FileButton {
         if self.is_dir {
             let path = self.file_path.clone();
             let button = Button::new(label)
-                .on_press(Message::SelectedFile(Some(self.file_path.to_owned())))
+                .on_press(select_message)
                 .width(Length::Fill)
                 .padding([7, 10])
                 .style(move |theme, button_status| {
@@ -1485,6 +1757,8 @@ impl FileButton {
                         Message::FileCopyName(path.clone()),
                         Message::FileCopyPath(path.clone()),
                         Message::FileRevealInFileManager(path.clone()),
+                        None,
+                        None,
                         None,
                     )
                 })
@@ -1500,10 +1774,16 @@ impl FileButton {
             .style(move |theme| file_tree_row_container_style(theme, row_status, selected));
 
         let path = self.file_path.clone();
+        let favorite_label = if is_favorite {
+            "Remove from favorites"
+        } else {
+            "Add to favorites"
+        }
+        .to_string();
 
         if !is_audio(&self.file_path) {
             let button = Button::new(row_content)
-                .on_press(Message::SelectedFile(Some(self.file_path.to_owned())))
+                .on_press(select_message)
                 .width(Length::Fill)
                 .padding(0)
                 .style(move |theme, button_status| {
@@ -1517,6 +1797,37 @@ impl FileButton {
                         Message::FileCopyPath(path.clone()),
                         Message::FileRevealInFileManager(path.clone()),
                         None,
+                        None,
+                        None,
+                    )
+                })
+                .style(context_menu_style)
+                .into(),
+                selected,
+            );
+        }
+
+        if multi_select {
+            let button = Button::new(row_content)
+                .on_press(select_message)
+                .width(Length::Fill)
+                .padding(0)
+                .style(move |theme, button_status| {
+                    file_tree_button_style(theme, button_status, selected)
+                });
+
+            return file_tree_row(
+                ContextMenu::new(button, move || {
+                    file_context_menu(
+                        Message::FileCopyName(path.clone()),
+                        Message::FileCopyPath(path.clone()),
+                        Message::FileRevealInFileManager(path.clone()),
+                        search_enabled.then(|| Message::OpenAutoTagFor(path.clone())),
+                        Some((
+                            favorite_label.clone(),
+                            Message::ToggleFavorite(path.clone()),
+                        )),
+                        Some(Message::OpenTagEditorFor(path.clone())),
                     )
                 })
                 .style(context_menu_style)
@@ -1542,6 +1853,11 @@ impl FileButton {
                     Message::FileCopyPath(path.clone()),
                     Message::FileRevealInFileManager(path.clone()),
                     search_enabled.then(|| Message::OpenAutoTagFor(path.clone())),
+                    Some((
+                        favorite_label.clone(),
+                        Message::ToggleFavorite(path.clone()),
+                    )),
+                    Some(Message::OpenTagEditorFor(path.clone())),
                 )
             })
             .style(context_menu_style)
