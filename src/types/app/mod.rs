@@ -1,14 +1,16 @@
+//! App state, update loop, view, subscriptions.
+
 use super::*;
 use crate::auto_tag;
 use crate::bulk_auto_tag;
 use crate::drag_out::NativeDrag;
 use crate::metadata::{
     control_bar_tags, file_search_debounce_ms, index_paths, instrument_tag, parse_tag_filter,
-    refresh_cached_metadata, search_paths, tag_field_best_match,
-    tag_parse_message, tag_search_cached_paths, write_auto_tags, write_manual_tags,
+    refresh_cached_metadata, tag_field_best_match,
+    tag_parse_message, write_auto_tags, write_manual_tags,
     auto_tag_already_complete_message,
-    auto_tag_field_status, CachedMetadata,
-    PersistedCaches, SearchResult, TagFields, TagParseError, file_search_active,
+    auto_tag_field_status,
+    PersistedCaches, TagFields, TagParseError, file_search_active,
     TAG_SEARCH_DEBOUNCE_MS,
 };
 use super::auto_tag::{auto_tag_view, AutoTagState};
@@ -34,205 +36,26 @@ use std::collections::hash_map::HashMap;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Duration;
-use walkdir::WalkDir;
 
-const DEFAULT_SIDEBAR_WIDTH: f32 = 280.0;
-const MIN_SIDEBAR_WIDTH: f32 = 160.0;
-const MAX_SIDEBAR_WIDTH: f32 = 720.0;
-const SIDEBAR_RESIZER_HIT_WIDTH: f32 = 10.0;
-const SIDEBAR_RESIZER_LINE_WIDTH: f32 = 2.0;
-const WINDOW_RESIZE_BORDER: f32 = 8.0;
-const TITLE_DRAG_THRESHOLD: f32 = 4.0;
-const FILE_DRAG_THRESHOLD: f32 = 8.0;
+mod cache;
+mod helpers;
+mod prefs;
 
-fn walk_directory(dir: &Path) -> Vec<PathBuf> {
-    crate::path_util::reclaim_write_sidecars_tree(dir);
-    WalkDir::new(dir)
-        .max_depth(100)
-        .max_open(100)
-        .follow_links(true)
-        .into_iter()
-        .filter_entry(|e| FileList::file_filter(e.path()))
-        .filter_map(|e| match e {
-            Ok(e) => Some(e.path().to_path_buf()),
-            Err(_) => None,
-        })
-        .collect()
-}
-
-/// Paths indexed for `root`: the exact listing plus every cached subtree.
-/// A stale parent walk (taken before a folder existed) must not hide later
-/// child caches. `\\?\` and case are ignored so allowed roots match WalkDir keys.
-fn cached_paths_for_root(
-    cache: &HashMap<PathBuf, Vec<PathBuf>>,
-    root: &Path,
-) -> (Vec<PathBuf>, bool) {
-    let root_key = crate::path_util::cache_key(root.to_path_buf());
-    let mut listings: HashMap<PathBuf, &Vec<PathBuf>> = HashMap::new();
-    for (key, cached) in cache {
-        let listing_key = crate::path_util::cache_key(key.clone());
-        if listing_key != root_key && !listing_key.starts_with(&root_key) {
-            continue;
-        }
-        if listings
-            .get(&listing_key)
-            .is_some_and(|existing| existing.len() >= cached.len())
-        {
-            continue;
-        }
-        listings.insert(listing_key, cached);
-    }
-    let mut paths = Vec::new();
-    for cached in listings.into_values() {
-        paths.extend(cached.iter().cloned());
-    }
-    let found = !paths.is_empty();
-    (paths, found)
-}
-
-async fn execute_file_search(
-    debounce_ms: u64,
-    allowed_roots: Vec<PathBuf>,
-    dir_cache: Arc<RwLock<HashMap<PathBuf, Vec<PathBuf>>>>,
-    metadata_cache: Arc<RwLock<HashMap<PathBuf, CachedMetadata>>>,
-    file_query: String,
-    tag_filters: Vec<crate::metadata::TagFilter>,
-    case_sensitive: bool,
-    show_directories: bool,
-    tag_only: bool,
-    favorites_only: bool,
-    favorite_keys: HashSet<PathBuf>,
-) -> SearchResult {
-    async_io::Timer::after(Duration::from_millis(debounce_ms)).await;
-
-    let mut paths = Vec::new();
-    let mut cached_roots = HashMap::new();
-    let missing_roots = {
-        let cache = dir_cache.read().unwrap();
-        let mut missing = Vec::new();
-        for root in &allowed_roots {
-            let (cached, found) = cached_paths_for_root(&cache, root);
-            if found {
-                paths.extend(cached);
-            } else {
-                missing.push(root.clone());
-            }
-        }
-        missing
-    };
-
-    for root in missing_roots {
-        let children = walk_directory(&root);
-        paths.extend(children.iter().cloned());
-        cached_roots.insert(root, children);
-    }
-
-    let metadata_map = metadata_cache.read().unwrap().clone();
-    if tag_only {
-        for path in metadata_map.keys() {
-            if allowed_roots
-                .iter()
-                .any(|root| crate::path_util::is_under(path, root))
-            {
-                paths.push(path.clone());
-            }
-        }
-    }
-
-    let mut seen = HashSet::new();
-    paths.retain(|path| seen.insert(crate::path_util::cache_key(path.clone())));
-    if tag_only {
-        paths.retain(|path| is_audio(path));
-    }
-
-    let metadata_snapshot = Arc::new(metadata_map);
-    let (metadata, preindexed) = if tag_filters.is_empty() {
-        (metadata_snapshot, HashMap::new())
-    } else {
-        let indexed = index_paths(&paths, Arc::clone(&metadata_snapshot));
-        let mut merged = (*metadata_snapshot).clone();
-        merged.extend(indexed.clone());
-        (Arc::new(merged), indexed)
-    };
-
-    let mut result = if tag_only {
-        tag_search_cached_paths(&paths, &tag_filters, metadata)
-    } else {
-        search_paths(
-            &paths,
-            &file_query,
-            &tag_filters,
-            case_sensitive,
-            show_directories,
-            metadata,
-        )
-    };
-    if favorites_only {
-        result.paths.retain(|path| {
-            favorite_keys.contains(&crate::path_util::cache_key(path.clone()))
-        });
-    }
-    result.new_metadata.extend(preindexed);
-    result.cached_roots = cached_roots;
-    result
-}
-
-fn transport_shortcut_allowed(modifiers: Modifiers) -> bool {
-    !modifiers.shift() && !modifiers.control() && !modifiers.alt() && !modifiers.logo()
-}
-
-async fn pick_folder(start_dir: PathBuf) -> Option<PathBuf> {
-    rfd::AsyncFileDialog::new()
-        .set_title("Select Folder")
-        .set_directory(&start_dir)
-        .pick_folder()
-        .await
-        .map(|folder| folder.path().to_path_buf())
-}
-
-async fn pick_audio_file(start_dir: PathBuf) -> Option<PathBuf> {
-    rfd::AsyncFileDialog::new()
-        .set_title("Select audio file")
-        .set_directory(&start_dir)
-        .add_filter("Audio", AUDIO_EXTENSIONS)
-        .pick_file()
-        .await
-        .map(|file| file.path().to_path_buf())
-}
-
-enum FileDragKind {
-    File(PathBuf),
-    Scroll,
-}
-
-struct FileDragPending {
-    kind: FileDragKind,
-    origin: Point,
-    last: Point,
-    threshold_met: bool,
-    origin_locked: bool,
-    awaiting_drag: bool,
-    open_on_click: bool,
-}
-
-struct SidebarResize {
-    origin_x: f32,
-    origin_width: f32,
-    pending_origin: bool,
-}
-
-struct FileListScrollbarDrag {
-    track_top: f32,
-    track_height: f32,
-    grab_offset: f32,
-}
-
-struct TitleBarInteraction {
-    drag_armed: bool,
-    press_origin: Option<Point>,
-}
+pub use cache::{DirCache, MetadataCache};
+pub use prefs::{window_level, set_window_level};
+use cache::load_startup_caches;
+use helpers::{
+    cached_paths_for_root, execute_file_search, pick_audio_file, pick_folder,
+    tag_search_can_autocomplete, transport_shortcut_allowed, walk_directory, FileDragKind,
+    FileDragPending, FileListScrollbarDrag, SidebarResize, TitleBarInteraction,
+};
+use prefs::{
+    AlwaysOnTopSettings, LoopSettings, SidebarSettings, VolumeSettings, FILE_DRAG_THRESHOLD,
+    MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH, SIDEBAR_RESIZER_HIT_WIDTH, SIDEBAR_RESIZER_LINE_WIDTH,
+    TITLE_DRAG_THRESHOLD, WINDOW_RESIZE_BORDER,
+};
 
 pub struct App {
     pub file_selector: FileSelector,
@@ -286,352 +109,6 @@ pub struct App {
     modifiers: Modifiers,
 }
 
-pub struct DirCache(Arc<RwLock<HashMap<PathBuf, Vec<PathBuf>>>>);
-
-pub struct MetadataCache(Arc<RwLock<HashMap<PathBuf, CachedMetadata>>>);
-
-impl DirCache {
-    fn new() -> DirCache {
-        DirCache(Arc::new(RwLock::new(HashMap::new())))
-    }
-
-    fn share(&self) -> Arc<RwLock<HashMap<PathBuf, Vec<PathBuf>>>> {
-        Arc::clone(&self.0)
-    }
-
-    fn insert(&mut self, k: PathBuf, v: Vec<PathBuf>) -> Option<Vec<PathBuf>> {
-        let key = crate::path_util::cache_key(k);
-        let mut map = self.0.write().unwrap();
-        let aliases: Vec<PathBuf> = map
-            .keys()
-            .filter(|existing| *existing != &key && crate::path_util::cache_key((*existing).clone()) == key)
-            .cloned()
-            .collect();
-        let mut previous = None;
-        for alias in aliases {
-            if let Some(old) = map.remove(&alias) {
-                previous = Some(old);
-            }
-        }
-        map.insert(key, v).or(previous)
-    }
-
-    fn contains_key(&self, k: &PathBuf) -> bool {
-        let key = crate::path_util::cache_key(k.clone());
-        self.0.read().unwrap().contains_key(&key)
-    }
-
-    fn retain(&mut self, mut keep: impl FnMut(&PathBuf) -> bool) -> bool {
-        let mut map = self.0.write().unwrap();
-        let before = map.len();
-        map.retain(|path, _| keep(path));
-        before != map.len()
-    }
-
-    fn from_map(map: HashMap<PathBuf, Vec<PathBuf>>) -> Self {
-        let mut normalized: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
-        for (key, paths) in map {
-            let key = crate::path_util::cache_key(key);
-            let entry = normalized.entry(key).or_default();
-            if paths.len() > entry.len() {
-                *entry = paths;
-            }
-        }
-        DirCache(Arc::new(RwLock::new(normalized)))
-    }
-
-    fn get_path() -> Option<std::path::PathBuf> {
-        tundra_cache_dir().map(|mut cache_dir| {
-            cache_dir.push("dir_cache");
-            cache_dir.set_extension("bin");
-            cache_dir
-        })
-    }
-
-    fn persist_map(map: &HashMap<PathBuf, Vec<PathBuf>>) {
-        let Some(dir_cache) = DirCache::get_path() else {
-            return;
-        };
-        Self::persist_map_to(&dir_cache, map);
-    }
-
-    pub(crate) fn persist_map_to(path: &Path, map: &HashMap<PathBuf, Vec<PathBuf>>) {
-        let Ok(bytes) = bincode::serialize(map) else {
-            eprintln!("Failed to serialize directory cache");
-            return;
-        };
-        if let Err(err) = crate::path_util::write_atomic(path, &bytes) {
-            eprintln!("Failed to write directory cache: {err}");
-        }
-    }
-
-    fn persist(&self) {
-        let Ok(map) = self.0.read() else {
-            return;
-        };
-        Self::persist_map(&map);
-    }
-}
-
-fn load_dir_cache_map() -> HashMap<PathBuf, Vec<PathBuf>> {
-    let Some(path) = DirCache::get_path() else {
-        return HashMap::new();
-    };
-    match std::fs::read(path) {
-        Ok(bytes) => bincode::deserialize(&bytes).unwrap_or_default(),
-        Err(_) => HashMap::new(),
-    }
-}
-
-fn tundra_cache_dir() -> Option<PathBuf> {
-    dirs::cache_dir().map(|mut cache_dir| {
-        cache_dir.push("tundra");
-        let _ = std::fs::create_dir_all(&cache_dir);
-        cache_dir
-    })
-}
-
-fn cache_file(name: &str) -> Option<PathBuf> {
-    tundra_cache_dir().map(|mut path| {
-        path.push(name);
-        path
-    })
-}
-
-impl MetadataCache {
-    fn new() -> Self {
-        Self(Arc::new(RwLock::new(HashMap::new())))
-    }
-
-    fn share(&self) -> Arc<RwLock<HashMap<PathBuf, CachedMetadata>>> {
-        Arc::clone(&self.0)
-    }
-
-    fn get_path() -> Option<std::path::PathBuf> {
-        // v10: instrument now reads from each container's canonical key, so
-        // entries cached under the old per-format logic must be re-read.
-        cache_file("metadata_cache_v10.bin")
-    }
-
-    fn persist_map(cache: &HashMap<PathBuf, CachedMetadata>) {
-        let Some(path) = MetadataCache::get_path() else {
-            return;
-        };
-        Self::persist_map_to(&path, cache);
-    }
-
-    pub(crate) fn persist_map_to(path: &Path, cache: &HashMap<PathBuf, CachedMetadata>) {
-        let persistable: HashMap<PathBuf, CachedMetadata> = cache
-            .iter()
-            .filter(|(_, cached)| cached.mtime_secs != 0)
-            .map(|(path, cached)| (path.clone(), cached.clone()))
-            .collect();
-        let Ok(bytes) = bincode::serialize(&persistable) else {
-            eprintln!("Failed to serialize metadata cache");
-            return;
-        };
-        if let Err(err) = crate::path_util::write_atomic(path, &bytes) {
-            eprintln!("Failed to write metadata cache: {err}");
-        }
-    }
-
-    fn persist(&self) {
-        let Ok(cache) = self.0.read() else {
-            return;
-        };
-        Self::persist_map(&cache);
-    }
-
-    fn from_map(map: HashMap<PathBuf, CachedMetadata>) -> Self {
-        Self(Arc::new(RwLock::new(map)))
-    }
-
-    fn retain(&mut self, mut keep: impl FnMut(&PathBuf) -> bool) -> bool {
-        let mut cache = self.0.write().unwrap();
-        let before = cache.len();
-        cache.retain(|path, _| keep(path));
-        before != cache.len()
-    }
-
-    fn snapshot(&self) -> Arc<HashMap<PathBuf, CachedMetadata>> {
-        Arc::new(self.0.read().unwrap().clone())
-    }
-
-    fn merge(&mut self, entries: HashMap<PathBuf, CachedMetadata>) {
-        if entries.is_empty() {
-            return;
-        }
-        self.0.write().unwrap().extend(entries);
-        self.persist();
-    }
-
-    fn cache_lookup_keys(path: &Path) -> Vec<PathBuf> {
-        crate::path_util::cache_lookup_keys(path)
-    }
-
-    fn merge_path(&mut self, path: &Path, entry: CachedMetadata) {
-        let raw = path.to_path_buf();
-        let key = crate::path_util::cache_key(raw.clone());
-        let mut entries = HashMap::from([(key.clone(), entry.clone())]);
-        if key != raw {
-            entries.insert(raw, entry);
-        }
-        self.merge(entries);
-    }
-
-    fn tag_fields_for(&self, path: &Path) -> TagFields {
-        if let Some(mtime_secs) = crate::metadata::read_tag_fields_mtime(path) {
-            if let Ok(cache) = self.0.read() {
-                for key in Self::cache_lookup_keys(path) {
-                    if let Some(cached) = cache.get(&key) {
-                        if cached.mtime_secs == mtime_secs {
-                            return cached.fields.clone();
-                        }
-                    }
-                }
-            }
-        }
-
-        let Some(entry) = refresh_cached_metadata(path) else {
-            return TagFields::default();
-        };
-        let fields = entry.fields.clone();
-        if let Ok(mut cache) = self.0.write() {
-            let store_key = crate::path_util::cache_key(path.to_path_buf());
-            cache.insert(store_key, entry);
-        }
-        fields
-    }
-}
-
-fn load_metadata_cache_map() -> HashMap<PathBuf, CachedMetadata> {
-    let Some(path) = MetadataCache::get_path() else {
-        return HashMap::new();
-    };
-    match std::fs::read(path) {
-        Ok(bytes) => bincode::deserialize(&bytes).unwrap_or_default(),
-        Err(_) => HashMap::new(),
-    }
-}
-
-fn load_cached_f32(name: &str, default: f32, clamp: impl Fn(f32) -> f32) -> f32 {
-    let Some(path) = cache_file(name) else {
-        return default;
-    };
-    match std::fs::read(path) {
-        Ok(bytes) => bincode::deserialize::<f32>(&bytes)
-            .ok()
-            .filter(|value| value.is_finite())
-            .map(clamp)
-            .unwrap_or(default),
-        Err(_) => default,
-    }
-}
-
-fn load_cached_bool(name: &str, default: bool) -> bool {
-    let Some(path) = cache_file(name) else {
-        return default;
-    };
-    match std::fs::read(path) {
-        Ok(bytes) => bincode::deserialize(&bytes).unwrap_or(default),
-        Err(_) => default,
-    }
-}
-
-fn persist_cached_bool(name: &str, value: bool, label: &str) {
-    let Some(path) = cache_file(name) else {
-        return;
-    };
-    let Ok(bytes) = bincode::serialize(&value) else {
-        eprintln!("Failed to serialize {label}");
-        return;
-    };
-    if let Err(err) = crate::path_util::write_atomic(&path, &bytes) {
-        eprintln!("Failed to write {label}: {err}");
-    }
-}
-
-fn persist_cached_f32(name: &str, value: f32, label: &str) {
-    let Some(path) = cache_file(name) else {
-        return;
-    };
-    let Ok(bytes) = bincode::serialize(&value) else {
-        eprintln!("Failed to serialize {label}");
-        return;
-    };
-    if let Err(err) = crate::path_util::write_atomic(&path, &bytes) {
-        eprintln!("Failed to write {label}: {err}");
-    }
-}
-
-struct SidebarSettings;
-
-impl SidebarSettings {
-    fn load() -> f32 {
-        load_cached_f32(
-            "sidebar_width.bin",
-            DEFAULT_SIDEBAR_WIDTH,
-            |width| width.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH),
-        )
-    }
-
-    fn persist(width: f32) {
-        let width = width.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
-        persist_cached_f32("sidebar_width.bin", width, "sidebar width");
-    }
-}
-
-struct VolumeSettings;
-
-impl VolumeSettings {
-    fn load() -> f32 {
-        load_cached_f32("volume.bin", 1.0, clamp_volume)
-    }
-
-    fn persist(volume: f32) {
-        persist_cached_f32("volume.bin", clamp_volume(volume), "volume");
-    }
-}
-
-struct LoopSettings;
-
-impl LoopSettings {
-    fn load() -> bool {
-        load_cached_bool("looping.bin", false)
-    }
-
-    fn persist(looping: bool) {
-        persist_cached_bool("looping.bin", looping, "loop");
-    }
-}
-
-struct AlwaysOnTopSettings;
-
-impl AlwaysOnTopSettings {
-    fn load() -> bool {
-        load_cached_bool("always_on_top.bin", false)
-    }
-
-    fn persist(always_on_top: bool) {
-        persist_cached_bool("always_on_top.bin", always_on_top, "always on top");
-    }
-}
-
-fn window_level(always_on_top: bool) -> window::Level {
-    if always_on_top {
-        window::Level::AlwaysOnTop
-    } else {
-        window::Level::Normal
-    }
-}
-
-fn set_window_level(always_on_top: bool) -> Task<Message> {
-    let level = window_level(always_on_top);
-    window::latest().then(move |id| match id {
-        Some(id) => window::set_level(id, level),
-        None => Task::none(),
-    })
-}
 
 pub fn app() {
     let always_on_top = AlwaysOnTopSettings::load();
@@ -647,24 +124,6 @@ pub fn app() {
         .unwrap()
 }
 
-fn load_startup_caches(allowed: AllowedDirectories) -> PersistedCaches {
-    let mut dirs = load_dir_cache_map();
-    let mut metadata = load_metadata_cache_map();
-    if !allowed.is_empty() {
-        let allowed = allowed.clone();
-        let before = dirs.len();
-        dirs.retain(|path, _| allowed.contains_path(path));
-        if dirs.len() != before {
-            DirCache::persist_map(&dirs);
-        }
-        let before = metadata.len();
-        metadata.retain(|path, _| allowed.contains_path(path));
-        if metadata.len() != before {
-            MetadataCache::persist_map(&metadata);
-        }
-    }
-    PersistedCaches { dirs, metadata }
-}
 
 async fn run_blocking<T>(f: impl FnOnce() -> T + Send + 'static) -> T
 where
@@ -866,11 +325,6 @@ mod always_on_top_tests {
     }
 }
 
-fn tag_search_can_autocomplete(input: &str) -> bool {
-    !input.contains(':')
-        && !input.trim().is_empty()
-        && tag_field_best_match(input).is_some()
-}
 
 impl App {
     pub fn subscription(state: &App) -> Subscription<Message> {

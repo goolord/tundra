@@ -1,3 +1,5 @@
+//! iced UI.
+
 mod app;
 mod auto_tag;
 mod bulk_auto_tag;

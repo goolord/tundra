@@ -1,4 +1,4 @@
-//! Audio file metadata: tag read/write, search, and path hints.
+//! Tag read/write, search, path hints.
 
 mod auto_tag;
 mod cache;

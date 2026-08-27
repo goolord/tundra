@@ -23,6 +23,8 @@ On Windows, setup skips the TensorFlow env automatically; tier 2 uses librosa.
 
 ## Build & run
 
+See [ARCHITECTURE.md](ARCHITECTURE.md) for module layout.
+
 Use the project xtask (Rust-native task runner):
 
 ```bash
@@ -52,24 +54,24 @@ cargo xtask run --release
 
 Flags:
 
-- `--skip-lfs` — skip `git lfs pull` during setup
-- `--skip-dl` — skip Essentia TensorFlow env (tier 2 falls back to librosa)
-- `--no-setup` — skip setup before build/run
-- `--release` — optimized build (`build`: full release + static CRT on Windows; `run`: fast `release-fast` profile)
-- `--target TRIPLE` — cross-compile (requires `--cross` when OS/arch differs; see Cross-compilation below)
-- `--cross` — use `cross` instead of `cargo` for the build step
+- `--skip-lfs`: skip `git lfs pull` during setup
+- `--skip-dl`: skip Essentia TensorFlow env (tier 2 falls back to librosa)
+- `--no-setup`: skip setup before build/run
+- `--release`: optimized build (`build`: full release + static CRT on Windows; `run`: fast `release-fast` profile)
+- `--target TRIPLE`: cross-compile (requires `--cross` when OS/arch differs; see Cross-compilation below)
+- `--cross`: use `cross` instead of `cargo` for the build step
 
 Models are copied next to the binary at build time. SVG icons are embedded in the executable.
 
-`cargo xtask build --release` uses the full release profile: `opt-level = 3`, thin LTO, stripped symbols, and static CRT on Windows. Ship the binary from `target/release/` (or `target/<triple>/release/`). `cargo xtask run --release` uses the `release-fast` profile (same speed opts, no LTO, faster compiles, dynamic CRT) and runs from `target/release-fast/` — not for distribution. Plain `cargo build --release` on Windows also requires static CRT (`build.rs` enforces it). Debug builds use the dynamic CRT. GPU rendering uses `wgpu` with Vulkan on Windows/Linux or Metal on macOS, plus a `tiny-skia` software fallback when no GPU backend is available. DX12 is omitted to avoid a `windows` crate version conflict in the current dependency graph.
+`cargo xtask build --release` uses the full release profile: `opt-level = 3`, thin LTO, stripped symbols, and static CRT on Windows. Ship from `target/release/` (or `target/<triple>/release/`). `cargo xtask run --release` uses the `release-fast` profile (same speed opts, no LTO, dynamic CRT) and runs from `target/release-fast/`. Do not ship that binary. Plain `cargo build --release` on Windows also requires static CRT (`build.rs` enforces it). Debug builds use the dynamic CRT. GPU rendering uses `wgpu` with Vulkan on Windows/Linux or Metal on macOS, plus a `tiny-skia` software fallback when no GPU backend is available. DX12 is omitted to avoid a `windows` crate version conflict in the current dependency graph.
 
 ### Portable layout
 
 For a copied build (not running from the source tree), place next to the executable:
 
-- `models/` — Essentia model files (copied at build time)
-- `scripts/` — classifier `.py` files plus a bundled `.venv` (release packages include `python/` as well)
-- `python/` — portable CPython install (release packages only; dev builds use `cargo xtask setup`)
+- `models/`: Essentia model files (copied at build time)
+- `scripts/`: classifier `.py` files plus a bundled `.venv` (release packages include `python/` as well)
+- `python/`: portable CPython install (release packages only; dev builds use `cargo xtask setup`)
 
 Release archive: `cargo xtask package --version v0.1.0-pre-alpha` (`.zip` on Windows, `.tar.gz` elsewhere)
 
