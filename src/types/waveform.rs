@@ -15,10 +15,9 @@ use std::sync::Arc;
 use crate::source::arc_samples::PlaybackPosition;
 
 const MIN_ZOOM: f32 = 1.0;
-const MAX_ZOOM: f32 = 4096.0;
 const ZOOM_FACTOR: f32 = 1.25;
-const MAX_COLUMNS_FACTOR: f32 = 4.0;
-const SAMPLE_POINTS_MIN_PX: f32 = 1.0;
+const TWO_OUTLINE_ENTER: f32 = 0.65;
+const TWO_OUTLINE_EXIT: f32 = 0.40;
 const PAN_STEP: f32 = 0.08;
 const TIME_MARKER_HEIGHT: f32 = 16.0;
 const MIN_TICK_GAP_PX: f32 = 8.0;
@@ -34,6 +33,40 @@ const WHEEL_ZOOM_MAX: f32 = 0.6;
 const WHEEL_SCROLL_PIXELS_PER_LINE: f32 = 28.0;
 const EDGE_RUBBER_BAND: f32 = 0.35;
 const WAVEFORM_CORNER_RADIUS: f32 = 8.0;
+const LANCZOS_A: i32 = 3; // kernel half-width
+
+fn max_zoom(sample_count: usize) -> f32 {
+    (sample_count as f64).max(MIN_ZOOM as f64) as f32
+}
+
+fn visible_samples(sample_count: usize, zoom: f32) -> usize {
+    if sample_count == 0 {
+        return 0;
+    }
+    let zoom = (zoom as f64).max(MIN_ZOOM as f64);
+    ((sample_count as f64) / zoom)
+        .ceil()
+        .clamp(1.0, sample_count as f64) as usize
+}
+
+fn max_left(sample_count: usize, zoom: f32) -> f64 {
+    if sample_count == 0 {
+        return 0.0;
+    }
+    let visible = visible_samples(sample_count, zoom);
+    let max_start = sample_count.saturating_sub(visible);
+    if max_start == 0 {
+        return 0.0;
+    }
+    max_start as f64 / sample_count as f64
+}
+
+fn visible_fraction_of(sample_count: usize, zoom: f32) -> f64 {
+    if sample_count == 0 {
+        return 1.0;
+    }
+    visible_samples(sample_count, zoom) as f64 / sample_count as f64
+}
 
 fn theme_cache_key(theme: &Theme) -> u32 {
     let palette = theme.extended_palette();
@@ -57,7 +90,7 @@ fn scroll_lines(delta: ScrollDelta) -> (f32, f32) {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WaveFormView {
     pub zoom: f32,
-    pub offset: f32,
+    pub offset: f64,
     pub overscroll: f32,
 }
 
@@ -107,14 +140,17 @@ impl WaveFormView {
         true
     }
 
-    pub fn pan(&mut self, delta: f32) {
-        self.apply_pan_delta(delta * self.visible_fraction());
+    pub fn pan(&mut self, delta: f32, sample_count: usize) {
+        self.apply_pan_delta(
+            delta as f64 * visible_fraction_of(sample_count, self.zoom),
+            sample_count,
+        );
     }
 
-    pub fn apply_pan_delta(&mut self, offset_delta: f32) {
-        let visible = self.visible_fraction();
-        let max = self.max_offset();
-        let edge_pull = offset_delta / visible.max(1e-6) * EDGE_RUBBER_BAND;
+    pub fn apply_pan_delta(&mut self, offset_delta: f64, sample_count: usize) {
+        let visible = visible_fraction_of(sample_count, self.zoom).max(1e-12);
+        let max = max_left(sample_count, self.zoom);
+        let edge_pull = (offset_delta / visible) as f32 * EDGE_RUBBER_BAND;
 
         if self.overscroll > OVERSCROLL_STOP {
             self.offset = max;
@@ -140,12 +176,12 @@ impl WaveFormView {
         let target = self.offset + offset_delta;
         if target < 0.0 {
             self.offset = 0.0;
-            let overflow = -target / visible.max(1e-6);
-            self.overscroll = Self::rubber_band(0.0, -overflow * EDGE_RUBBER_BAND);
+            let overflow = -target / visible;
+            self.overscroll = Self::rubber_band(0.0, -overflow as f32 * EDGE_RUBBER_BAND);
         } else if target > max {
             self.offset = max;
-            let overflow = (target - max) / visible.max(1e-6);
-            self.overscroll = Self::rubber_band(0.0, overflow * EDGE_RUBBER_BAND);
+            let overflow = (target - max) / visible;
+            self.overscroll = Self::rubber_band(0.0, overflow as f32 * EDGE_RUBBER_BAND);
         } else {
             self.offset = target;
         }
@@ -169,56 +205,38 @@ impl WaveFormView {
         (current + additional / resistance).clamp(-MAX_OVERSCROLL, MAX_OVERSCROLL)
     }
 
-    fn timeline_window(&self, sample_count: usize) -> (f32, f32) {
-        if sample_count == 0 {
-            return (0.0, 1.0);
-        }
-        let (start, end, phase) = self.sample_window(sample_count);
-        let width = (end - start) as f32 / sample_count as f32;
-        let left = (start as f32 + phase) / sample_count as f32;
-        (left, width)
-    }
-
-    fn set_timeline_left(&mut self, left: f32, sample_count: usize) {
+    fn set_timeline_left(&mut self, left: f64, sample_count: usize) {
         if sample_count == 0 {
             self.offset = 0.0;
             return;
         }
-        let visible = (sample_count as f32 * self.visible_fraction())
-            .ceil()
-            .clamp(1.0, sample_count as f32) as usize;
-        let max_start = sample_count.saturating_sub(visible);
-        if max_start == 0 {
+        if max_left(sample_count, self.zoom) == 0.0 {
             self.offset = 0.0;
             return;
         }
-        let raw_start = (left * sample_count as f32).clamp(0.0, max_start as f32);
-        let start = raw_start.round() as usize;
-        self.offset = (start as f32 / max_start as f32).clamp(0.0, self.max_offset());
+        self.offset = left.clamp(0.0, max_left(sample_count, self.zoom));
     }
 
     fn apply_zoom_at(&mut self, factor: f32, anchor_x: f32, sample_count: usize) {
         if sample_count == 0 {
             return;
         }
-        let anchor_x = anchor_x.clamp(0.0, 1.0);
-        let (old_left, old_width) = self.timeline_window(sample_count);
-        let anchor_timeline = old_left + anchor_x * old_width;
+        let anchor_x = (anchor_x as f64).clamp(0.0, 1.0);
+        let old_visible = visible_samples(sample_count, self.zoom);
+        let (start, _, phase) = self.sample_window(sample_count);
+        let anchor_sample = start as f64 + phase as f64 + anchor_x * old_visible as f64;
 
-        self.zoom = (self.zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
+        self.zoom = (self.zoom * factor).clamp(MIN_ZOOM, max_zoom(sample_count));
 
-        let (_, new_width) = self.timeline_window(sample_count);
-        let new_left = anchor_timeline - anchor_x * new_width;
-        self.set_timeline_left(new_left, sample_count);
+        let new_visible = visible_samples(sample_count, self.zoom);
+        let max_start = sample_count.saturating_sub(new_visible) as f64;
+        let new_start = (anchor_sample - anchor_x * new_visible as f64).clamp(0.0, max_start);
+        self.set_timeline_left(new_start / sample_count as f64, sample_count);
         self.overscroll = 0.0;
     }
 
-    pub(crate) fn visible_fraction(&self) -> f32 {
-        1.0 / self.zoom
-    }
-
-    pub(crate) fn max_offset(&self) -> f32 {
-        (1.0 - self.visible_fraction()).max(0.0)
+    pub(crate) fn max_offset(&self, sample_count: usize) -> f64 {
+        max_left(sample_count, self.zoom)
     }
 
     /// Visible sample window: `(start, end, sub-sample phase)`.
@@ -227,31 +245,35 @@ impl WaveFormView {
             return (0, 0, 0.0);
         }
 
-        let visible = (sample_count as f32 * self.visible_fraction())
-            .ceil()
-            .clamp(1.0, sample_count as f32) as usize;
+        let visible = visible_samples(sample_count, self.zoom);
         let max_start = sample_count.saturating_sub(visible);
         if max_start == 0 {
             return (0, visible.min(sample_count), 0.0);
         }
 
-        let raw_start = self.offset * max_start as f32;
+        let raw_start = (self.offset as f64 * sample_count as f64).clamp(0.0, max_start as f64);
         let start = raw_start.floor() as usize;
-        let phase = raw_start - start as f32;
+        let phase = (raw_start - start as f64) as f32;
         let start = start.min(max_start);
         (start, (start + visible).min(sample_count), phase)
     }
 
     fn view_cache_key(&self, sample_count: usize) -> (u32, u32, u32) {
         let (start, _, phase) = self.sample_window(sample_count);
-        let zoom_q = (self.zoom * 64.0).round() as u32;
+        let zoom_q = self.zoom.to_bits();
         let phase_q = (phase * 8.0).round() as u32;
         (start as u32, zoom_q, phase_q)
     }
 
-    fn draw_cache_key(&self, sample_count: usize, theme: &Theme) -> (u32, u32, u32, u32) {
+    fn draw_cache_key(
+        &self,
+        sample_count: usize,
+        plot_width: f32,
+        theme: &Theme,
+    ) -> (u32, u32, u32, u32, u32) {
         let (start, zoom_q, phase_q) = self.view_cache_key(sample_count);
-        (start, zoom_q, phase_q, theme_cache_key(theme))
+        let width_q = plot_width.round() as u32;
+        (start, zoom_q, phase_q, width_q, theme_cache_key(theme))
     }
 
     fn content_scale(&self) -> (f32, f32) {
@@ -277,7 +299,7 @@ impl WaveFormView {
             return 1;
         }
 
-        let max_columns = (width * MAX_COLUMNS_FACTOR).ceil() as usize;
+        let max_columns = width.ceil() as usize;
         max_columns.min(visible_samples).max(1)
     }
 
@@ -289,12 +311,34 @@ impl WaveFormView {
         visible_samples.div_ceil(columns).next_power_of_two().max(1)
     }
 
+    fn waveform_layout(&self, width: f32, visible_count: usize) -> WaveformLayout {
+        let samples_per_col = self.samples_per_column(width, visible_count);
+        let column_count = visible_count.div_ceil(samples_per_col);
+        let column_width = if column_count > 0 {
+            width / column_count as f32
+        } else {
+            width
+        };
+        let px_per_sample = if visible_count > 0 {
+            width / visible_count as f32
+        } else {
+            width
+        };
+        WaveformLayout {
+            width,
+            samples_per_col,
+            column_count,
+            column_width,
+            px_per_sample,
+            sample_point_mode: samples_per_col == 1,
+        }
+    }
+
     fn sample_point_mode(&self, width: f32, visible_samples: usize) -> bool {
         if visible_samples == 0 || width <= 0.0 {
             return false;
         }
-        self.samples_per_column(width, visible_samples) == 1
-            && width / visible_samples as f32 >= SAMPLE_POINTS_MIN_PX
+        self.waveform_layout(width, visible_samples).sample_point_mode
     }
 
     pub fn apply_key(view: &mut Self, key: &Key, sample_count: usize) -> bool {
@@ -308,11 +352,11 @@ impl WaveFormView {
                 true
             }
             Key::Named(iced::keyboard::key::Named::ArrowLeft) => {
-                view.pan(-PAN_STEP);
+                view.pan(-PAN_STEP, sample_count);
                 true
             }
             Key::Named(iced::keyboard::key::Named::ArrowRight) => {
-                view.pan(PAN_STEP);
+                view.pan(PAN_STEP, sample_count);
                 true
             }
             _ => false,
@@ -335,7 +379,7 @@ pub struct WaveFormState {
 
 #[derive(Clone, Copy, Default, PartialEq)]
 struct PanAnchor {
-    view_offset: f32,
+    view_offset: f64,
     overscroll: f32,
 }
 
@@ -349,7 +393,8 @@ pub struct WaveForm {
     modifiers: Modifiers,
     pan_active: bool,
     cache: Cache,
-    content_cache_key: Cell<(u32, u32, u32, u32)>,
+    content_cache_key: Cell<(u32, u32, u32, u32, u32)>,
+    two_outline_armed: Cell<bool>,
 }
 
 #[derive(Clone, Copy)]
@@ -384,8 +429,18 @@ impl PlotArea {
 
 struct ColumnSample {
     x: f32,
-    y_min: f32,
-    y_max: f32,
+    stroke_y_min: f32,
+    stroke_y_max: f32,
+}
+
+#[derive(Clone, Copy)]
+struct WaveformLayout {
+    width: f32,
+    samples_per_col: usize,
+    column_count: usize,
+    column_width: f32,
+    px_per_sample: f32,
+    sample_point_mode: bool,
 }
 
 struct WaveformPalette {
@@ -437,12 +492,15 @@ impl WaveForm {
             modifiers: Modifiers::default(),
             pan_active: false,
             cache: Cache::new(),
-            content_cache_key: Cell::new((0, 0, 0, 0)),
+            content_cache_key: Cell::new((0, 0, 0, 0, 0)),
+            two_outline_armed: Cell::new(false),
         }
     }
 
-    fn sync_content_cache(&self, theme: &Theme) {
-        let key = self.view.draw_cache_key(self.samples.len(), theme);
+    fn sync_content_cache(&self, theme: &Theme, plot_width: f32) {
+        let key = self
+            .view
+            .draw_cache_key(self.samples.len(), plot_width, theme);
         if self.content_cache_key.get() != key {
             self.cache.clear();
             self.content_cache_key.set(key);
@@ -635,22 +693,317 @@ impl WaveForm {
         self.view = view;
     }
 
-    fn peak_amplitude(chunk: &[f32]) -> f32 {
-        chunk
+    fn column_extents(chunk: &[f32]) -> (f32, f32) {
+        let mut iter = chunk.iter().map(|sample| sample.clamp(-1.0, 1.0));
+        let Some(first) = iter.next() else {
+            return (0.0, 0.0);
+        };
+        let mut min = first;
+        let mut max = first;
+        for sample in iter {
+            min = min.min(sample);
+            max = max.max(sample);
+        }
+        (min, max)
+    }
+
+    fn flip_y(y: f32, center: f32) -> f32 {
+        2.0 * center - y
+    }
+
+    fn sinc_pi(x: f64) -> f64 {
+        if x.abs() < 1e-12 {
+            1.0
+        } else {
+            let pix = std::f64::consts::PI * x;
+            pix.sin() / pix
+        }
+    }
+
+    /// `L(x) = sinc(x) sinc(x/3)` for `|x| < 3`.
+    fn lanczos3(x: f64) -> f64 {
+        let a = f64::from(LANCZOS_A);
+        if !x.is_finite() || x.abs() >= a {
+            0.0
+        } else {
+            Self::sinc_pi(x) * Self::sinc_pi(x / a)
+        }
+    }
+
+    /// Lanczos-3 at sample index `t`; zero-extend outside `[0, samples.len())`. `t = 0` is `samples[0]`.
+    fn interpolate_at(samples: &[f32], t: f64) -> f32 {
+        if samples.is_empty() || !t.is_finite() {
+            return 0.0;
+        }
+        let n = samples.len();
+        let a = i64::from(LANCZOS_A);
+        let t = t.clamp(-a as f64, n as f64 + a as f64);
+        let center = t.floor() as i64;
+        let first = (center - a + 1).max(0);
+        let last = (center + a).min(n as i64 - 1);
+        if first > last {
+            return 0.0;
+        }
+        let mut sum = 0.0;
+        for i in first..=last {
+            let sample = samples[i as usize] as f64;
+            sum += sample * Self::lanczos3(t - i as f64);
+        }
+        sum as f32
+    }
+
+    fn sample_index_at_x(x: f32, start: usize, phase: f32, px_per_sample: f32) -> f64 {
+        if px_per_sample <= 0.0 || !px_per_sample.is_finite() {
+            return start as f64;
+        }
+        start as f64 - 0.5 + f64::from(phase) + f64::from(x) / f64::from(px_per_sample)
+    }
+
+    fn mirror_fill_gradient(fill: Color, outline_y: f32, mirror_y: f32, center: f32) -> Gradient {
+        let clear = Color {
+            r: fill.r,
+            g: fill.g,
+            b: fill.b,
+            a: 0.0,
+        };
+        let delta = mirror_y - outline_y;
+        let outline_y = if delta.abs() < 1.0 {
+            let dir = if delta != 0.0 {
+                delta.signum()
+            } else {
+                let fallback = center - outline_y;
+                if fallback != 0.0 {
+                    fallback.signum()
+                } else {
+                    1.0
+                }
+            };
+            outline_y - dir
+        } else {
+            outline_y
+        };
+        Gradient::Linear(
+            gradient::Linear::new(Point::new(0.0, outline_y), Point::new(0.0, mirror_y))
+                .add_stop(0.0, fill)
+                .add_stop(0.22, fill)
+                .add_stop(0.5, fill.scale_alpha(0.45))
+                .add_stop(0.72, fill.scale_alpha(0.12))
+                .add_stop(0.85, clear)
+                .add_stop(1.0, clear),
+        )
+    }
+
+    fn detected_peak_y(columns: &[ColumnSample], center: f32, upper: bool) -> Option<f32> {
+        let mut peak: Option<f32> = None;
+        for column in columns {
+            let y = if upper {
+                if !Self::has_upper_lobe(column, center) {
+                    continue;
+                }
+                column.stroke_y_max
+            } else {
+                if !Self::has_lower_lobe(column, center) {
+                    continue;
+                }
+                column.stroke_y_min
+            };
+            peak = Some(match peak {
+                Some(current) if upper => current.min(y),
+                Some(current) => current.max(y),
+                None => y,
+            });
+        }
+        peak
+    }
+
+    fn has_upper_lobe(column: &ColumnSample, center: f32) -> bool {
+        column.stroke_y_max + 0.5 < center
+    }
+
+    fn has_lower_lobe(column: &ColumnSample, center: f32) -> bool {
+        column.stroke_y_min > center + 0.5
+    }
+
+    fn upper_fill_span(
+        column: &ColumnSample,
+        center: f32,
+        allow_mirror: bool,
+    ) -> Option<(f32, f32)> {
+        if !Self::has_upper_lobe(column, center) {
+            return None;
+        }
+        let outline = column.stroke_y_max;
+        let mut end = if allow_mirror && !Self::has_lower_lobe(column, center) {
+            Self::flip_y(outline, center)
+        } else {
+            center
+        };
+        if Self::has_lower_lobe(column, center) {
+            end = end.min(column.stroke_y_min).min(center);
+        }
+        if (end - outline).abs() <= 0.5 {
+            None
+        } else {
+            Some((outline, end))
+        }
+    }
+
+    fn lower_fill_span(
+        column: &ColumnSample,
+        center: f32,
+        allow_mirror: bool,
+    ) -> Option<(f32, f32)> {
+        if !Self::has_lower_lobe(column, center) {
+            return None;
+        }
+        let outline = column.stroke_y_min;
+        let mut end = if allow_mirror && !Self::has_upper_lobe(column, center) {
+            Self::flip_y(outline, center)
+        } else {
+            center
+        };
+        if Self::has_upper_lobe(column, center) {
+            end = end.max(column.stroke_y_max).max(center);
+        }
+        if (end - outline).abs() <= 0.5 {
+            None
+        } else {
+            Some((outline, end))
+        }
+    }
+
+    fn append_column_quad(builder: &mut path::Builder, x: f32, half: f32, y0: f32, y1: f32) {
+        builder.move_to(Point::new(x - half, y0));
+        builder.line_to(Point::new(x + half, y0));
+        builder.line_to(Point::new(x + half, y1));
+        builder.line_to(Point::new(x - half, y1));
+        builder.close();
+    }
+
+    fn two_outline_ratio(columns: &[ColumnSample], center: f32) -> f32 {
+        if columns.is_empty() {
+            return 0.0;
+        }
+        let bipolar = columns
             .iter()
-            .map(|sample| sample.abs())
-            .fold(0.0f32, |peak, sample| peak.max(sample))
-            .clamp(0.0, 1.0)
+            .filter(|column| Self::has_upper_lobe(column, center) && Self::has_lower_lobe(column, center))
+            .count();
+        bipolar as f32 / columns.len() as f32
+    }
+
+    fn two_outline_should_arm(ratio: f32, armed: bool) -> bool {
+        if armed {
+            ratio >= TWO_OUTLINE_EXIT
+        } else {
+            ratio >= TWO_OUTLINE_ENTER
+        }
+    }
+
+    fn draw_lobe_fills(
+        &self,
+        frame: &mut Frame,
+        columns: &[ColumnSample],
+        column_width: f32,
+        center: f32,
+        fill: Color,
+    ) {
+        let ratio = Self::two_outline_ratio(columns, center);
+        let two_outline =
+            Self::two_outline_should_arm(ratio, self.two_outline_armed.get());
+        self.two_outline_armed.set(two_outline);
+        let half = column_width * 0.5;
+
+        if two_outline {
+            let mut builder = path::Builder::new();
+            for column in columns {
+                Self::append_column_quad(
+                    &mut builder,
+                    column.x,
+                    half,
+                    column.stroke_y_max,
+                    column.stroke_y_min,
+                );
+            }
+            frame.fill(&builder.build(), fill);
+            return;
+        }
+
+        let any_up = columns
+            .iter()
+            .any(|column| Self::has_upper_lobe(column, center));
+        let any_down = columns
+            .iter()
+            .any(|column| Self::has_lower_lobe(column, center));
+        let allow_mirror = any_up != any_down;
+
+        let mut solid = path::Builder::new();
+        let mut mirror = path::Builder::new();
+        let mut solid_any = false;
+        let mut mirror_any = false;
+        let mut peak: Option<f32> = None;
+
+        for column in columns {
+            if let Some((outline, end)) =
+                Self::upper_fill_span(column, center, allow_mirror)
+            {
+                let solid_end = if allow_mirror { center } else { end };
+                if (solid_end - outline).abs() > 0.5 {
+                    Self::append_column_quad(&mut solid, column.x, half, outline, solid_end);
+                    solid_any = true;
+                }
+                if allow_mirror {
+                    Self::append_column_quad(&mut mirror, column.x, half, center, end);
+                    mirror_any = true;
+                }
+                peak = Some(match peak {
+                    Some(current) => current.min(outline),
+                    None => outline,
+                });
+            }
+            if let Some((outline, end)) =
+                Self::lower_fill_span(column, center, allow_mirror)
+            {
+                let solid_end = if allow_mirror { center } else { end };
+                if (solid_end - outline).abs() > 0.5 {
+                    Self::append_column_quad(&mut solid, column.x, half, outline, solid_end);
+                    solid_any = true;
+                }
+                if allow_mirror {
+                    Self::append_column_quad(&mut mirror, column.x, half, center, end);
+                    mirror_any = true;
+                }
+                peak = Some(match peak {
+                    Some(current) => current.max(outline),
+                    None => outline,
+                });
+            }
+        }
+
+        if solid_any {
+            frame.fill(&solid.build(), fill);
+        }
+        if mirror_any {
+            if let Some(peak) = peak {
+                frame.fill(
+                    &mirror.build(),
+                    Self::mirror_fill_gradient(
+                        fill,
+                        center,
+                        Self::flip_y(peak, center),
+                        center,
+                    ),
+                );
+            }
+        }
     }
 
     fn columns_from_window(
         &self,
-        view: WaveFormView,
-        width: f32,
         height: f32,
         start: usize,
         end: usize,
         phase: f32,
+        layout: WaveformLayout,
     ) -> Vec<ColumnSample> {
         let center = height / 2.0;
         let visible_count = end.saturating_sub(start);
@@ -658,10 +1011,16 @@ impl WaveForm {
             return Vec::new();
         }
 
-        let samples_per_col = view.samples_per_column(width, visible_count);
-        let column_count = visible_count.div_ceil(samples_per_col);
-        let column_width = width / column_count as f32;
-        let px_per_sample = width / visible_count as f32;
+        let WaveformLayout {
+            samples_per_col,
+            column_count,
+            column_width,
+            px_per_sample,
+            width,
+            ..
+        } = layout;
+        debug_assert!(column_count <= width.ceil() as usize);
+
         let x_shift = -phase * px_per_sample;
         let slice = &self.samples[start..end];
 
@@ -672,60 +1031,28 @@ impl WaveForm {
                 break;
             }
             let chunk_end = (chunk_start + samples_per_col).min(visible_count);
-            let peak = Self::peak_amplitude(&slice[chunk_start..chunk_end]);
+            let (min_sample, max_sample) =
+                Self::column_extents(&slice[chunk_start..chunk_end]);
             let x = (col as f32 + 0.5) * column_width + x_shift;
             out.push(ColumnSample {
                 x,
-                y_min: center + peak * center,
-                y_max: center - peak * center,
+                stroke_y_min: center - min_sample * center,
+                stroke_y_max: center - max_sample * center,
             });
         }
 
         out
     }
 
-    fn envelope_path(columns: &[ColumnSample]) -> Path {
+    fn edge_path(columns: &[ColumnSample], y: impl Fn(&ColumnSample) -> f32) -> Path {
         if columns.is_empty() {
             return path::Builder::new().build();
         }
 
         let mut builder = path::Builder::new();
-        builder.move_to(Point {
-            x: columns[0].x,
-            y: columns[0].y_max,
-        });
+        builder.move_to(Point::new(columns[0].x, y(&columns[0])));
         for column in columns.iter().skip(1) {
-            builder.line_to(Point {
-                x: column.x,
-                y: column.y_max,
-            });
-        }
-        for column in columns.iter().rev() {
-            builder.line_to(Point {
-                x: column.x,
-                y: column.y_min,
-            });
-        }
-        builder.close();
-        builder.build()
-    }
-
-    fn envelope_line_path(columns: &[ColumnSample], upper: bool) -> Path {
-        if columns.is_empty() {
-            return path::Builder::new().build();
-        }
-
-        let y = |column: &ColumnSample| if upper { column.y_max } else { column.y_min };
-        let mut builder = path::Builder::new();
-        builder.move_to(Point {
-            x: columns[0].x,
-            y: y(&columns[0]),
-        });
-        for column in columns.iter().skip(1) {
-            builder.line_to(Point {
-                x: column.x,
-                y: y(column),
-            });
+            builder.line_to(Point::new(column.x, y(column)));
         }
         builder.build()
     }
@@ -830,15 +1157,31 @@ impl WaveForm {
             return;
         }
 
-        if view.sample_point_mode(size.width, visible_count) {
-            self.draw_sample_points(frame, &palette, size, start, end, phase, center);
+        let layout = view.waveform_layout(size.width, visible_count);
+
+        if layout.sample_point_mode {
+            self.draw_sample_points(
+                frame,
+                &palette,
+                start,
+                end,
+                phase,
+                center,
+                layout,
+            );
         } else {
-            let columns = self.columns_from_window(view, size.width, size.height, start, end, phase);
+            let columns = self.columns_from_window(
+                size.height,
+                start,
+                end,
+                phase,
+                layout,
+            );
             if columns.is_empty() {
                 return;
             }
 
-            frame.fill(&Self::envelope_path(&columns), palette.fill);
+            self.draw_lobe_fills(frame, &columns, layout.column_width, center, palette.fill);
 
             let stroke = Stroke::default()
                 .with_color(palette.stroke)
@@ -846,8 +1189,14 @@ impl WaveForm {
                 .with_line_cap(LineCap::Round)
                 .with_line_join(LineJoin::Round);
 
-            frame.stroke(&Self::envelope_line_path(&columns, true), stroke);
-            frame.stroke(&Self::envelope_line_path(&columns, false), stroke);
+            frame.stroke(
+                &Self::edge_path(&columns, |column| column.stroke_y_max),
+                stroke,
+            );
+            frame.stroke(
+                &Self::edge_path(&columns, |column| column.stroke_y_min),
+                stroke,
+            );
         }
 
         self.draw_time_markers(frame, &palette, size, view);
@@ -857,18 +1206,21 @@ impl WaveForm {
         &self,
         frame: &mut Frame,
         palette: &WaveformPalette,
-        size: Size,
         start: usize,
         end: usize,
         phase: f32,
         center: f32,
+        layout: WaveformLayout,
     ) {
         let visible_count = end.saturating_sub(start);
         if visible_count == 0 {
             return;
         }
 
-        let px_per_sample = size.width / visible_count as f32;
+        let px_per_sample = layout.px_per_sample;
+        if px_per_sample <= 0.0 || !px_per_sample.is_finite() {
+            return;
+        }
         let x_shift = -phase * px_per_sample;
         let slice = &self.samples[start..end];
 
@@ -883,29 +1235,46 @@ impl WaveForm {
             .with_line_join(LineJoin::Round);
 
         let mut stem_builder = path::Builder::new();
-        let mut trace_builder = path::Builder::new();
-        let mut trace_started = false;
-
         for (index, sample) in slice.iter().enumerate() {
             let x = (index as f32 + 0.5) * px_per_sample + x_shift;
-            let sample = sample.clamp(-1.0, 1.0);
-            let y = center - sample * center;
-
+            let y = center - sample.clamp(-1.0, 1.0) * center;
             if (y - center).abs() > 0.35 {
                 stem_builder.move_to(Point::new(x, center));
                 stem_builder.line_to(Point::new(x, y));
             }
+        }
 
-            if trace_started {
-                trace_builder.line_to(Point::new(x, y));
-            } else {
-                trace_builder.move_to(Point::new(x, y));
-                trace_started = true;
+        let mut trace_builder = path::Builder::new();
+        let mut trace_started = false;
+
+        if px_per_sample >= 1.5 {
+            let pixels = layout.width.ceil().max(1.0) as usize;
+            for x in (0..pixels).map(|px| px as f32 + 0.5) {
+                let t = Self::sample_index_at_x(x, start, phase, px_per_sample);
+                let sample = Self::interpolate_at(&self.samples, t).clamp(-1.0, 1.0);
+                let y = center - sample * center;
+                if trace_started {
+                    trace_builder.line_to(Point::new(x, y));
+                } else {
+                    trace_builder.move_to(Point::new(x, y));
+                    trace_started = true;
+                }
+            }
+        } else {
+            for (index, sample) in slice.iter().enumerate() {
+                let x = (index as f32 + 0.5) * px_per_sample + x_shift;
+                let y = center - sample.clamp(-1.0, 1.0) * center;
+                if trace_started {
+                    trace_builder.line_to(Point::new(x, y));
+                } else {
+                    trace_builder.move_to(Point::new(x, y));
+                    trace_started = true;
+                }
             }
         }
 
+        frame.stroke(&stem_builder.build(), stem_stroke);
         if trace_started {
-            frame.stroke(&stem_builder.build(), stem_stroke);
             frame.stroke(&trace_builder.build(), trace_stroke);
         }
     }
@@ -1150,7 +1519,10 @@ impl WaveForm {
                     if pan_delta == 0.0 {
                         return false;
                     }
-                    view.apply_pan_delta(pan_delta * PAN_STEP);
+                    view.apply_pan_delta(
+                        pan_delta as f64 * PAN_STEP as f64,
+                        self.samples.len(),
+                    );
                     return true;
                 }
                 let plot = PlotArea::from_size(bounds.size());
@@ -1230,7 +1602,7 @@ impl Program<Message> for WaveForm {
             });
             layers.push(frame.into_geometry());
         } else {
-            self.sync_content_cache(theme);
+            self.sync_content_cache(theme, plot_size.width);
             layers.push(self.cache.draw(renderer, size, |frame| {
                 frame.with_clip(plot_clip, |frame| {
                     Self::with_plot_origin(frame, plot, |frame| {
@@ -1353,10 +1725,10 @@ impl Program<Message> for WaveForm {
             && let Some(position) = cursor.position_in(bounds)
             && let Some(anchor) = state.pan_anchor
         {
-            let visible = self.view.visible_fraction();
             let last_x = state.last_pan_x.unwrap_or(position.x);
             let plot = PlotArea::from_size(bounds.size());
-            let step = -(position.x - last_x) / plot.width * visible;
+            let visible = visible_fraction_of(self.samples.len(), self.view.zoom);
+            let step = -(position.x - last_x) as f64 / plot.width as f64 * visible;
             state.last_pan_x = Some(position.x);
 
             let mut view = state.last_pan_view.unwrap_or(WaveFormView {
@@ -1364,7 +1736,7 @@ impl Program<Message> for WaveForm {
                 offset: anchor.view_offset,
                 overscroll: anchor.overscroll,
             });
-            view.apply_pan_delta(step);
+            view.apply_pan_delta(step, self.samples.len());
             state.last_pan_view = Some(view);
             return Some(Action::request_redraw().and_capture());
         }
@@ -1430,6 +1802,39 @@ mod wheel_zoom_tests {
     }
 
     #[test]
+    fn wheel_zoom_keeps_sample_under_cursor() {
+        let mut view = WaveFormView {
+            zoom: 8.0,
+            offset: 0.2,
+            overscroll: 0.0,
+        };
+        let samples = 100_000;
+        let anchor_x = 0.8;
+        let (start, end, phase) = view.sample_window(samples);
+        let before = start as f64 + phase as f64 + anchor_x as f64 * (end - start) as f64;
+
+        view.apply_zoom_at(2.0, anchor_x, samples);
+
+        let (start, end, phase) = view.sample_window(samples);
+        let after = start as f64 + phase as f64 + anchor_x as f64 * (end - start) as f64;
+        assert!(
+            (after - before).abs() < 2.0,
+            "cursor sample moved: before={before} after={after}"
+        );
+    }
+
+    #[test]
+    fn pan_to_max_shows_last_sample() {
+        let mut view = WaveFormView {
+            zoom: 4.0,
+            ..Default::default()
+        };
+        view.offset = view.max_offset(100_000);
+        let (_, end, _) = view.sample_window(100_000);
+        assert_eq!(end, 100_000);
+    }
+
+    #[test]
     fn scroll_down_then_up_changes_zoom_direction() {
         let mut view = WaveFormView::default();
         let mut pending = 0.0;
@@ -1489,5 +1894,264 @@ mod time_marker_tests {
         assert!(minor < major);
         assert!(WaveForm::tick_step_visible(minor, visible_secs, width));
         assert!(minor >= 1.0, "blended 0.1s/1s ticks must not be chosen");
+    }
+}
+
+#[cfg(test)]
+mod envelope_tests {
+    use super::{max_zoom, ColumnSample, WaveForm, WaveFormView};
+    use iced::Color;
+    use iced::widget::canvas::Gradient;
+    use iced::Theme;
+
+    #[test]
+    fn column_extents_preserves_asymmetric_lobes() {
+        let positive_only = [0.2, 0.5, 0.8];
+        let (min, max) = WaveForm::column_extents(&positive_only);
+        assert!(min >= 0.0);
+        assert_eq!(max, 0.8);
+
+        let negative_only = [-0.7, -0.4, -0.1];
+        let (min, max) = WaveForm::column_extents(&negative_only);
+        assert_eq!(min, -0.7);
+        assert!(max <= 0.0);
+    }
+
+    #[test]
+    fn sample_point_mode_when_one_sample_per_column() {
+        let view = WaveFormView { zoom: 4096.0, ..Default::default() };
+        let width = 900.0;
+        let visible = 400;
+        let layout = view.waveform_layout(width, visible);
+        assert_eq!(layout.samples_per_col, 1);
+        assert!(layout.px_per_sample >= 1.0);
+        assert!(layout.sample_point_mode);
+    }
+
+    #[test]
+    fn sample_point_mode_has_no_visible_count_cap() {
+        let view = WaveFormView::default();
+        let width = 5000.0;
+        let visible = 5000;
+        let layout = view.waveform_layout(width, visible);
+        assert_eq!(layout.samples_per_col, 1);
+        assert!(layout.sample_point_mode);
+    }
+
+    #[test]
+    fn zoom_can_reach_sample_level_on_long_files() {
+        let mut view = WaveFormView::default();
+        let sample_count = 8_640_000;
+        let width = 800.0;
+        for _ in 0..80 {
+            view.zoom_in(sample_count);
+        }
+        assert_eq!(view.zoom, max_zoom(sample_count));
+        let (start, end, _) = view.sample_window(sample_count);
+        let visible = end.saturating_sub(start);
+        let layout = view.waveform_layout(width, visible);
+        assert_eq!(visible, 1);
+        assert_eq!(layout.samples_per_col, 1);
+        assert!(layout.sample_point_mode);
+    }
+
+    #[test]
+    fn column_count_stays_at_or_below_width() {
+        let view = WaveFormView { zoom: 28.0, ..Default::default() };
+        let width = 900.0;
+        let visible = 132_300;
+        let layout = view.waveform_layout(width, visible);
+        assert!(
+            layout.column_count <= width.ceil() as usize,
+            "got {}",
+            layout.column_count
+        );
+    }
+
+    #[test]
+    fn column_envelope_y_matches_sample_y() {
+        let center = 100.0;
+        let (min, max) = WaveForm::column_extents(&[0.25, 0.75]);
+        let y_top = center - max * center;
+        let y_bottom = center - min * center;
+        assert!((y_top - 25.0).abs() < f32::EPSILON);
+        assert!((y_bottom - 75.0).abs() < f32::EPSILON);
+        assert!(y_top < y_bottom);
+    }
+
+    #[test]
+    fn flip_y_mirrors_across_center() {
+        let center = 100.0;
+        assert!((WaveForm::flip_y(25.0, center) - 175.0).abs() < f32::EPSILON);
+        assert!((WaveForm::flip_y(center, center) - center).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn up_lobe_mirrors_below_and_down_lobe_mirrors_above() {
+        let center = 100.0;
+        let up = ColumnSample {
+            x: 0.0,
+            stroke_y_min: center,
+            stroke_y_max: 20.0,
+        };
+        let (outline, end) = WaveForm::upper_fill_span(&up, center, true).expect("up span");
+        assert!((outline - 20.0).abs() < f32::EPSILON);
+        assert!((end - 180.0).abs() < f32::EPSILON);
+        assert!(WaveForm::lower_fill_span(&up, center, true).is_none());
+
+        let down = ColumnSample {
+            x: 0.0,
+            stroke_y_min: 180.0,
+            stroke_y_max: center,
+        };
+        let (outline, end) = WaveForm::lower_fill_span(&down, center, true).expect("down span");
+        assert!((outline - 180.0).abs() < f32::EPSILON);
+        assert!((end - 20.0).abs() < f32::EPSILON);
+        assert!(WaveForm::upper_fill_span(&down, center, true).is_none());
+    }
+
+    #[test]
+    fn bipolar_column_does_not_fill_past_outline() {
+        let center = 100.0;
+        let column = ColumnSample {
+            x: 0.0,
+            stroke_y_min: 160.0,
+            stroke_y_max: 20.0,
+        };
+        let (up_outline, up_end) =
+            WaveForm::upper_fill_span(&column, center, true).expect("up span");
+        assert!((up_outline - 20.0).abs() < f32::EPSILON);
+        assert!(up_end <= center + f32::EPSILON);
+        assert!(up_end <= column.stroke_y_min);
+        let (down_outline, down_end) =
+            WaveForm::lower_fill_span(&column, center, true).expect("down span");
+        assert!((down_outline - 160.0).abs() < f32::EPSILON);
+        assert!(down_end >= center - f32::EPSILON);
+        assert!(down_end >= column.stroke_y_max);
+    }
+
+    #[test]
+    fn mixed_sides_clip_fill_at_center() {
+        let center = 100.0;
+        let up = ColumnSample {
+            x: 0.0,
+            stroke_y_min: center,
+            stroke_y_max: 20.0,
+        };
+        let (outline, end) = WaveForm::upper_fill_span(&up, center, false).expect("up span");
+        assert!((outline - 20.0).abs() < f32::EPSILON);
+        assert!((end - center).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn two_outline_view_uses_solid_fill_not_gradient() {
+        let center = 100.0;
+        let columns = vec![
+            ColumnSample {
+                x: 0.0,
+                stroke_y_min: 160.0,
+                stroke_y_max: 20.0,
+            },
+            ColumnSample {
+                x: 4.0,
+                stroke_y_min: 150.0,
+                stroke_y_max: 40.0,
+            },
+        ];
+        let ratio = WaveForm::two_outline_ratio(&columns, center);
+        assert!(WaveForm::two_outline_should_arm(ratio, false));
+    }
+
+    #[test]
+    fn two_outline_fill_uses_hysteresis() {
+        assert!(!WaveForm::two_outline_should_arm(0.50, false));
+        assert!(WaveForm::two_outline_should_arm(0.50, true));
+        assert!(WaveForm::two_outline_should_arm(0.70, false));
+        assert!(!WaveForm::two_outline_should_arm(0.30, true));
+    }
+
+    #[test]
+    fn gradient_is_opaque_at_outline_and_clear_at_mirror() {
+        let color = Color::from_rgb(0.2, 0.4, 1.0).scale_alpha(0.22);
+        let Gradient::Linear(linear) =
+            WaveForm::mirror_fill_gradient(color, 20.0, 180.0, 100.0);
+        assert!((linear.start.y - 20.0).abs() < f32::EPSILON);
+        assert!((linear.end.y - 180.0).abs() < f32::EPSILON);
+        let stops: Vec<_> = linear.stops.iter().flatten().collect();
+        assert!((stops[0].color.a - 0.22).abs() < f32::EPSILON);
+        assert_eq!(stops.last().map(|stop| stop.color.a), Some(0.0));
+        assert!(stops.iter().any(|stop| stop.offset >= 0.5 && stop.color.a > 0.0));
+        assert!(stops.iter().any(|stop| stop.offset >= 0.85 && stop.color.a == 0.0));
+    }
+
+    #[test]
+    fn detected_peak_y_picks_extreme_lobe() {
+        let center = 100.0;
+        let columns = vec![
+            ColumnSample {
+                x: 0.0,
+                stroke_y_min: center,
+                stroke_y_max: 40.0,
+            },
+            ColumnSample {
+                x: 4.0,
+                stroke_y_min: center,
+                stroke_y_max: 15.0,
+            },
+        ];
+        assert_eq!(WaveForm::detected_peak_y(&columns, center, true), Some(15.0));
+        assert_eq!(WaveForm::detected_peak_y(&columns, center, false), None);
+    }
+
+    #[test]
+    fn draw_cache_key_includes_plot_width() {
+        let view = WaveFormView::default();
+        let theme = Theme::Dark;
+        let narrow = view.draw_cache_key(10_000, 400.0, &theme);
+        let wide = view.draw_cache_key(10_000, 800.0, &theme);
+        assert_ne!(narrow, wide);
+    }
+
+    #[test]
+    fn lanczos3_is_one_at_origin_and_zero_outside_window() {
+        assert!((WaveForm::lanczos3(0.0) - 1.0).abs() < 1e-12);
+        assert_eq!(WaveForm::lanczos3(3.0), 0.0);
+        assert_eq!(WaveForm::lanczos3(-3.0), 0.0);
+        assert_eq!(WaveForm::lanczos3(4.0), 0.0);
+        assert_eq!(WaveForm::lanczos3(f64::NAN), 0.0);
+    }
+
+    #[test]
+    fn interpolate_at_reconstructs_integer_samples() {
+        let samples = [0.0, 0.5, -0.25, 1.0];
+        for (index, &sample) in samples.iter().enumerate() {
+            let value = WaveForm::interpolate_at(&samples, index as f64);
+            assert!(
+                (value - sample).abs() < 1e-6,
+                "t={index}: got {value}, want {sample}"
+            );
+        }
+    }
+
+    #[test]
+    fn interpolate_at_is_safe_at_boundaries() {
+        assert_eq!(WaveForm::interpolate_at(&[], 0.0), 0.0);
+        assert_eq!(WaveForm::interpolate_at(&[0.8], f64::NAN), 0.0);
+        let edge = WaveForm::interpolate_at(&[1.0, 0.0, -1.0], -1.5);
+        let past = WaveForm::interpolate_at(&[1.0, 0.0, -1.0], 8.0);
+        assert!(edge.is_finite());
+        assert!(past.is_finite());
+        assert!(past.abs() < 1e-6);
+        assert_eq!(WaveForm::interpolate_at(&[1.0, 0.0, -1.0], 1e300), 0.0);
+    }
+
+    #[test]
+    fn sample_index_at_x_matches_stem_centers() {
+        let start = 10usize;
+        let phase = 0.25_f32;
+        let px = 12.0_f32;
+        let x = (2.0 + 0.5) * px - phase * px;
+        let t = WaveForm::sample_index_at_x(x, start, phase, px);
+        assert!((t - (start + 2) as f64).abs() < 1e-6);
     }
 }
