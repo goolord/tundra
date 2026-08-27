@@ -271,10 +271,10 @@ pub fn is_hidden(entry: &Path) -> bool {
     }
     #[cfg(target_os = "macos")]
     {
-        use std::os::darwin::fs::MetadataExt;
+        use std::os::macos::fs::MetadataExt;
         const UF_HIDDEN: u32 = 0x8000;
         if let Ok(meta) = std::fs::metadata(entry) {
-            return meta.flags() & UF_HIDDEN != 0;
+            return meta.st_flags() & UF_HIDDEN != 0;
         }
     }
     false
