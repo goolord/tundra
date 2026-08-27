@@ -1,4 +1,4 @@
-use iced::widget::{button, container, mouse_area, row, text};
+use iced::widget::{button, container, mouse_area, row, stack, text, Space};
 use iced::{Alignment, Border, Element, Length, Padding, Shadow, alignment, theme};
 use iced_aw::menu::{self, Menu};
 use iced_aw::style::{Status, menu_bar::primary};
@@ -36,11 +36,22 @@ impl MainMenu {
 
         container(
             row![
-                container(menu_bar_widget(always_on_top))
-                    .width(Length::FillPortion(1))
-                    .height(Length::Fill)
-                    .align_x(alignment::Horizontal::Left),
-                mouse_area(
+                container(
+                    stack![
+                        title_bar_drag_area(
+                            container(Space::new())
+                                .width(Length::Fill)
+                                .height(Length::Fill),
+                        ),
+                        container(menu_bar_widget(always_on_top))
+                            .width(Length::Fill)
+                            .height(Length::Fill)
+                            .align_x(alignment::Horizontal::Left),
+                    ],
+                )
+                .width(Length::FillPortion(1))
+                .height(Length::Fill),
+                container(title_bar_drag_area(
                     container(
                         text(title)
                             .size(11)
@@ -49,18 +60,28 @@ impl MainMenu {
                             .align_x(alignment::Horizontal::Center)
                             .align_y(alignment::Vertical::Center),
                     )
-                    .width(Length::FillPortion(2))
+                    .width(Length::Fill)
                     .height(Length::Fill)
                     .align_x(alignment::Horizontal::Center)
                     .align_y(Alignment::Center),
+                ))
+                .width(Length::FillPortion(2))
+                .height(Length::Fill),
+                container(
+                    stack![
+                        title_bar_drag_area(
+                            container(Space::new())
+                                .width(Length::Fill)
+                                .height(Length::Fill),
+                        ),
+                        container(window_controls())
+                            .width(Length::Fill)
+                            .height(Length::Fill)
+                            .align_x(alignment::Horizontal::Right),
+                    ],
                 )
-                .on_press(Message::WindowTitleBarPress)
-                .on_release(Message::WindowTitleBarRelease)
-                .on_double_click(Message::WindowToggleMaximize),
-                container(window_controls())
-                    .width(Length::FillPortion(1))
-                    .height(Length::Fill)
-                    .align_x(alignment::Horizontal::Right),
+                .width(Length::FillPortion(1))
+                .height(Length::Fill),
             ]
             .spacing(0)
             .align_y(Alignment::Center)
@@ -84,6 +105,14 @@ impl MainMenu {
         })
         .into()
     }
+}
+
+fn title_bar_drag_area<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+    mouse_area(content)
+        .on_press(Message::WindowTitleBarPress)
+        .on_release(Message::WindowTitleBarRelease)
+        .on_double_click(Message::WindowToggleMaximize)
+        .into()
 }
 
 fn window_controls() -> Element<'static, Message> {
