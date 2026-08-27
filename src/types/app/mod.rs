@@ -32,7 +32,6 @@ use iced::mouse;
 use iced::window;
 use iced_aw::ICED_AW_FONT_BYTES;
 use futures::StreamExt;
-use std::collections::hash_map::HashMap;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
@@ -47,7 +46,7 @@ pub use cache::{DirCache, MetadataCache};
 pub use prefs::{window_level, set_window_level};
 use cache::load_startup_caches;
 use helpers::{
-    cached_paths_for_root, execute_file_search, pick_audio_file, pick_folder,
+    execute_file_search, pick_audio_file, pick_folder,
     tag_search_can_autocomplete, transport_shortcut_allowed, walk_directory, FileDragKind,
     FileDragPending, FileListScrollbarDrag, SidebarResize, TitleBarInteraction,
 };
