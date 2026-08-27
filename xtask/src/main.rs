@@ -347,6 +347,9 @@ fn should_use_cross_tool(target: Option<&str>, force_cross: bool) -> Result<bool
     if host == target {
         return Ok(false);
     }
+    if target.contains("darwin") && host.contains("darwin") {
+        return Ok(false);
+    }
     if target.contains("linux") || target.contains("windows") {
         bail!(
             "cross-compiling {target} from {host} requires `--cross` (install: cargo install cross --locked)"
@@ -354,7 +357,7 @@ fn should_use_cross_tool(target: Option<&str>, force_cross: bool) -> Result<bool
     }
     if target.contains("darwin") {
         bail!(
-            "cross-compiling {target} from {host} requires a macOS host or osxcross; build on macOS CI instead"
+            "cross-compiling {target} from {host} requires a macOS host; build on macOS CI instead"
         );
     }
     Ok(false)
