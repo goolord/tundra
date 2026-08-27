@@ -3,7 +3,14 @@ xtask = "run --package xtask --"
 
 # Static CRT is required for the `release` profile on Windows (see build.rs). Dev and `release-fast` use dynamic CRT.
 
-# Drop unused sections; fully static musl binary on Linux-gnu alternative below still uses gtk rfd.
+# --- Linux (glibc) ---
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-Wl,--gc-sections"]
+
+[target.aarch64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-Wl,--gc-sections"]
+
+# musl static linking (no GTK/rfd — not viable for this GUI app; kept for headless experiments).
 [target.x86_64-unknown-linux-musl]
 linker = "rust-lld"
 rustflags = [
@@ -12,8 +19,11 @@ rustflags = [
     "-C", "link-arg=-Wl,--gc-sections",
 ]
 
-[target.x86_64-unknown-linux-gnu]
-rustflags = ["-C", "link-arg=-Wl,--gc-sections"]
+# Windows-gnu linkers live in Cross.toml (cross container) to avoid breaking MSVC-only Windows hosts.
+[target.x86_64-pc-windows-gnu]
+rustflags = ["-C", "target-feature=+crt-static"]
 
-[target.aarch64-unknown-linux-gnu]
-rustflags = ["-C", "link-arg=-Wl,--gc-sections"]
+[target.aarch64-pc-windows-gnullvm]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+# macOS targets: build natively on macOS, or set linker to osxcross/clang on Linux hosts.

@@ -5,7 +5,7 @@ use iced::widget::canvas::{self, Action, Event, Frame, Program};
 use iced::widget::canvas::Path as CanvasPath;
 use iced::widget::scrollable::Scrollbar;
 use iced::widget::text::Wrapping;
-use iced::widget::{button, container, mouse_area, row, scrollable, stack, text, Button, Column, Row, Space, Svg, TextInput};
+use iced::widget::{button, container, mouse_area, row, scrollable, stack, text, Button, Column, Row, Space, TextInput};
 use iced::widget::Id;
 use iced::{Alignment, Border, Color, Element, Length, Rectangle, Shadow, theme};
 use iced::mouse::{self, Cursor};
@@ -572,7 +572,7 @@ fn file_search_header(
         .spacing(8)
         .align_y(Alignment::Center)
         .push(
-            Svg::from_path(resource_path("search-solid.svg"))
+            resource_svg("search-solid.svg")
                 .width(Length::Fixed(12.0))
                 .height(Length::Fixed(12.0))
                 .style(|_theme, _status| iced::widget::svg::Style {
@@ -626,7 +626,7 @@ fn file_search_header(
 
 fn file_search_directories_button(show_directories: bool) -> Element<'static, Message> {
     button(
-        Svg::from_path(resource_path("folder-solid.svg"))
+        resource_svg("folder-solid.svg")
             .width(Length::Fixed(12.0))
             .height(Length::Fixed(12.0))
             .style(move |_theme, _status| iced::widget::svg::Style {
@@ -751,7 +751,7 @@ fn tag_section_header(filter_count: usize) -> Element<'static, Message> {
         .spacing(8)
         .align_y(Alignment::Center)
         .push(
-            Svg::from_path(resource_path("music-solid.svg"))
+            resource_svg("music-solid.svg")
                 .width(Length::Fixed(12.0))
                 .height(Length::Fixed(12.0))
                 .style(|_theme, _status| iced::widget::svg::Style {
@@ -1021,7 +1021,7 @@ impl DirUp {
         let path_label = truncate_path(&cwd, 32);
         let content = Button::new(
             row![
-                Svg::from_path(resource_path("up_chevron.svg"))
+                resource_svg("up_chevron.svg")
                     .height(Length::Fixed(14.0))
                     .width(Length::Fixed(14.0))
                     .style(|theme, _status| iced::widget::svg::Style {
@@ -1402,7 +1402,7 @@ impl FileButton {
 
         let label = if self.is_dir {
             row![
-                Svg::from_path(resource_path("folder-solid.svg"))
+                resource_svg("folder-solid.svg")
                     .width(Length::Fixed(16.0))
                     .height(Length::Fixed(16.0))
                     .style(move |theme, _status| iced::widget::svg::Style {
@@ -1415,7 +1415,7 @@ impl FileButton {
             .width(Length::Fill)
         } else if is_audio(&self.file_path) {
             row![
-                Svg::from_path(resource_path("music-solid.svg"))
+                resource_svg("music-solid.svg")
                     .width(Length::Fixed(16.0))
                     .height(Length::Fixed(16.0))
                     .style(move |theme, _status| iced::widget::svg::Style {

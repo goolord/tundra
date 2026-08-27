@@ -1,4 +1,4 @@
-use super::{configure_classifier_command, scripts_dir, ClassifyError};
+use super::{bundled_python_exe, configure_classifier_command, scripts_dir, ClassifyError};
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::Path;
@@ -56,6 +56,19 @@ impl Worker {
         let scripts_dir = scripts_dir();
         let mut last_error = String::from("no launch attempts");
 
+        if let Some(python) = bundled_python_exe() {
+            match try_spawn_python_worker(&scripts_dir, &python) {
+                Ok(mut worker) => match worker.wait_for_ready() {
+                    Ok(()) => return Ok(worker),
+                    Err(err) => {
+                        let _ = worker.child.kill();
+                        last_error = err.details;
+                    }
+                },
+                Err(err) => last_error = err.details,
+            }
+        }
+
         if let Some(mut worker) = try_spawn_uv_worker(&scripts_dir) {
             match worker.wait_for_ready() {
                 Ok(()) => return Ok(worker),
@@ -68,7 +81,7 @@ impl Worker {
 
         #[cfg(not(windows))]
         for python in ["python3", "python"] {
-            match try_spawn_python_worker(&scripts_dir, python) {
+            match try_spawn_python_worker(&scripts_dir, Path::new(python)) {
                 Ok(mut worker) => match worker.wait_for_ready() {
                     Ok(()) => return Ok(worker),
                     Err(err) => {
@@ -420,8 +433,7 @@ fn try_spawn_uv_worker(scripts_dir: &Path) -> Option<Worker> {
     spawn_worker(command).ok()
 }
 
-#[cfg(not(windows))]
-fn try_spawn_python_worker(scripts_dir: &Path, python: &str) -> Result<Worker, ClassifyError> {
+fn try_spawn_python_worker(scripts_dir: &Path, python: &Path) -> Result<Worker, ClassifyError> {
     let script = scripts_dir.join("classifier_worker.py");
     let mut command = Command::new(python);
     command

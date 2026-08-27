@@ -46,6 +46,9 @@ cargo xtask run --release
 | `cargo xtask classifiers` | Install Python deps (`uv sync`, optional DL on 3.14) |
 | `cargo xtask build` | Setup + `cargo build` |
 | `cargo xtask run` | Setup + `cargo run` |
+| `cargo xtask package` | Release build + portable archive (exe/binary, models, bundled Python when native) |
+| `cargo xtask cross install-targets` | `rustup target add` for targets buildable from this host |
+| `cargo xtask cross build-all` | `--release` build for every target supported from this host |
 
 Flags:
 
@@ -53,8 +56,10 @@ Flags:
 - `--skip-dl` — skip Essentia TensorFlow env (tier 2 falls back to librosa)
 - `--no-setup` — skip setup before build/run
 - `--release` — optimized build (`build`: full release + static CRT on Windows; `run`: fast `release-fast` profile)
+- `--target TRIPLE` — cross-compile (requires `--cross` when OS/arch differs; see Cross-compilation below)
+- `--cross` — use `cross` instead of `cargo` for the build step
 
-Models and SVG icons are copied next to the binary at build time.
+Models are copied next to the binary at build time. SVG icons are embedded in the executable.
 
 `cargo xtask build --release` uses the full release profile: `opt-level = 3`, thin LTO, stripped symbols, and static CRT on Windows. Ship the binary from `target/release/` (or `target/<triple>/release/`). `cargo xtask run --release` uses the `release-fast` profile (same speed opts, no LTO, faster compiles, dynamic CRT) and runs from `target/release-fast/` — not for distribution. Plain `cargo build --release` on Windows also requires static CRT (`build.rs` enforces it). Debug builds use the dynamic CRT. GPU rendering uses `wgpu` with Vulkan on Windows/Linux or Metal on macOS, plus a `tiny-skia` software fallback when no GPU backend is available. DX12 is omitted to avoid a `windows` crate version conflict in the current dependency graph.
 
@@ -62,11 +67,57 @@ Models and SVG icons are copied next to the binary at build time.
 
 For a copied build (not running from the source tree), place next to the executable:
 
-- `resources/` — SVG icons (`play.svg`, etc.; copied at build time)
-- `models/` — Essentia model files (copied at build time; optional on Windows)
-- `scripts/` — classifier `.py` files (copied at build time) plus a `uv`-synced env (`cargo xtask classifiers`)
+- `models/` — Essentia model files (copied at build time)
+- `scripts/` — classifier `.py` files plus a bundled `.venv` (release packages include `python/` as well)
+- `python/` — portable CPython install (release packages only; dev builds use `cargo xtask setup`)
 
-macOS `.app` bundles also look in `Contents/Resources/` (`scripts/`, `models/`, icons).
+Release archive: `cargo xtask package --version v0.1.0-pre-alpha` (`.zip` on Windows, `.tar.gz` elsewhere)
+
+macOS `.app` bundles also look in `Contents/Resources/` (`scripts/`, `models/`).
+
+### Cross-compilation
+
+Install toolchains and the [`cross`](https://github.com/cross-rs/cross) runner:
+
+```bash
+cargo install cross --locked
+cargo xtask cross install-targets
+```
+
+Build for a specific triple (use `--cross` when the target OS/arch differs from the host):
+
+```bash
+# Linux → Windows (MinGW)
+cargo xtask build --release --target x86_64-pc-windows-gnu --cross
+
+# Linux → Linux (other arch, via cross container)
+cargo xtask build --release --target aarch64-unknown-linux-gnu --cross
+
+# Native Windows MSVC (no --cross)
+cargo xtask build --release --target x86_64-pc-windows-msvc
+```
+
+Build every target feasible from the current host:
+
+```bash
+cargo xtask cross build-all --cross
+```
+
+Package a cross-built binary (Python bundling only when host triple matches `--target`):
+
+```bash
+cargo xtask package --target x86_64-pc-windows-gnu --cross --version v0.1.0-pre-alpha
+```
+
+Pass `--skip-build --target TRIPLE` when the binary is already built under `target/<triple>/release/`.
+
+| Host | Typical `--cross` targets | Notes |
+|------|---------------------------|-------|
+| Windows | `x86_64-pc-windows-msvc` | Native MSVC; use `--cross` for GNU triple |
+| Linux | `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `x86_64-pc-windows-gnu` | GTK/Vulkan deps via `Cross.toml` |
+| macOS | `x86_64-apple-darwin`, `aarch64-apple-darwin` | Native only; no Linux→macOS cross in CI |
+
+Target-specific linker flags live in [`.cargo/config.toml`](.cargo/config.toml). Windows-gnu linkers and container apt packages for `cross` are in [`Cross.toml`](Cross.toml). `x86_64-unknown-linux-musl` is configured but not supported for this GUI (GTK/rfd need glibc).
 
 ## Open audio files from the desktop
 

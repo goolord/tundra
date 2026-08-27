@@ -13,7 +13,7 @@ use iced::widget::slider::{Handle, HandleShape, Rail, Status as SliderStatus, St
 use iced::widget::scrollable::{Direction, Scrollbar};
 use iced::widget::{
     button, container, mouse_area, row, scrollable, text, Button, Canvas, Column, Container, Row,
-    Slider, Space, Svg,
+    Slider, Space,
 };
 use iced::{Alignment, Border, Color, Element, Length, Shadow, Theme, theme};
 use crate::metadata::TagField;
@@ -304,7 +304,7 @@ fn track_info_row(
     mouse_area(
         container(
             row![
-                Svg::from_path(resource_path("music-solid.svg"))
+                resource_svg("music-solid.svg")
                     .width(Length::Fixed(14.0))
                     .height(Length::Fixed(14.0))
                     .style(|theme: &Theme, _| iced::widget::svg::Style {
@@ -502,14 +502,14 @@ impl Controls {
 
     fn play_button(&self) -> Button<'_, Message> {
         let playing = self.is_playing.load(Ordering::SeqCst);
-        let icon_path = if playing {
-            resource_path("pause.svg")
+        let icon = if playing {
+            resource_svg("pause.svg")
         } else {
-            resource_path("play.svg")
+            resource_svg("play.svg")
         };
         let is_playing = sync::Arc::clone(&self.is_playing);
         Button::new(
-            Svg::from_path(icon_path)
+            icon
                 .width(Length::Fixed(TRANSPORT_ICON))
                 .height(Length::Fixed(TRANSPORT_ICON))
                 .style(move |theme: &Theme, _| {
@@ -533,7 +533,7 @@ impl Controls {
 
     fn stop_button(&self) -> Button<'_, Message> {
         Button::new(
-            Svg::from_path(resource_path("stop.svg"))
+            resource_svg("stop.svg")
                 .width(Length::Fixed(TRANSPORT_ICON))
                 .height(Length::Fixed(TRANSPORT_ICON))
                 .style(|theme: &Theme, _| iced::widget::svg::Style {
@@ -549,7 +549,7 @@ impl Controls {
     fn loop_button(&self) -> Button<'_, Message> {
         let looping = self.looping;
         Button::new(
-            Svg::from_path(resource_path("repeat.svg"))
+            resource_svg("repeat.svg")
                 .width(Length::Fixed(TRANSPORT_ICON))
                 .height(Length::Fixed(TRANSPORT_ICON))
                 .style(move |theme: &Theme, _| iced::widget::svg::Style {

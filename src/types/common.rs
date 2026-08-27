@@ -2,40 +2,31 @@ use futures::channel::mpsc::UnboundedReceiver;
 use futures::future::Aborted;
 use crate::metadata::SearchResult;
 use iced::widget::button::{Status as ButtonStatus, Style as ButtonStyle};
-use iced::widget::{button, column, text, Button};
+use iced::widget::svg::Handle;
+use iced::widget::{button, column, text, Button, Svg};
 use iced::window::Direction;
 use iced::{Border, Element, Length, Padding, Shadow, Theme, theme};
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 
-include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/resource_files.rs"));
-
-fn resources_dir() -> PathBuf {
-    crate::path_util::find_beside(&["resources"], |dir| dir.join("play.svg").is_file())
-        .or_else(|| {
-            let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources");
-            dir.is_dir().then_some(dir)
-        })
-        .unwrap_or_else(|| PathBuf::from("resources"))
+mod embedded_resources {
+    include!(concat!(env!("OUT_DIR"), "/embedded_resources.rs"));
 }
 
-static RESOURCE_PATHS: LazyLock<HashMap<&'static str, String>> = LazyLock::new(|| {
-    let dir = resources_dir();
-    RESOURCE_FILES
-        .iter()
-        .map(|name| (*name, dir.join(name).to_string_lossy().into_owned()))
-        .collect()
-});
-
-pub fn resource_path(name: &str) -> &str {
-    match RESOURCE_PATHS.get(name) {
-        Some(path) => path.as_str(),
+pub fn resource_handle(name: &str) -> Handle {
+    match embedded_resources::handle(name) {
+        Some(handle) => handle,
         None => {
-            eprintln!("Unknown resource {name:?}; falling back to manifest path");
-            &RESOURCE_PATHS["play.svg"]
+            debug_assert!(false, "unknown embedded resource: {name}");
+            eprintln!("Unknown resource {name:?}; falling back to play.svg");
+            embedded_resources::handle("play.svg")
+                .expect("play.svg must be embedded at build time")
         }
     }
+}
+
+pub fn resource_svg(name: &str) -> Svg<'_> {
+    Svg::new(resource_handle(name))
 }
 
 #[derive(Debug, Clone)]
