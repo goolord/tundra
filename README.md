@@ -1,6 +1,8 @@
 # Tundra
 
-Fast sample browser GUI built with [iced](https://github.com/iced-rs/iced).
+Fast sample browser GUI
+
+https://github.com/user-attachments/assets/eee147c7-0ccd-4125-9657-f97054487d6c
 
 ## Requirements
 
