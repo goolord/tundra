@@ -98,11 +98,58 @@ fn migrate_sqlite_file(src: &Path, dest: &Path) {
 }
 
 fn db_path() -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(path) = test_db_path() {
+        return Some(path);
+    }
     let dest = data_db_path()?;
     if let Some(src) = cache_db_path() {
         migrate_sqlite_file(&src, &dest);
     }
     Some(dest)
+}
+
+#[cfg(test)]
+use std::cell::RefCell;
+
+#[cfg(test)]
+thread_local! {
+    static TEST_DB_PATH: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn test_db_path() -> Option<PathBuf> {
+    TEST_DB_PATH.with(|slot| slot.borrow().clone())
+}
+
+#[cfg(test)]
+static TAG_STORE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+fn reset_cache_for_tests() {
+    let mut store = cache()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *store = Store::Missing;
+}
+
+/// Run `f` against an isolated SQLite sidecar database (tests only).
+#[cfg(test)]
+pub(crate) fn with_test_db<F, R>(path: PathBuf, f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    let _lock = TAG_STORE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    TEST_DB_PATH.with(|slot| {
+        *slot.borrow_mut() = Some(path);
+        reset_cache_for_tests();
+        let result = f();
+        reset_cache_for_tests();
+        *slot.borrow_mut() = None;
+        result
+    })
 }
 
 fn open() -> Result<Connection, String> {
@@ -500,6 +547,49 @@ mod tests {
         migrate_sqlite_file(&src, &dest);
         assert_eq!(std::fs::read(&dest).expect("kept dest"), b"sqlite-main");
 
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn migrate_noops_when_source_missing() {
+        let dir = scratch_dir("tundra_tag_store_migrate_missing");
+        let src = dir.join("missing.db");
+        let dest = dir.join("dest.db");
+
+        migrate_sqlite_file(&src, &dest);
+
+        assert!(!dest.exists());
+    }
+
+    #[test]
+    fn set_instrument_persists_stamp_and_round_trips_through_cache() {
+        let dir = scratch_dir("tundra_tag_store_set");
+        let db = dir.join("tags.db");
+        let audio = dir.join("kick.wav");
+        std::fs::write(&audio, b"audio-v1-bytes").expect("write");
+        with_test_db(db, || {
+            set_instrument(&audio, "Kick", 2).expect("set");
+            assert_eq!(instrument(&audio).as_deref(), Some("Kick"));
+            assert_eq!(tag_version(&audio), Some(2));
+
+            std::fs::write(&audio, b"short").expect("replace file");
+            assert!(
+                instrument(&audio).is_none(),
+                "stamp mismatch must hide stale sidecar row"
+            );
+        });
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn set_instrument_rejects_empty_label() {
+        let dir = scratch_dir("tundra_tag_store_empty");
+        let db = dir.join("tags.db");
+        let audio = dir.join("kick.wav");
+        std::fs::write(&audio, b"audio").expect("write");
+        with_test_db(db, || {
+            assert!(set_instrument(&audio, "   ", 1).is_err());
+        });
         let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -433,33 +433,8 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_fixtures::{dead_pid_tag_tmp, ScratchDir};
     use std::fs;
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    struct ScratchDir(PathBuf);
-
-    impl ScratchDir {
-        fn new() -> Self {
-            static COUNTER: AtomicU64 = AtomicU64::new(0);
-            let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-            let dir = std::env::temp_dir().join(format!(
-                "tundra-path-util-{}-{id}",
-                std::process::id()
-            ));
-            fs::create_dir_all(&dir).unwrap();
-            Self(dir)
-        }
-
-        fn path(&self) -> &Path {
-            &self.0
-        }
-    }
-
-    impl Drop for ScratchDir {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
 
     #[test]
     fn is_under_ignores_verbatim_prefix_and_case() {
@@ -483,7 +458,7 @@ mod tests {
 
     #[test]
     fn replace_works_when_dest_readonly() {
-        let dir = ScratchDir::new();
+        let dir = ScratchDir::new("replace-readonly");
         let dest = dir.path().join("kick.wav");
         fs::write(&dest, b"audio").unwrap();
         let tmp = sidecar(&dest, TAG_TMP_SUFFIX);
@@ -499,7 +474,7 @@ mod tests {
 
     #[test]
     fn sync_file_works_on_readonly_copy() {
-        let dir = ScratchDir::new();
+        let dir = ScratchDir::new("path-util");
         let dest = dir.path().join("kick.wav");
         fs::write(&dest, b"audio").unwrap();
         let tmp = sidecar(&dest, TAG_TMP_SUFFIX);
@@ -515,7 +490,7 @@ mod tests {
 
     #[test]
     fn reclaim_keeps_live_pid_tmp_when_dest_exists() {
-        let dir = ScratchDir::new();
+        let dir = ScratchDir::new("path-util");
         let dest = dir.path().join("kick.wav");
         fs::write(&dest, b"original").unwrap();
         let tmp = unique_sidecar(&dest, "tag");
@@ -533,10 +508,10 @@ mod tests {
 
     #[test]
     fn reclaim_deletes_dead_pid_tmp() {
-        let dir = ScratchDir::new();
+        let dir = ScratchDir::new("path-util");
         let dest = dir.path().join("kick.wav");
         fs::write(&dest, b"original").unwrap();
-        let tmp = sidecar(&dest, ".tundra-tag-4294967294-1.tmp");
+        let tmp = dead_pid_tag_tmp(&dest);
         fs::write(&tmp, b"stale").unwrap();
 
         reclaim_write_sidecars(dir.path());
@@ -547,7 +522,7 @@ mod tests {
 
     #[test]
     fn reclaim_restores_replace_old_only_when_dest_missing() {
-        let dir = ScratchDir::new();
+        let dir = ScratchDir::new("path-util");
         let dest = dir.path().join("snare.wav");
         fs::write(sidecar(&dest, TAG_TMP_SUFFIX), b"tmp-maybe-corrupt").unwrap();
         fs::write(sidecar(&dest, TAG_BAK_SUFFIX), b"bak-original").unwrap();
@@ -566,7 +541,7 @@ mod tests {
 
     #[test]
     fn reclaim_does_not_resurrect_from_tmp_or_bak() {
-        let dir = ScratchDir::new();
+        let dir = ScratchDir::new("path-util");
         let dest = dir.path().join("hat.wav");
         fs::write(sidecar(&dest, TAG_TMP_SUFFIX), b"tagged-copy").unwrap();
         fs::write(sidecar(&dest, TAG_BAK_SUFFIX), b"bak-original").unwrap();
@@ -583,7 +558,7 @@ mod tests {
     fn reclaim_keeps_sidecars_when_restore_fails() {
         use std::os::unix::fs::PermissionsExt;
 
-        let dir = ScratchDir::new();
+        let dir = ScratchDir::new("path-util");
         let dest = dir.path().join("rim.wav");
         let aside = sidecar(&dest, REPLACE_OLD_SUFFIX);
         fs::write(&aside, b"aside-original").unwrap();
@@ -603,7 +578,7 @@ mod tests {
 
     #[test]
     fn reclaim_tree_restores_nested_replace_old() {
-        let dir = ScratchDir::new();
+        let dir = ScratchDir::new("path-util");
         let nested = dir.path().join("drums");
         fs::create_dir(&nested).unwrap();
         let dest = nested.join("kick.wav");
@@ -617,7 +592,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn reclaim_tree_follows_symlink_directory() {
-        let dir = ScratchDir::new();
+        let dir = ScratchDir::new("path-util");
         let real = dir.path().join("real");
         fs::create_dir(&real).unwrap();
         let dest = real.join("kick.wav");
@@ -627,5 +602,169 @@ mod tests {
         reclaim_write_sidecars_tree(dir.path());
 
         assert_eq!(fs::read(&dest).unwrap(), b"aside");
+    }
+
+    #[test]
+    fn write_atomic_writes_and_replaces_without_leaving_tmp() {
+        let dir = ScratchDir::new("path-util");
+        let dest = dir.path().join("cache.bin");
+        write_atomic(&dest, b"one").unwrap();
+        write_atomic(&dest, b"two").unwrap();
+        assert_eq!(fs::read(&dest).unwrap(), b"two");
+        let sidecars = fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .contains(".tundra-")
+            })
+            .count();
+        assert_eq!(sidecars, 0);
+    }
+
+    #[test]
+    fn write_atomic_creates_parent_directories() {
+        let dir = ScratchDir::new("path-util");
+        let dest = dir.path().join("deep").join("nested.bin");
+        write_atomic(&dest, b"payload").unwrap();
+        assert_eq!(fs::read(&dest).unwrap(), b"payload");
+    }
+
+    #[test]
+    fn unique_sidecar_names_differ_for_same_dest() {
+        let dir = ScratchDir::new("path-util");
+        let dest = dir.path().join("kick.wav");
+        let a = unique_sidecar(&dest, "tag");
+        let b = unique_sidecar(&dest, "tag");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn sidecar_appends_suffix_to_file_name() {
+        let dir = ScratchDir::new("sidecar-name");
+        let path = dir.path().join("kick.wav");
+        assert_eq!(
+            sidecar(&path, TAG_TMP_SUFFIX),
+            dir.path().join("kick.wav.tundra-tag.tmp")
+        );
+    }
+
+    #[test]
+    fn reclaim_cleans_legacy_tmp_once_dest_exists() {
+        let dir = ScratchDir::new("path-util");
+        let dest = dir.path().join("kick.wav");
+        fs::write(sidecar(&dest, REPLACE_OLD_SUFFIX), b"aside").unwrap();
+        fs::write(sidecar(&dest, TAG_TMP_SUFFIX), b"legacy").unwrap();
+
+        reclaim_write_sidecars(dir.path());
+
+        assert_eq!(fs::read(&dest).unwrap(), b"aside");
+        assert!(!sidecar(&dest, TAG_TMP_SUFFIX).exists());
+    }
+
+    #[test]
+    fn reclaim_leaves_dest_missing_when_only_tmp_and_bak_exist() {
+        let dir = ScratchDir::new("path-util");
+        let dest = dir.path().join("missing.wav");
+        fs::write(sidecar(&dest, TAG_TMP_SUFFIX), b"tmp").unwrap();
+        fs::write(sidecar(&dest, TAG_BAK_SUFFIX), b"bak").unwrap();
+
+        reclaim_write_sidecars(dir.path());
+
+        assert!(!dest.exists());
+        assert!(sidecar(&dest, TAG_TMP_SUFFIX).exists());
+        assert!(sidecar(&dest, TAG_BAK_SUFFIX).exists());
+    }
+
+    #[test]
+    fn reclaim_handles_multiple_files_in_one_directory() {
+        let dir = ScratchDir::new("path-util");
+        let kick = dir.path().join("kick.wav");
+        let snare = dir.path().join("snare.wav");
+        fs::write(sidecar(&kick, REPLACE_OLD_SUFFIX), b"k-aside").unwrap();
+        fs::write(sidecar(&snare, REPLACE_OLD_SUFFIX), b"s-aside").unwrap();
+        fs::write(sidecar(&kick, TAG_TMP_SUFFIX), b"stale").unwrap();
+
+        reclaim_write_sidecars(dir.path());
+
+        assert_eq!(fs::read(&kick).unwrap(), b"k-aside");
+        assert_eq!(fs::read(&snare).unwrap(), b"s-aside");
+        assert!(!sidecar(&kick, TAG_TMP_SUFFIX).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sync_parent_dir_succeeds_for_existing_directory() {
+        let dir = ScratchDir::new("sync-parent");
+        sync_parent_dir(&dir.path().join("child.bin")).unwrap();
+    }
+
+    #[test]
+    fn reclaim_deletes_dead_pid_tmp_when_dest_missing() {
+        let dir = ScratchDir::new("path-util");
+        let dest = dir.path().join("missing.wav");
+        let tmp = dead_pid_tag_tmp(&dest);
+        fs::write(&tmp, b"stale").unwrap();
+        assert!(!dest.exists());
+
+        reclaim_write_sidecars(dir.path());
+
+        assert!(!tmp.exists());
+        assert!(!dest.exists());
+    }
+
+    #[test]
+    fn write_atomic_preserves_existing_file_when_replace_fails() {
+        use crate::test_fixtures::with_replace_blocked;
+
+        let dir = ScratchDir::new("atomic-preserve");
+        let dest = dir.path().join("cache.bin");
+        fs::write(&dest, b"stable").unwrap();
+
+        let err = with_replace_blocked(dir.path(), &dest, || write_atomic(&dest, b"new"));
+
+        assert!(err.is_err());
+        assert_eq!(fs::read(&dest).unwrap(), b"stable");
+        assert_eq!(dir.sidecar_count(), 0);
+    }
+
+    #[test]
+    fn reclaim_keeps_live_pid_tmp_when_dest_missing() {
+        let dir = ScratchDir::new("live-missing");
+        let dest = dir.path().join("missing.wav");
+        let tmp = unique_sidecar(&dest, "tag");
+        fs::write(&tmp, b"tmp").unwrap();
+
+        reclaim_write_sidecars(dir.path());
+
+        assert!(!dest.exists());
+        assert!(tmp.exists(), "live pid tmp must stay when dest is missing");
+    }
+
+    #[test]
+    fn write_atomic_removes_tmp_when_replace_fails() {
+        let dir = ScratchDir::new("atomic-fail");
+        let dest = dir.path().join("blocked.bin");
+        fs::create_dir(&dest).unwrap();
+
+        let err = write_atomic(&dest, b"payload");
+        assert!(err.is_err());
+        assert_eq!(dir.sidecar_count(), 0);
+    }
+
+    #[test]
+    fn ensure_writable_allows_subsequent_write() {
+        let dir = ScratchDir::new("path-util");
+        let dest = dir.path().join("kick.wav");
+        fs::write(&dest, b"audio").unwrap();
+        let mut perms = fs::metadata(&dest).unwrap().permissions();
+        perms.set_readonly(true);
+        fs::set_permissions(&dest, perms).unwrap();
+
+        ensure_writable(&dest).unwrap();
+        fs::write(&dest, b"updated").unwrap();
+        assert_eq!(fs::read(&dest).unwrap(), b"updated");
     }
 }

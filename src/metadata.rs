@@ -3273,51 +3273,53 @@ mod tests {
     fn unwritable_container_falls_back_to_sidecar_store_and_stays_searchable() {
         let dir = unique_temp_dir("tundra_sidecar_fallback");
         std::fs::create_dir_all(&dir).expect("create scratch dir");
-        // Audio extension, but not a container any writer can parse.
         let audio = dir.join("sample.wav");
         std::fs::write(&audio, b"not actually a RIFF container").expect("write junk");
+        let db = dir.join("tags.db");
 
-        assert!(
-            write_auto_tags(&audio, "Kick").expect("unwritable container should fall back"),
-            "fallback should report the tag as written"
-        );
-        assert_eq!(
-            crate::tag_store::instrument(&audio).as_deref(),
-            Some("Kick"),
-            "sidecar store should hold the label the container refused"
-        );
-        assert_eq!(
-            instrument_tag(&audio).as_deref(),
-            Some("Kick"),
-            "sidecar label must surface through the normal instrument read"
-        );
-        assert!(
-            finds_by_instrument(&audio, "Kick"),
-            "instrument:Kick must match a sidecar-tagged file"
-        );
-        assert_eq!(
-            crate::tag_store::tag_version(&audio),
-            Some(TUNDRA_TAG_VERSION)
-        );
-        assert!(
-            !write_auto_tags(&audio, "Snare").expect("same-version sidecar retag"),
-            "current-version sidecar tags must not be replaced"
-        );
-        assert_eq!(
-            crate::tag_store::instrument(&audio).as_deref(),
-            Some("Kick")
-        );
-        assert_eq!(
-            write_auto_tags(&audio, "Kick"),
-            Ok(false),
-            "unchanged sidecar label should no-op"
-        );
-        assert!(
-            !auto_tag_field_status(&audio)
-                .expect("status")
-                .can_retag_instrument,
-            "current sidecar version should skip auto tag"
-        );
+        crate::tag_store::with_test_db(db, || {
+            assert!(
+                write_auto_tags(&audio, "Kick").expect("unwritable container should fall back"),
+                "fallback should report the tag as written"
+            );
+            assert_eq!(
+                crate::tag_store::instrument(&audio).as_deref(),
+                Some("Kick"),
+                "sidecar store should hold the label the container refused"
+            );
+            assert_eq!(
+                instrument_tag(&audio).as_deref(),
+                Some("Kick"),
+                "sidecar label must surface through the normal instrument read"
+            );
+            assert!(
+                finds_by_instrument(&audio, "Kick"),
+                "instrument:Kick must match a sidecar-tagged file"
+            );
+            assert_eq!(
+                crate::tag_store::tag_version(&audio),
+                Some(TUNDRA_TAG_VERSION)
+            );
+            assert!(
+                !write_auto_tags(&audio, "Snare").expect("same-version sidecar retag"),
+                "current-version sidecar tags must not be replaced"
+            );
+            assert_eq!(
+                crate::tag_store::instrument(&audio).as_deref(),
+                Some("Kick")
+            );
+            assert_eq!(
+                write_auto_tags(&audio, "Kick"),
+                Ok(false),
+                "unchanged sidecar label should no-op"
+            );
+            assert!(
+                !auto_tag_field_status(&audio)
+                    .expect("status")
+                    .can_retag_instrument,
+                "current sidecar version should skip auto tag"
+            );
+        });
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -3373,5 +3375,183 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn stage_and_replace_preserves_original_when_edit_fails() {
+        let dir = unique_temp_dir("tundra_stage_edit_fail");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let audio = dir.join("kick.wav");
+        write_minimal_wav(&audio);
+        let original = std::fs::read(&audio).expect("original");
+
+        let err = stage_and_replace(&audio, |_| Err("edit failed".into()));
+        assert!(err.is_err());
+
+        assert_eq!(std::fs::read(&audio).expect("dest"), original);
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .expect("read dir")
+            .flatten()
+            .map(|entry| entry.path())
+            .collect();
+        assert_eq!(leftovers.len(), 1, "failed edit must delete staged tmp");
+        assert_eq!(leftovers[0], audio);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn stage_and_replace_removes_tmp_when_sync_fails() {
+        let dir = unique_temp_dir("tundra_stage_sync_fail");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let audio = dir.join("kick.wav");
+        write_minimal_wav(&audio);
+        let original = std::fs::read(&audio).expect("original");
+
+        let err = stage_and_replace(&audio, |tmp| {
+            std::fs::write(tmp, b"partial").expect("write tmp");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(tmp, std::fs::Permissions::from_mode(0o000))
+                    .expect("lock tmp");
+            }
+            #[cfg(windows)]
+            {
+                let mut perms = std::fs::metadata(tmp).expect("meta").permissions();
+                perms.set_readonly(true);
+                std::fs::set_permissions(tmp, perms).expect("readonly tmp");
+            }
+            Ok(())
+        });
+        assert!(err.is_err());
+        assert_eq!(std::fs::read(&audio).expect("dest"), original);
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .expect("read dir")
+            .flatten()
+            .map(|entry| entry.path())
+            .collect();
+        assert_eq!(leftovers.len(), 1, "sync failure must delete staged tmp");
+        assert_eq!(leftovers[0], audio);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stage_and_replace_succeeds_when_dest_removed_before_replace() {
+        let dir = unique_temp_dir("tundra_stage_missing_dest");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let audio = dir.join("kick.wav");
+        write_minimal_wav(&audio);
+
+        stage_and_replace(&audio, |tmp| {
+            std::fs::remove_file(&audio).expect("dest gone before replace");
+            std::fs::write(tmp, b"mutated-copy").expect("mutate tmp");
+            Ok(())
+        })
+        .expect("replace into previously missing dest");
+
+        assert_eq!(std::fs::read(&audio).expect("dest"), b"mutated-copy");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn stage_and_replace_swaps_successfully_and_cleans_tmp() {
+        let dir = unique_temp_dir("tundra_stage_success");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let audio = dir.join("kick.wav");
+        write_minimal_wav(&audio);
+
+        stage_and_replace(&audio, |tmp| {
+            let mut bytes = std::fs::read(tmp).map_err(|err| err.to_string())?;
+            bytes.extend_from_slice(b"tail-marker");
+            std::fs::write(tmp, bytes).map_err(|err| err.to_string())
+        })
+        .expect("stage and replace");
+
+        let tagged = std::fs::read(&audio).expect("tagged");
+        assert!(tagged.ends_with(b"tail-marker"));
+        let sidecars: Vec<_> = std::fs::read_dir(&dir)
+            .expect("read dir")
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .contains(".tundra-")
+            })
+            .collect();
+        assert!(sidecars.is_empty(), "successful replace removes tmp");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn stage_and_replace_leaves_original_intact_during_edit() {
+        let dir = unique_temp_dir("tundra_stage_copy_first");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let audio = dir.join("kick.wav");
+        write_minimal_wav(&audio);
+        let original = std::fs::read(&audio).expect("original");
+
+        stage_and_replace(&audio, |tmp| {
+            assert_eq!(
+                std::fs::read(&audio).expect("original during edit"),
+                original,
+                "original must stay untouched while tmp is edited"
+            );
+            std::fs::write(tmp, b"mutated-copy").expect("mutate tmp");
+            Ok(())
+        })
+        .expect("replace");
+
+        assert_eq!(std::fs::read(&audio).expect("dest"), b"mutated-copy");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn stage_and_replace_restores_readonly_permissions_on_success() {
+        let dir = unique_temp_dir("tundra_stage_perms");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let audio = dir.join("kick.wav");
+        write_minimal_wav(&audio);
+        let mut perms = std::fs::metadata(&audio).expect("meta").permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&audio, perms).expect("readonly");
+
+        stage_and_replace(&audio, |tmp| {
+            std::fs::write(tmp, std::fs::read(tmp).expect("read")).map_err(|err| err.to_string())
+        })
+        .expect("replace readonly");
+
+        let restored = std::fs::metadata(&audio).expect("meta").permissions();
+        assert!(
+            restored.readonly(),
+            "original read-only attribute must be restored"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn stage_and_replace_preserves_original_when_replace_fails() {
+        use crate::test_fixtures::with_replace_blocked;
+
+        let dir = crate::test_fixtures::ScratchDir::new("stage-replace-fail");
+        let audio = dir.path().join("kick.wav");
+        write_minimal_wav(&audio);
+        let original = std::fs::read(&audio).expect("original");
+
+        let err = with_replace_blocked(dir.path(), &audio, || {
+            stage_and_replace(&audio, |tmp| {
+                std::fs::write(tmp, b"mutated").expect("write tmp");
+                Ok(())
+            })
+        });
+
+        assert!(err.is_err(), "replace must fail while dest is locked");
+        assert_eq!(std::fs::read(&audio).expect("dest"), original);
+        assert_eq!(
+            crate::test_fixtures::count_tundra_sidecars(dir.path()),
+            0,
+            "failed replace must delete staged tmp"
+        );
     }
 }

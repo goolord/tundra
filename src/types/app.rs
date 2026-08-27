@@ -330,13 +330,15 @@ impl DirCache {
         let Some(dir_cache) = DirCache::get_path() else {
             return;
         };
+        Self::persist_map_to(&dir_cache, map);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn persist_map_to(path: &Path, map: &HashMap<PathBuf, Vec<PathBuf>>) {
         let Ok(bytes) = bincode::serialize(map) else {
-            eprintln!("Failed to serialize directory cache");
-            return;
+            panic!("serialize dir cache");
         };
-        if let Err(err) = crate::path_util::write_atomic(&dir_cache, &bytes) {
-            eprintln!("Failed to write directory cache: {err}");
-        }
+        crate::path_util::write_atomic(path, &bytes).expect("write dir cache");
     }
 
     fn persist(&self) {
@@ -391,18 +393,20 @@ impl MetadataCache {
         let Some(path) = MetadataCache::get_path() else {
             return;
         };
+        Self::persist_map_to(&path, cache);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn persist_map_to(path: &Path, cache: &HashMap<PathBuf, CachedMetadata>) {
         let persistable: HashMap<PathBuf, CachedMetadata> = cache
             .iter()
             .filter(|(_, cached)| cached.mtime_secs != 0)
             .map(|(path, cached)| (path.clone(), cached.clone()))
             .collect();
         let Ok(bytes) = bincode::serialize(&persistable) else {
-            eprintln!("Failed to serialize metadata cache");
-            return;
+            panic!("serialize metadata cache");
         };
-        if let Err(err) = crate::path_util::write_atomic(&path, &bytes) {
-            eprintln!("Failed to write metadata cache: {err}");
-        }
+        crate::path_util::write_atomic(path, &bytes).expect("write metadata cache");
     }
 
     fn persist(&self) {
