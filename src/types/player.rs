@@ -121,18 +121,8 @@ fn zoom_button(label: &'static str, message: Message) -> Button<'static, Message
         .style(zoom_button_style)
 }
 
-fn tag_chip_accent(field: TagField) -> Color {
-    match field {
-        TagField::Instrument => Color::from_rgb8(0x52, 0xa8, 0x86),
-        TagField::Bpm => Color::from_rgb8(0xc8, 0x72, 0x48),
-        TagField::Key => Color::from_rgb8(0x9a, 0x68, 0xc0),
-        TagField::Genre => Color::from_rgb8(0x48, 0x96, 0xc8),
-        _ => Color::from_rgb8(0x50, 0x7a, 0xe0),
-    }
-}
-
 fn toolbar_tag_chip(field: TagField, value: String) -> Element<'static, Message> {
-    let accent = tag_chip_accent(field);
+    let accent = tag_field_color(field);
     container(
         row![
             text(field.label())
@@ -371,18 +361,6 @@ fn track_info_row(
     .into()
 }
 
-fn format_time(secs: f64) -> String {
-    let total = secs.max(0.0).floor() as u64;
-    let hours = total / 3600;
-    let minutes = (total % 3600) / 60;
-    let seconds = total % 60;
-    if hours > 0 {
-        format!("{hours}:{minutes:02}:{seconds:02}")
-    } else {
-        format!("{minutes}:{seconds:02}")
-    }
-}
-
 fn volume_slider_style(theme: &Theme, status: SliderStatus) -> SliderStyle {
     let palette = theme.extended_palette();
     let accent = accent_color(theme);
@@ -495,11 +473,11 @@ impl Controls {
             .track_duration
             .map(|duration| progress.clamp(0.0, 1.0) * duration);
         let current = current_secs
-            .map(format_time)
+            .map(format_duration)
             .unwrap_or_else(|| "--:--".into());
         let total = self
             .track_duration
-            .map(format_time)
+            .map(format_duration)
             .unwrap_or_else(|| "--:--".into());
         (current, total)
     }

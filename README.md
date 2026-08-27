@@ -111,6 +111,25 @@ cargo xtask package --target x86_64-pc-windows-gnu --cross --version v0.1.0-pre-
 
 Pass `--skip-build --target TRIPLE` when the binary is already built under `target/<triple>/release/`.
 
+### Overwrite the latest GitHub release
+
+From repo root (requires `gh` auth):
+
+```powershell
+# Windows: rebuild host package and replace assets on the latest release tag
+.\scripts\release-latest.ps1
+
+# Also rebuild Linux + macOS via GitHub Actions
+.\scripts\release-latest.ps1 -Ci
+```
+
+```bash
+./scripts/release-latest.sh
+./scripts/release-latest.sh --ci
+```
+
+The script moves the latest release tag to `HEAD`, runs `cargo xtask package`, uploads with `gh release upload --clobber`, and optionally dispatches [`.github/workflows/release.yml`](.github/workflows/release.yml). Pass `-Tag v0.1.0-pre-alpha` (or `--tag`) to target a specific release instead of the most recent one.
+
 | Host | Typical `--cross` targets | Notes |
 |------|---------------------------|-------|
 | Windows | `x86_64-pc-windows-msvc` | Native MSVC; use `--cross` for GNU triple |

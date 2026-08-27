@@ -1,8 +1,7 @@
-use super::common::{truncate_path, Message};
+use super::common::{modal_button_style, truncate_path, Message};
 use crate::path_util::{cache_key, canonical_path};
 use iced::widget::{button, container, row, scrollable, text, Column, Space};
-use iced::widget::button::{Status as ButtonStatus, Style as ButtonStyle};
-use iced::{Alignment, Border, Color, Element, Length, Shadow, Theme, theme};
+use iced::{Alignment, Border, Color, Element, Length, Shadow, Theme};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -176,7 +175,7 @@ fn favorites_file_path() -> Option<PathBuf> {
 }
 
 fn try_resolve_path(path: &Path) -> Option<PathBuf> {
-    std::fs::canonicalize(path).ok()
+    canonical_path(path).ok()
 }
 
 fn settings_file_path() -> Option<PathBuf> {
@@ -204,50 +203,6 @@ fn migrate_settings_from_cache(config_path: &Path) {
     if cache_path.exists() && std::fs::copy(&cache_path, config_path).is_ok() {
         let _ = std::fs::remove_file(cache_path);
     }
-}
-
-fn modal_button_style(theme: &theme::Theme, status: ButtonStatus, primary: bool) -> ButtonStyle {
-    let palette = theme.extended_palette();
-    let accent = palette.primary.base.color;
-    let mut style = ButtonStyle {
-        text_color: palette.background.base.text,
-        border: Border {
-            radius: 6.0.into(),
-            width: 1.0,
-            color: palette.background.strong.color.scale_alpha(0.35),
-        },
-        shadow: Shadow::default(),
-        ..ButtonStyle::default()
-    };
-    match status {
-        ButtonStatus::Active | ButtonStatus::Disabled => {
-            style.background = Some(
-                if primary {
-                    accent.scale_alpha(0.82)
-                } else {
-                    palette.background.weak.color.scale_alpha(0.45)
-                }
-                .into(),
-            );
-            if primary {
-                style.text_color = Color::WHITE;
-            }
-        }
-        ButtonStatus::Hovered => {
-            style.background = Some(
-                if primary {
-                    accent.scale_alpha(0.92)
-                } else {
-                    accent.scale_alpha(0.16)
-                }
-                .into(),
-            );
-        }
-        ButtonStatus::Pressed => {
-            style.background = Some(accent.scale_alpha(0.72).into());
-        }
-    }
-    style
 }
 
 fn directory_row(path: PathBuf) -> Element<'static, Message> {

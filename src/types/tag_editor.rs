@@ -1,8 +1,7 @@
-use super::common::{truncate_path, Message};
+use super::common::{modal_button_style, truncate_path, Message};
 use crate::metadata::{ManualTagEdits, TagFields};
 use iced::widget::{button, container, row, text, text_input, Column, Space};
-use iced::widget::button::{Status as ButtonStatus, Style as ButtonStyle};
-use iced::{Alignment, Border, Color, Element, Length, Shadow, Theme, theme};
+use iced::{Alignment, Border, Color, Element, Length, Shadow, Theme};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,50 +83,6 @@ impl TagEditorState {
             comment: self.comment.clone(),
         }
     }
-}
-
-fn modal_button_style(theme: &theme::Theme, status: ButtonStatus, primary: bool) -> ButtonStyle {
-    let palette = theme.extended_palette();
-    let accent = palette.primary.base.color;
-    let mut style = ButtonStyle {
-        text_color: palette.background.base.text,
-        border: Border {
-            radius: 6.0.into(),
-            width: 1.0,
-            color: palette.background.strong.color.scale_alpha(0.35),
-        },
-        shadow: Shadow::default(),
-        ..ButtonStyle::default()
-    };
-    match status {
-        ButtonStatus::Active | ButtonStatus::Disabled => {
-            style.background = Some(
-                if primary {
-                    accent.scale_alpha(0.82)
-                } else {
-                    palette.background.weak.color.scale_alpha(0.45)
-                }
-                .into(),
-            );
-            if primary {
-                style.text_color = Color::WHITE;
-            }
-        }
-        ButtonStatus::Hovered => {
-            style.background = Some(
-                if primary {
-                    accent.scale_alpha(0.92)
-                } else {
-                    accent.scale_alpha(0.16)
-                }
-                .into(),
-            );
-        }
-        ButtonStatus::Pressed => {
-            style.background = Some(accent.scale_alpha(0.72).into());
-        }
-    }
-    style
 }
 
 fn field_input<'a>(

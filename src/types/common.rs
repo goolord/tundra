@@ -1,11 +1,11 @@
 use futures::channel::mpsc::UnboundedReceiver;
 use futures::future::Aborted;
-use crate::metadata::SearchResult;
+use crate::metadata::{SearchResult, TagField};
 use iced::widget::button::{Status as ButtonStatus, Style as ButtonStyle};
 use iced::widget::svg::Handle;
-use iced::widget::{button, column, text, Button, Svg};
+use iced::widget::{button, column, container, text, Button, Space, Svg};
 use iced::window::Direction;
-use iced::{Border, Element, Length, Padding, Shadow, Theme, theme};
+use iced::{Border, Color, Element, Length, Padding, Shadow, Theme, theme};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -345,6 +345,105 @@ pub fn drag_from_file_manager_hint() -> String {
 
 pub fn drag_out_notice(intro: impl AsRef<str>) -> String {
     format!("{} {}", intro.as_ref(), drag_from_file_manager_hint())
+}
+
+pub const TUNDRA_ACCENT: Color = Color::from_rgb8(0x50, 0x7a, 0xe0);
+
+pub fn ui_muted_text(theme: &Theme) -> Color {
+    theme
+        .extended_palette()
+        .background
+        .base
+        .text
+        .scale_alpha(0.72)
+}
+
+pub fn modal_button_style(theme: &Theme, status: ButtonStatus, primary: bool) -> ButtonStyle {
+    let palette = theme.extended_palette();
+    let accent = palette.primary.base.color;
+    let mut style = ButtonStyle {
+        text_color: palette.background.base.text,
+        border: Border {
+            radius: 6.0.into(),
+            width: 1.0,
+            color: palette.background.strong.color.scale_alpha(0.35),
+        },
+        shadow: Shadow::default(),
+        ..ButtonStyle::default()
+    };
+    match status {
+        ButtonStatus::Active | ButtonStatus::Disabled => {
+            style.background = Some(
+                if primary {
+                    accent.scale_alpha(0.82)
+                } else {
+                    palette.background.weak.color.scale_alpha(0.45)
+                }
+                .into(),
+            );
+            if primary {
+                style.text_color = Color::WHITE;
+            }
+        }
+        ButtonStatus::Hovered => {
+            style.background = Some(
+                if primary {
+                    accent.scale_alpha(0.92)
+                } else {
+                    accent.scale_alpha(0.16)
+                }
+                .into(),
+            );
+        }
+        ButtonStatus::Pressed => {
+            style.background = Some(accent.scale_alpha(0.72).into());
+        }
+    }
+    style
+}
+
+pub fn tag_field_color(field: TagField) -> Color {
+    match field {
+        TagField::Title => Color::from_rgb8(0x50, 0x7a, 0xe0),
+        TagField::Artist => Color::from_rgb8(0x66, 0x72, 0xe8),
+        TagField::Album => Color::from_rgb8(0x48, 0x96, 0xc8),
+        TagField::Genre => Color::from_rgb8(0x52, 0xa8, 0x86),
+        TagField::Comment => Color::from_rgb8(0x78, 0x82, 0x98),
+        TagField::AlbumArtist => Color::from_rgb8(0x62, 0x66, 0xd8),
+        TagField::Composer => Color::from_rgb8(0x86, 0x70, 0xc0),
+        TagField::Label => Color::from_rgb8(0x6a, 0x88, 0xb4),
+        TagField::Bpm => Color::from_rgb8(0xc8, 0x72, 0x48),
+        TagField::Key => Color::from_rgb8(0x9a, 0x68, 0xc0),
+        TagField::Instrument => Color::from_rgb8(0x52, 0xa8, 0x86),
+    }
+}
+
+pub fn selection_stripe(selected: bool, width: f32, height: Length) -> Element<'static, Message> {
+    container(Space::new().width(Length::Fill).height(Length::Fill))
+        .width(Length::Fixed(width))
+        .height(height)
+        .style(move |_theme| container::Style {
+            background: Some(if selected {
+                TUNDRA_ACCENT.into()
+            } else {
+                Color::TRANSPARENT.into()
+            }),
+            ..Default::default()
+        })
+        .into()
+}
+
+/// Elapsed seconds as `m:ss` or `h:mm:ss`.
+pub fn format_duration(secs: f64) -> String {
+    let total = secs.max(0.0).floor() as u64;
+    let hours = total / 3600;
+    let minutes = (total % 3600) / 60;
+    let seconds = total % 60;
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes}:{seconds:02}")
+    }
 }
 
 pub fn reveal_in_file_manager(path: &Path) {

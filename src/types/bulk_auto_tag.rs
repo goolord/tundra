@@ -1,4 +1,7 @@
-use super::common::{resource_svg, truncate_path, Message};
+use super::common::{
+    modal_button_style, resource_svg, selection_stripe, truncate_path, ui_muted_text, Message,
+    TUNDRA_ACCENT,
+};
 use crate::bulk_auto_tag::{BulkApplySummary, BulkDirGroup, BulkProgressSnapshot, BulkScanSummary};
 use iced::widget::{button, checkbox, container, progress_bar, row, scrollable, text, Button, Column, Row, Space};
 use iced::widget::button::{Status as ButtonStatus, Style as ButtonStyle};
@@ -8,7 +11,6 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 const BULK_LIST_SCROLL_ID: &str = "bulk-auto-tag-scroll";
-const TUNDRA_ACCENT: Color = Color::from_rgb8(0x50, 0x7a, 0xe0);
 const CONF_HIGH: Color = Color::from_rgb8(0x5c, 0xb8, 0x85);
 const CONF_MED: Color = Color::from_rgb8(0xd4, 0xa5, 0x4a);
 const CONF_LOW: Color = Color::from_rgb8(0x9a, 0x9a, 0xa8);
@@ -357,59 +359,6 @@ impl BulkAutoTagState {
     }
 }
 
-fn muted_text(theme: &theme::Theme) -> Color {
-    theme
-        .extended_palette()
-        .background
-        .base
-        .text
-        .scale_alpha(0.72)
-}
-
-fn modal_button_style(theme: &theme::Theme, status: ButtonStatus, primary: bool) -> ButtonStyle {
-    let palette = theme.extended_palette();
-    let accent = palette.primary.base.color;
-    let mut style = ButtonStyle {
-        text_color: palette.background.base.text,
-        border: Border {
-            radius: 6.0.into(),
-            width: 1.0,
-            color: palette.background.strong.color.scale_alpha(0.35),
-        },
-        shadow: Shadow::default(),
-        ..ButtonStyle::default()
-    };
-    match status {
-        ButtonStatus::Active | ButtonStatus::Disabled => {
-            style.background = Some(
-                if primary {
-                    accent.scale_alpha(0.82)
-                } else {
-                    palette.background.weak.color.scale_alpha(0.45)
-                }
-                .into(),
-            );
-            if primary {
-                style.text_color = Color::WHITE;
-            }
-        }
-        ButtonStatus::Hovered => {
-            style.background = Some(
-                if primary {
-                    accent.scale_alpha(0.92)
-                } else {
-                    accent.scale_alpha(0.16)
-                }
-                .into(),
-            );
-        }
-        ButtonStatus::Pressed => {
-            style.background = Some(accent.scale_alpha(0.72).into());
-        }
-    }
-    style
-}
-
 fn list_row_button_style(
     theme: &theme::Theme,
     status: ButtonStatus,
@@ -462,21 +411,6 @@ fn list_row_button_style(
     style
 }
 
-fn selection_stripe(selected: bool) -> Element<'static, Message> {
-    container(Space::new().width(Length::Fill).height(Length::Fill))
-        .width(Length::Fixed(SELECTION_STRIPE_WIDTH))
-        .height(Length::Fixed(ROW_HEIGHT))
-        .style(move |_theme| container::Style {
-            background: Some(if selected {
-                TUNDRA_ACCENT.into()
-            } else {
-                Color::TRANSPARENT.into()
-            }),
-            ..Default::default()
-        })
-        .into()
-}
-
 fn small_button(label: String, message: Message, primary: bool) -> Element<'static, Message> {
     button(text(label).size(11))
         .padding([4, 10])
@@ -491,7 +425,7 @@ fn stat_chip(label: String, value: usize, accent: bool) -> Element<'static, Mess
             text(label)
                 .size(10)
                 .style(|theme: &Theme| iced::widget::text::Style {
-                    color: Some(muted_text(theme)),
+                    color: Some(ui_muted_text(theme)),
                 }),
             text(format!("{value}"))
                 .size(11)
@@ -584,7 +518,7 @@ fn dir_count_badge(accepted: usize, total: usize) -> Element<'static, Message> {
             text(format!("/ {total}"))
                 .size(10)
                 .style(|theme: &Theme| iced::widget::text::Style {
-                    color: Some(muted_text(theme)),
+                    color: Some(ui_muted_text(theme)),
                 }),
         ]
         .spacing(2)
@@ -688,10 +622,10 @@ fn checkbox_cell(checkbox: Element<'static, Message>) -> Element<'static, Messag
 
 fn confidence_badge(confidence: Option<f64>) -> Element<'static, Message> {
     let (label, tone) = match confidence {
-        Some(value) if value >= 0.85 => (format!("{:.0}%", value * 100.0), CONF_HIGH),
-        Some(value) if value >= 0.65 => (format!("{:.0}%", value * 100.0), CONF_MED),
-        Some(value) => (format!("{:.0}%", value * 100.0), CONF_LOW),
-        None => ("—".into(), CONF_LOW),
+        Some(value) if value >= 0.85 => (crate::auto_tag::confidence_percent(Some(value)), CONF_HIGH),
+        Some(value) if value >= 0.65 => (crate::auto_tag::confidence_percent(Some(value)), CONF_MED),
+        Some(value) => (crate::auto_tag::confidence_percent(Some(value)), CONF_LOW),
+        None => (crate::auto_tag::confidence_percent(None), CONF_LOW),
     };
     container(
         text(label)
@@ -727,19 +661,19 @@ fn table_header() -> Element<'static, Message> {
                 .size(10)
                 .width(Length::FillPortion(2))
                 .style(|theme: &Theme| iced::widget::text::Style {
-                    color: Some(muted_text(theme)),
+                    color: Some(ui_muted_text(theme)),
                 }),
             text("Suggested tag")
                 .size(10)
                 .width(Length::FillPortion(1))
                 .style(|theme: &Theme| iced::widget::text::Style {
-                    color: Some(muted_text(theme)),
+                    color: Some(ui_muted_text(theme)),
                 }),
             text("Confidence")
                 .size(10)
                 .width(Length::Fixed(72.0))
                 .style(|theme: &Theme| iced::widget::text::Style {
-                    color: Some(muted_text(theme)),
+                    color: Some(ui_muted_text(theme)),
                 }),
         ]
         .spacing(8)
@@ -809,7 +743,7 @@ fn file_row(
                             }),
                             text(name).size(11).width(Length::Fill),
                             text(error).size(10).style(|theme: &Theme| iced::widget::text::Style {
-                                color: Some(muted_text(theme)),
+                                color: Some(ui_muted_text(theme)),
                             }),
                         ]
                         .spacing(8)
@@ -865,7 +799,7 @@ fn file_row(
                 color: Some(if selected || accepted {
                     TUNDRA_ACCENT.scale_alpha(0.9)
                 } else {
-                    muted_text(theme)
+                    ui_muted_text(theme)
                 }),
             }),
         text(name)
@@ -875,7 +809,7 @@ fn file_row(
                 color: Some(if selected {
                     theme.extended_palette().background.base.text
                 } else {
-                    muted_text(theme)
+                    ui_muted_text(theme)
                 }),
             }),
         instrument_chip(suggested),
@@ -890,7 +824,7 @@ fn file_row(
             .align_y(Alignment::Center)
             .height(Length::Fixed(ROW_HEIGHT))
             .push(Space::new().width(Length::Fixed(FILE_INDENT)))
-            .push(selection_stripe(selected))
+            .push(selection_stripe(selected, SELECTION_STRIPE_WIDTH, Length::Fixed(ROW_HEIGHT)))
             .push(checkbox_cell(
                 checkbox(accepted)
                     .on_toggle(move |checked| Message::BulkAutoTagSetFileAccepted {
@@ -942,7 +876,7 @@ fn directory_group(
             Row::new()
                 .align_y(Alignment::Center)
                 .height(Length::Fixed(ROW_HEIGHT))
-                .push(selection_stripe(dir_selected))
+                .push(selection_stripe(dir_selected, SELECTION_STRIPE_WIDTH, Length::Fixed(ROW_HEIGHT)))
                 .push(expand_toggle_button(expanded, dir_idx))
                 .push(
                     Button::new(
@@ -954,7 +888,7 @@ fn directory_group(
                                     color: Some(if dir_selected || accepted > 0 {
                                         TUNDRA_ACCENT.scale_alpha(0.95)
                                     } else {
-                                        muted_text(theme)
+                                        ui_muted_text(theme)
                                     }),
                                 }),
                             text(label)
@@ -1089,7 +1023,7 @@ fn review_body(state: &BulkAutoTagState, modifiers: Modifiers) -> Element<'stati
             text(format!("{root_label}  ·  {dir_count} folders · {file_count} files"))
                 .size(11)
                 .style(|theme: &Theme| iced::widget::text::Style {
-                    color: Some(muted_text(theme)),
+                    color: Some(ui_muted_text(theme)),
                 })
                 .width(Length::Fill),
             small_button(
@@ -1201,7 +1135,7 @@ pub fn bulk_auto_tag_view<'a>(
                     text("Shift/Ctrl+click to multi-select")
                         .size(10)
                         .style(|theme: &Theme| iced::widget::text::Style {
-                            color: Some(muted_text(theme)),
+                            color: Some(ui_muted_text(theme)),
                         })
                 } else {
                     text("").size(10)
@@ -1214,7 +1148,7 @@ pub fn bulk_auto_tag_view<'a>(
             text("Pick a folder, analyze audio, then review and apply missing instrument, artist, and comment tags.")
                 .size(13)
                 .style(|theme: &Theme| iced::widget::text::Style {
-                    color: Some(muted_text(theme)),
+                    color: Some(ui_muted_text(theme)),
                 })
                 .width(Length::Fill),
         );
@@ -1296,7 +1230,7 @@ pub fn bulk_auto_tag_view<'a>(
                     text(&state.progress_detail)
                         .size(11)
                         .style(|theme: &Theme| iced::widget::text::Style {
-                            color: Some(muted_text(theme)),
+                            color: Some(ui_muted_text(theme)),
                         }),
                 ),
         )
@@ -1410,7 +1344,7 @@ pub fn bulk_auto_tag_view<'a>(
                         text(root_label)
                             .size(11)
                             .style(|theme: &Theme| iced::widget::text::Style {
-                                color: Some(muted_text(theme)),
+                                color: Some(ui_muted_text(theme)),
                             })
                             .width(Length::Fill),
                         small_button(
