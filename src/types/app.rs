@@ -2947,7 +2947,21 @@ impl App {
                     window::Direction::NorthWest,
                     mouse::Interaction::ResizingDiagonallyDown,
                 ),
-                Space::new().width(fill).height(edge),
+                Self::window_resize_strip(
+                    Length::FillPortion(1),
+                    edge,
+                    window::Direction::North,
+                    mouse::Interaction::ResizingVertically,
+                ),
+                Space::new()
+                    .width(Length::FillPortion(2))
+                    .height(edge),
+                Self::window_resize_strip(
+                    Length::FillPortion(1),
+                    edge,
+                    window::Direction::North,
+                    mouse::Interaction::ResizingVertically,
+                ),
                 Self::window_resize_strip(
                     corner,
                     corner,
