@@ -2947,7 +2947,7 @@ impl App {
         let edge = Length::Fixed(border);
         let fill = Length::Fill;
 
-        let edges = column![
+        column![
             row![
                 Self::window_resize_strip(
                     corner,
@@ -2955,15 +2955,12 @@ impl App {
                     window::Direction::NorthWest,
                     mouse::Interaction::ResizingDiagonallyDown,
                 ),
-                Space::new()
-                    .width(Length::FillPortion(1))
-                    .height(edge),
-                Space::new()
-                    .width(Length::FillPortion(2))
-                    .height(edge),
-                Space::new()
-                    .width(Length::FillPortion(1))
-                    .height(edge),
+                Self::window_resize_strip(
+                    fill,
+                    edge,
+                    window::Direction::North,
+                    mouse::Interaction::ResizingVertically,
+                ),
                 Self::window_resize_strip(
                     corner,
                     corner,
@@ -2980,7 +2977,7 @@ impl App {
                     window::Direction::West,
                     mouse::Interaction::ResizingHorizontally,
                 ),
-                Space::new().width(fill).height(fill),
+                container(content).width(fill).height(fill),
                 Self::window_resize_strip(
                     edge,
                     fill,
@@ -3012,13 +3009,6 @@ impl App {
             ]
             .width(fill)
             .height(edge),
-        ]
-        .width(fill)
-        .height(fill);
-
-        stack![
-            container(content).width(fill).height(fill),
-            edges,
         ]
         .width(fill)
         .height(fill)
