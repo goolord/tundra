@@ -7,4 +7,5 @@ pub const RESOURCE_FILES: &[&str] = &[
     "folder-solid.svg",
     "music-solid.svg",
     "search-solid.svg",
+    "star-solid.svg",
 ];

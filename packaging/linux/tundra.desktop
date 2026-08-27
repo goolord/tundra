@@ -4,6 +4,6 @@ Name=Tundra
 Comment=Sample browser for FLAC, WAV, MP3, and OGG
 Exec=tundra %F
 Terminal=false
-MimeType=audio/flac;audio/wav;audio/x-wav;audio/mpeg;audio/ogg;audio/vorbis;application/ogg;
+MimeType=audio/flac;audio/wav;audio/x-wav;audio/mpeg;audio/ogg;audio/vorbis;application/ogg;audio/aiff;audio/x-aiff;
 Categories=Audio;AudioVideo;
 StartupNotify=true

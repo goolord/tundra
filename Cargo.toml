@@ -11,7 +11,7 @@ build = "build.rs"
 
 [dependencies]
 iced = { version = "0.14", default-features = false, features = ["wgpu-bare", "tiny-skia", "svg", "canvas", "crisp", "web-colors", "thread-pool", "x11", "wayland", "linux-theme-detection"] }
-rodio = "0.21"
+rodio = { version = "0.21", features = ["symphonia-aiff"] }
 walkdir = "2.5"
 fuzzy-matcher = "0.3"
 futures = "0.3"

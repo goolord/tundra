@@ -12,6 +12,7 @@ mod metadata;
 mod source;
 mod tag_store;
 mod types;
+mod waveform_peaks;
 
 #[cfg(test)]
 mod data_safety_tests;

@@ -1,4 +1,5 @@
 use super::common::{truncate_path, Message};
+use crate::path_util::{cache_key, canonical_path};
 use iced::widget::{button, container, row, scrollable, text, Column, Space};
 use iced::widget::button::{Status as ButtonStatus, Style as ButtonStyle};
 use iced::{Alignment, Border, Color, Element, Length, Shadow, Theme, theme};
@@ -86,6 +87,92 @@ impl AllowedDirectories {
     pub fn startup_directory(&self) -> Option<PathBuf> {
         self.roots.first().cloned()
     }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FavoritesStore {
+    paths: Vec<PathBuf>,
+}
+
+impl FavoritesStore {
+    pub fn load() -> Self {
+        let Some(path) = favorites_file_path() else {
+            return Self::default();
+        };
+        match std::fs::read(&path) {
+            Ok(bytes) => match bincode::deserialize(&bytes) {
+                Ok(store) => store,
+                Err(err) => {
+                    eprintln!(
+                        "Failed to deserialize favorites ({}): {err}",
+                        path.display()
+                    );
+                    Self::default()
+                }
+            },
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Self::default(),
+            Err(err) => {
+                eprintln!("Failed to read favorites ({}): {err}", path.display());
+                Self::default()
+            }
+        }
+    }
+
+    pub fn persist(&self) {
+        let Some(path) = favorites_file_path() else {
+            return;
+        };
+        let Ok(bytes) = bincode::serialize(self) else {
+            eprintln!("Failed to serialize favorites");
+            return;
+        };
+        if let Err(err) = crate::path_util::write_atomic(&path, &bytes) {
+            eprintln!("Failed to write favorites: {err}");
+        }
+    }
+
+    pub fn paths(&self) -> &[PathBuf] {
+        &self.paths
+    }
+
+    fn stored_key(path: &Path) -> PathBuf {
+        canonical_path(path)
+            .map(cache_key)
+            .unwrap_or_else(|_| cache_key(path.to_path_buf()))
+    }
+
+    pub fn contains(&self, path: &Path) -> bool {
+        let key = Self::stored_key(path);
+        self.paths.iter().any(|stored| *stored == key)
+    }
+
+    /// Returns `true` when the path was added, `false` when removed.
+    pub fn toggle(&mut self, path: PathBuf) -> bool {
+        let key = Self::stored_key(&path);
+        if let Some(index) = self.paths.iter().position(|stored| *stored == key) {
+            self.paths.remove(index);
+            false
+        } else {
+            self.paths.push(key);
+            self.paths.sort_by(|a, b| a.as_os_str().cmp(b.as_os_str()));
+            true
+        }
+    }
+
+    pub fn retain<F>(&mut self, keep: F)
+    where
+        F: Fn(&Path) -> bool,
+    {
+        self.paths.retain(|path| keep(path));
+    }
+}
+
+fn favorites_file_path() -> Option<PathBuf> {
+    let mut config_dir = dirs::config_dir()?;
+    config_dir.push("tundra");
+    let _ = std::fs::create_dir_all(&config_dir);
+    config_dir.push("favorites.bin");
+    Some(config_dir)
 }
 
 fn try_resolve_path(path: &Path) -> Option<PathBuf> {
@@ -334,6 +421,19 @@ mod tests {
     use super::*;
     use crate::path_util::{reclaim_write_sidecars, sidecar, REPLACE_OLD_SUFFIX};
     use crate::test_fixtures::ScratchDir;
+
+    #[test]
+    fn favorites_toggle_and_contains() {
+        let dir = ScratchDir::new("favorites-store");
+        let sample = dir.path().join("kick.wav");
+        std::fs::write(&sample, b"wav").expect("sample");
+
+        let mut favorites = FavoritesStore::default();
+        assert!(favorites.toggle(sample.clone()));
+        assert!(favorites.contains(&sample));
+        assert!(!favorites.toggle(sample));
+        assert!(favorites.paths().is_empty());
+    }
 
     #[test]
     fn allowed_directories_persist_recovers_from_crash_aside() {

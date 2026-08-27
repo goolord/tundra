@@ -139,7 +139,7 @@ Opening a file navigates to its folder, selects it in the file list, and starts 
 
 ## Features
 
-- Browse directories for audio samples (FLAC, WAV, MP3, OGG)
+- Browse directories for audio samples (FLAC, WAV, MP3, OGG, AIFF)
 - Fuzzy file search with directory caching
 - Separate tag filters (`title:value`, `artist:value`, etc.) with autocomplete
 - Auto-tag untagged files (Rust ZCR tier 1 + Essentia TensorFlow tier 2 on Linux/macOS, librosa on Windows)

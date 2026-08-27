@@ -196,6 +196,7 @@ pub fn control_bar_tags(fields: &TagFields) -> Vec<(TagField, String)> {
 }
 
 /// Compact tag line for tests and text-only surfaces.
+#[cfg(test)]
 pub fn format_control_bar_tags(fields: &TagFields) -> Option<String> {
     let tags = control_bar_tags(fields);
     if tags.is_empty() {
@@ -370,6 +371,8 @@ pub const TUNDRA_TAG_VERSION: u32 = 1;
 const WAV_INSTRUMENT_KEY: &str = "IKEY";
 const WAV_ARTIST_KEY: &str = "IART";
 const WAV_COMMENT_KEY: &str = "ICMT";
+const WAV_TITLE_KEY: &str = "INAM";
+const WAV_GENRE_KEY: &str = "IGNR";
 // Vorbis comments (FLAC, OGG) and ID3v2 user text (MP3) both name the field
 // INSTRUMENT, which is what Mp3tag and similar taggers display.
 const VORBIS_INSTRUMENT_KEY: &str = "INSTRUMENT";
@@ -426,6 +429,7 @@ fn file_tundra_tag_version(path: &Path, comment: &str, native_instrument: &str) 
     })
 }
 
+#[cfg(test)]
 pub fn tundra_tag_is_current(path: &Path, comment: &str) -> bool {
     file_tundra_tag_version(path, comment, "") == Some(TUNDRA_TAG_VERSION)
 }
@@ -454,22 +458,68 @@ enum Container {
     Flac,
     Ogg,
     Mp3,
+    Aiff,
 }
 
 impl Container {
     fn of(path: &Path) -> Option<Self> {
-        match path
-            .extension()
-            .and_then(|ext| ext.to_str())?
-            .to_ascii_lowercase()
-            .as_str()
-        {
+        if let Some(ext) = path.extension().and_then(|ext| ext.to_str()) {
+            if let Some(container) = Self::from_extension(ext) {
+                return Some(container);
+            }
+        }
+        Self::from_staged_name(path).or_else(|| Self::sniff(path))
+    }
+
+    fn from_extension(ext: &str) -> Option<Self> {
+        match ext.to_ascii_lowercase().as_str() {
             "wav" => Some(Self::Wav),
             "flac" => Some(Self::Flac),
             "ogg" => Some(Self::Ogg),
             "mp3" => Some(Self::Mp3),
+            "aiff" | "aif" => Some(Self::Aiff),
             _ => None,
         }
+    }
+
+    fn from_staged_name(path: &Path) -> Option<Self> {
+        let name = path.file_name()?.to_str()?;
+        for marker in [".tundra-tag-", ".tundra-replace-"] {
+            if let Some(original) = name.split(marker).next() {
+                if let Some(container) = Path::new(original)
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .and_then(Self::from_extension)
+                {
+                    return Some(container);
+                }
+            }
+        }
+        None
+    }
+
+    fn sniff(path: &Path) -> Option<Self> {
+        use std::io::Read;
+
+        let mut header = [0u8; 12];
+        let mut file = std::fs::File::open(path).ok()?;
+        file.read_exact(&mut header).ok()?;
+        if header.starts_with(b"RIFF") && header[8..12] == *b"WAVE" {
+            return Some(Self::Wav);
+        }
+        if header.starts_with(b"fLaC") {
+            return Some(Self::Flac);
+        }
+        if header.starts_with(b"OggS") {
+            return Some(Self::Ogg);
+        }
+        if header.starts_with(b"ID3") || header.starts_with(&[0xFF, 0xFB]) {
+            return Some(Self::Mp3);
+        }
+        if header.starts_with(b"FORM") && header.get(8..12) == Some(b"AIFF") {
+            return Some(Self::Aiff);
+        }
+        None
     }
 }
 
@@ -529,6 +579,16 @@ fn riff_get(info: &lofty::iff::wav::RiffInfoList, key: &str) -> Option<String> {
         .into_iter()
         .find(|(found, _)| found.eq_ignore_ascii_case(key))
         .and_then(|(_, value)| non_empty(Some(&value)))
+}
+
+fn apply_aiff_text_tags(text: &mut lofty::iff::aiff::AiffTextChunks, tags: &NativeTags) {
+    use lofty::tag::Accessor;
+    if let Some(artist) = &tags.artist {
+        text.set_artist(artist.clone());
+    }
+    if let Some(comment) = &tags.comment {
+        text.set_comment(comment.clone());
+    }
 }
 
 fn vorbis_native_tags(vorbis: Option<&VorbisComments>) -> NativeTags {
@@ -623,6 +683,43 @@ fn read_container_tags(path: &Path) -> Option<FileTags> {
                 generic: collect([id3v2.map(Tag::from), other]),
             }
         }
+        Container::Aiff => {
+            use lofty::tag::Accessor;
+
+            let mut aiff = lofty::iff::aiff::AiffFile::read_from(&mut file, options).ok()?;
+            let text = aiff.remove_text_chunks();
+            let id3 = aiff.remove_id3v2();
+            let empty_text = lofty::iff::aiff::AiffTextChunks::default();
+            let text_ref = text.as_ref().unwrap_or(&empty_text);
+            FileTags {
+                native: NativeTags {
+                    instrument: id3
+                        .as_ref()
+                        .and_then(|tag| non_empty(tag.get_user_text(ID3_INSTRUMENT_KEY)))
+                        .or_else(|| {
+                            text_ref.annotations.as_ref().and_then(|lines| {
+                                lines
+                                    .iter()
+                                    .find_map(|line| instrument_from_marked_comment(line))
+                            })
+                        })
+                        .or_else(|| {
+                            text_ref
+                                .comment()
+                                .and_then(|comment| instrument_from_marked_comment(&comment))
+                        }),
+                    artist: non_empty(text_ref.author.as_deref()).or_else(|| {
+                        id3.as_ref()
+                            .and_then(|tag| non_empty(tag.artist().as_deref()))
+                    }),
+                    comment: text_ref
+                        .comment()
+                        .map(|comment| comment.to_string())
+                        .or_else(|| id3.as_ref().and_then(|tag| non_empty(tag.comment().as_deref()))),
+                },
+                generic: collect([text.map(Tag::from), id3.map(Tag::from)]),
+            }
+        }
     })
 }
 
@@ -649,79 +746,109 @@ fn read_native_tags(path: &Path) -> Option<NativeTags> {
 
 /// Writes the populated fields of `tags` to the container's canonical keys.
 fn write_native_tags(path: &Path, tags: &NativeTags) -> Result<(), String> {
+    if tags.is_empty() {
+        return Ok(());
+    }
+    stage_and_replace(path, |staged| apply_native_tags_staged(staged, tags))
+}
+
+fn apply_native_tags_staged(staged: &Path, tags: &NativeTags) -> Result<(), String> {
     use lofty::config::WriteOptions;
     use lofty::file::AudioFile;
     use lofty::tag::Accessor;
 
-    if tags.is_empty() {
-        return Ok(());
-    }
-    let container = Container::of(path)
-        .ok_or_else(|| format!("Unsupported file type: {}", path.display()))?;
+    let container = Container::of(staged)
+        .ok_or_else(|| format!("Unsupported file type: {}", staged.display()))?;
+    let options = write_parse_options();
+    let read_error =
+        |err: lofty::error::FileParseError| format!("Failed to read {}: {err}", staged.display());
+    let write_error = |err: lofty::error::FileEncodingError| {
+        format!("Failed to write tags to {}: {err}", staged.display())
+    };
+    let open = || {
+        std::fs::File::open(staged)
+            .map_err(|err| format!("Failed to open {}: {err}", staged.display()))
+    };
 
-    stage_and_replace(path, |staged| {
-        let options = write_parse_options();
-        let read_error =
-            |err: lofty::error::FileParseError| format!("Failed to read {}: {err}", path.display());
-        let write_error = |err: lofty::error::FileEncodingError| {
-            format!("Failed to write tags to {}: {err}", path.display())
-        };
-        let open = || {
-            std::fs::File::open(staged)
-                .map_err(|err| format!("Failed to open {}: {err}", staged.display()))
-        };
-
-        match container {
-            Container::Wav => write_wav_tags_preserving_chunks(staged, tags),
-            Container::Flac => {
-                let mut flac = {
-                    let mut file = open()?;
-                    lofty::flac::FlacFile::read_from(&mut file, options).map_err(read_error)?
-                };
-                let mut vorbis = flac.remove_vorbis_comments().unwrap_or_default();
-                apply_vorbis_tags(&mut vorbis, tags);
-                flac.set_vorbis_comments(vorbis);
-                flac.save_to_path(staged, WriteOptions::default())
-                    .map_err(write_error)
-            }
-            Container::Ogg => {
-                let mut ogg = {
-                    let mut file = open()?;
-                    lofty::ogg::VorbisFile::read_from(&mut file, options).map_err(read_error)?
-                };
-                apply_vorbis_tags(ogg.vorbis_comments_mut(), tags);
-                ogg.save_to_path(staged, WriteOptions::default())
-                    .map_err(write_error)
-            }
-            Container::Mp3 => {
-                let mut mp3 = {
-                    let mut file = open()?;
-                    lofty::mpeg::MpegFile::read_from(&mut file, options).map_err(read_error)?
-                };
-                let mut id3 = mp3.remove_id3v2().unwrap_or_default();
-                if let Some(instrument) = &tags.instrument {
-                    id3.insert_user_text(ID3_INSTRUMENT_KEY.to_string(), instrument.clone());
-                }
-                if let Some(artist) = &tags.artist {
-                    id3.set_artist(artist.clone());
-                }
-                if let Some(comment) = &tags.comment {
-                    id3.set_comment(comment.clone());
-                }
-                mp3.set_id3v2(id3);
-                mp3.save_to_path(staged, WriteOptions::default())
-                    .map_err(write_error)
-            }
+    match container {
+        Container::Wav => write_wav_info_preserving_chunks(staged, Some(tags), None),
+        Container::Flac => {
+            let mut flac = {
+                let mut file = open()?;
+                lofty::flac::FlacFile::read_from(&mut file, options).map_err(read_error)?
+            };
+            let mut vorbis = flac.remove_vorbis_comments().unwrap_or_default();
+            apply_vorbis_tags(&mut vorbis, tags);
+            flac.set_vorbis_comments(vorbis);
+            flac.save_to_path(staged, WriteOptions::default())
+                .map_err(write_error)
         }
-    })
+        Container::Ogg => {
+            let mut ogg = {
+                let mut file = open()?;
+                lofty::ogg::VorbisFile::read_from(&mut file, options).map_err(read_error)?
+            };
+            apply_vorbis_tags(ogg.vorbis_comments_mut(), tags);
+            ogg.save_to_path(staged, WriteOptions::default())
+                .map_err(write_error)
+        }
+        Container::Mp3 => {
+            let mut mp3 = {
+                let mut file = open()?;
+                lofty::mpeg::MpegFile::read_from(&mut file, options).map_err(read_error)?
+            };
+            let mut id3 = mp3.remove_id3v2().unwrap_or_default();
+            if let Some(instrument) = &tags.instrument {
+                id3.insert_user_text(ID3_INSTRUMENT_KEY.to_string(), instrument.clone());
+            }
+            if let Some(artist) = &tags.artist {
+                id3.set_artist(artist.clone());
+            }
+            if let Some(comment) = &tags.comment {
+                id3.set_comment(comment.clone());
+            }
+            mp3.set_id3v2(id3);
+            mp3.save_to_path(staged, WriteOptions::default())
+                .map_err(write_error)
+        }
+        Container::Aiff => {
+            let mut aiff = {
+                let mut file = open()?;
+                lofty::iff::aiff::AiffFile::read_from(&mut file, options).map_err(read_error)?
+            };
+            let mut text = aiff.remove_text_chunks().unwrap_or_default();
+            apply_aiff_text_tags(&mut text, tags);
+            aiff.set_text_chunks(text);
+            let mut id3 = aiff.remove_id3v2().unwrap_or_default();
+            if let Some(instrument) = &tags.instrument {
+                id3.insert_user_text(ID3_INSTRUMENT_KEY.to_string(), instrument.clone());
+            }
+            if let Some(artist) = &tags.artist {
+                id3.set_artist(artist.clone());
+            }
+            if let Some(comment) = &tags.comment {
+                id3.set_comment(comment.clone());
+            }
+            aiff.set_id3v2(id3);
+            aiff.save_to_path(staged, WriteOptions::default())
+                .map_err(write_error)
+        }
+    }
 }
 
 /// Rewrite only the LIST INFO chunk so `smpl` / `cue ` / `inst` / ACID survive.
-fn write_wav_tags_preserving_chunks(path: &Path, tags: &NativeTags) -> Result<(), String> {
+fn write_wav_info_preserving_chunks(
+    path: &Path,
+    native: Option<&NativeTags>,
+    generic: Option<&ManualTagEdits>,
+) -> Result<(), String> {
+    if native.is_none() && generic.is_none() {
+        return Ok(());
+    }
     let bytes = std::fs::read(path)
         .map_err(|err| format!("Failed to read {}: {err}", path.display()))?;
     let mut chunks = parse_riff_wave_chunks(&bytes)?;
-    upsert_wav_info_chunk(&mut chunks, tags);
+    upsert_wav_list_info_chunk(&mut chunks, native, generic);
     let encoded = encode_riff_wave(&chunks);
     std::fs::write(path, encoded)
         .map_err(|err| format!("Failed to write tags to {}: {err}", path.display()))
@@ -755,21 +882,35 @@ fn parse_riff_wave_chunks(bytes: &[u8]) -> Result<Vec<([u8; 4], Vec<u8>)>, Strin
     Ok(chunks)
 }
 
-fn upsert_wav_info_chunk(chunks: &mut Vec<([u8; 4], Vec<u8>)>, tags: &NativeTags) {
+fn upsert_wav_list_info_chunk(
+    chunks: &mut Vec<([u8; 4], Vec<u8>)>,
+    native: Option<&NativeTags>,
+    generic: Option<&ManualTagEdits>,
+) {
     let mut fields = match chunks.iter().find(|(id, data)| {
         id == b"LIST" && data.len() >= 4 && &data[..4] == b"INFO"
     }) {
         Some((_, data)) => parse_info_fields(&data[4..]),
         None => Vec::new(),
     };
-    for (key, value) in [
-        (WAV_INSTRUMENT_KEY, &tags.instrument),
-        (WAV_ARTIST_KEY, &tags.artist),
-        (WAV_COMMENT_KEY, &tags.comment),
-    ] {
-        if let Some(value) = value {
-            upsert_info_field(&mut fields, key, value);
+    if let Some(tags) = native {
+        for (key, value) in [
+            (WAV_INSTRUMENT_KEY, &tags.instrument),
+            (WAV_ARTIST_KEY, &tags.artist),
+            (WAV_COMMENT_KEY, &tags.comment),
+        ] {
+            if let Some(value) = value {
+                upsert_info_field(&mut fields, key, value);
+            }
         }
+    }
+    if let Some(edits) = generic {
+        upsert_or_remove_info_field(&mut fields, WAV_TITLE_KEY, &edits.title);
+        upsert_or_remove_info_field(&mut fields, WAV_GENRE_KEY, &edits.genre);
+    }
+    if fields.is_empty() {
+        chunks.retain(|(id, data)| !(id == b"LIST" && data.len() >= 4 && &data[..4] == b"INFO"));
+        return;
     }
     let encoded = encode_info_fields(&fields);
     if let Some(index) = chunks
@@ -817,6 +958,28 @@ fn upsert_info_field(fields: &mut Vec<([u8; 4], Vec<u8>)>, key: &str, value: &st
         existing.1 = data;
     } else {
         fields.push((id, data));
+    }
+}
+
+fn info_field_id(key: &str) -> [u8; 4] {
+    let mut id = [b' '; 4];
+    for (index, byte) in key.as_bytes().iter().take(4).enumerate() {
+        id[index] = *byte;
+    }
+    id
+}
+
+fn remove_info_field(fields: &mut Vec<([u8; 4], Vec<u8>)>, key: &str) {
+    let id = info_field_id(key);
+    fields.retain(|(found, _)| found != &id);
+}
+
+fn upsert_or_remove_info_field(fields: &mut Vec<([u8; 4], Vec<u8>)>, key: &str, value: &str) {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        remove_info_field(fields, key);
+    } else {
+        upsert_info_field(fields, key, trimmed);
     }
 }
 
@@ -968,8 +1131,9 @@ pub fn read_tag_fields(path: &Path) -> Option<TagFields> {
     }
 
     let file_tags = read_file_tags(path);
-    let sidecar = crate::tag_store::instrument(path);
-    if file_tags.is_none() && sidecar.is_none() {
+    let sidecar_instrument = crate::tag_store::instrument(path);
+    let sidecar_manual = crate::tag_store::manual_fields(path);
+    if file_tags.is_none() && sidecar_instrument.is_none() && sidecar_manual.is_none() {
         return None;
     }
     let (native, tags) = file_tags
@@ -1014,6 +1178,10 @@ pub fn read_tag_fields(path: &Path) -> Option<TagFields> {
         fields.artist = fields.file_artist.clone();
     }
     apply_path_artist_hint(&mut fields, path);
+
+    if let Some(sidecar) = sidecar_manual {
+        overlay_sidecar_manual_fields(&mut fields, &sidecar);
+    }
 
     Some(fields)
 }
@@ -1610,6 +1778,7 @@ pub fn instrument_hint_from_path(path: &Path) -> Option<String> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HintSource {
     Path,
+    #[allow(dead_code)]
     Tags,
 }
 
@@ -1626,6 +1795,7 @@ impl HintSource {
 /// the path, so it is only consulted when the path names no instrument. This
 /// catches files whose instrument sits in a non-canonical field: a grouping
 /// written by an older build, a genre of "Kick", a title of "Kick 01".
+#[cfg(test)]
 fn instrument_hint_from_fields(fields: &TagFields) -> Option<String> {
     for value in [
         fields.instrument.as_str(),
@@ -1648,6 +1818,7 @@ fn instrument_hint_from_fields(fields: &TagFields) -> Option<String> {
 
 /// Everything known about a file before decoding its audio: filename, then
 /// directory structure, then tags it already carries.
+#[cfg(test)]
 pub fn instrument_hint(path: &Path) -> Option<(String, HintSource)> {
     if let Some(hint) = instrument_hint_from_path(path) {
         return Some((hint, HintSource::Path));
@@ -1963,6 +2134,7 @@ fn collect_tag_matches(
     }
 }
 
+#[cfg(test)]
 pub fn tag_search_paths(
     paths: &[PathBuf],
     tag_filters: &[TagFilter],
@@ -2100,6 +2272,341 @@ pub fn instrument_tag(path: &Path) -> Option<String> {
 
     let native = read_native_tags(path).unwrap_or_default();
     durable_instrument(path, &native, None)
+}
+
+/// User-editable tag values for the manual tag editor.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ManualTagEdits {
+    pub instrument: String,
+    pub artist: String,
+    pub title: String,
+    pub bpm: String,
+    pub key: String,
+    pub genre: String,
+    pub comment: String,
+}
+
+impl ManualTagEdits {
+    pub fn from_tag_fields(fields: &TagFields) -> Self {
+        Self {
+            instrument: fields.field_value(TagField::Instrument).to_string(),
+            artist: fields.artist.clone(),
+            title: fields.title.clone(),
+            bpm: fields.bpm.clone(),
+            key: fields.key.clone(),
+            genre: fields.genre.clone(),
+            comment: fields.comment.clone(),
+        }
+    }
+}
+
+fn apply_manual_generic_edits(tag: &mut lofty::tag::Tag, edits: &ManualTagEdits) {
+    use lofty::tag::Accessor;
+    use lofty::tag::ItemKey;
+
+    let set_or_clear = |tag: &mut lofty::tag::Tag, key: ItemKey, value: &str| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            tag.remove_key(key);
+        } else {
+            tag.insert_text(key, trimmed.to_string());
+        }
+    };
+
+    let title = edits.title.trim();
+    if title.is_empty() {
+        tag.remove_title();
+    } else {
+        tag.set_title(title.to_string());
+    }
+
+    let genre = edits.genre.trim();
+    if genre.is_empty() {
+        tag.remove_genre();
+    } else {
+        tag.set_genre(genre.to_string());
+    }
+
+    set_or_clear(tag, ItemKey::IntegerBpm, &edits.bpm);
+    set_or_clear(tag, ItemKey::Bpm, &edits.bpm);
+    set_or_clear(tag, ItemKey::InitialKey, &edits.key);
+}
+
+fn save_generic_edits_lofty(
+    tagged: &mut lofty::file::TaggedFile,
+    staged: &Path,
+    edits: &ManualTagEdits,
+) -> Result<(), String> {
+    use lofty::config::WriteOptions;
+    use lofty::file::{AudioFile, TaggedFileExt};
+    use lofty::tag::Tag;
+
+    let tag_type = tagged.primary_tag_type();
+
+    if tagged.tag_mut(tag_type).is_none() {
+        tagged.insert_tag(Tag::new(tag_type));
+    }
+    let tag = tagged
+        .tag_mut(tag_type)
+        .ok_or_else(|| format!("Failed to open tags for {}", staged.display()))?;
+    apply_manual_generic_edits(tag, edits);
+
+    tagged
+        .save_to_path(staged, WriteOptions::default())
+        .map_err(|err| format!("Failed to write tags to {}: {err}", staged.display()))
+}
+
+fn apply_generic_tags_staged(staged: &Path, edits: &ManualTagEdits) -> Result<(), String> {
+    use lofty::probe::Probe;
+
+    if let Ok(mut tagged) = Probe::open(staged).and_then(|probe| {
+        probe.options(write_parse_options()).read()
+    }) {
+        return save_generic_edits_lofty(&mut tagged, staged, edits);
+    }
+
+    match Container::of(staged) {
+        Some(Container::Wav) => write_wav_info_preserving_chunks(staged, None, Some(edits)),
+        Some(Container::Flac) => apply_manual_flac_staged(staged, &NativeTags::default(), edits),
+        Some(Container::Ogg) => apply_manual_ogg_staged(staged, &NativeTags::default(), edits),
+        Some(Container::Mp3) => apply_generic_tags_mp3_staged(staged, edits),
+        Some(Container::Aiff) => apply_generic_tags_aiff_staged(staged, edits),
+        None => Err(format!(
+            "Failed to read tags from {}: file format is not supported for generic tag edits",
+            staged.display()
+        )),
+    }
+}
+
+fn set_or_remove_vorbis_key(vorbis: &mut VorbisComments, key: &str, value: &str) {
+    let trimmed = value.trim();
+    let _removed: Vec<_> = vorbis.remove(key).collect();
+    if !trimmed.is_empty() {
+        vorbis.insert(key.to_string(), trimmed.to_string());
+    }
+}
+
+fn apply_manual_generic_vorbis(vorbis: &mut VorbisComments, edits: &ManualTagEdits) {
+    set_or_remove_vorbis_key(vorbis, "TITLE", &edits.title);
+    set_or_remove_vorbis_key(vorbis, "GENRE", &edits.genre);
+    set_or_remove_vorbis_key(vorbis, "BPM", &edits.bpm);
+    set_or_remove_vorbis_key(vorbis, "INITIALKEY", &edits.key);
+}
+
+fn apply_manual_flac_staged(
+    staged: &Path,
+    native: &NativeTags,
+    edits: &ManualTagEdits,
+) -> Result<(), String> {
+    use lofty::config::WriteOptions;
+    use lofty::file::AudioFile;
+    use lofty::flac::FlacFile;
+
+    let options = write_parse_options();
+    let mut file = std::fs::File::open(staged)
+        .map_err(|err| format!("Failed to open {}: {err}", staged.display()))?;
+    let mut flac = FlacFile::read_from(&mut file, options)
+        .map_err(|err| format!("Failed to read {}: {err}", staged.display()))?;
+    let mut vorbis = flac.remove_vorbis_comments().unwrap_or_default();
+    if !native.is_empty() {
+        apply_vorbis_tags(&mut vorbis, native);
+    }
+    apply_manual_generic_vorbis(&mut vorbis, edits);
+    flac.set_vorbis_comments(vorbis);
+    flac.save_to_path(staged, WriteOptions::default())
+        .map_err(|err| format!("Failed to write tags to {}: {err}", staged.display()))
+}
+
+fn apply_manual_ogg_staged(
+    staged: &Path,
+    native: &NativeTags,
+    edits: &ManualTagEdits,
+) -> Result<(), String> {
+    use lofty::config::WriteOptions;
+    use lofty::file::AudioFile;
+    use lofty::ogg::VorbisFile;
+
+    let options = write_parse_options();
+    let mut file = std::fs::File::open(staged)
+        .map_err(|err| format!("Failed to open {}: {err}", staged.display()))?;
+    let mut ogg = VorbisFile::read_from(&mut file, options)
+        .map_err(|err| format!("Failed to read {}: {err}", staged.display()))?;
+    let mut vorbis = std::mem::take(ogg.vorbis_comments_mut());
+    if !native.is_empty() {
+        apply_vorbis_tags(&mut vorbis, native);
+    }
+    apply_manual_generic_vorbis(&mut vorbis, edits);
+    *ogg.vorbis_comments_mut() = vorbis;
+    ogg.save_to_path(staged, WriteOptions::default())
+        .map_err(|err| format!("Failed to write tags to {}: {err}", staged.display()))
+}
+
+fn apply_generic_tags_mp3_staged(staged: &Path, edits: &ManualTagEdits) -> Result<(), String> {
+    use lofty::config::WriteOptions;
+    use lofty::file::AudioFile;
+    use lofty::mpeg::MpegFile;
+    use lofty::tag::Tag;
+
+    let options = write_parse_options();
+    let mut file = std::fs::File::open(staged)
+        .map_err(|err| format!("Failed to open {}: {err}", staged.display()))?;
+    let mut mp3 = MpegFile::read_from(&mut file, options)
+        .map_err(|err| format!("Failed to read {}: {err}", staged.display()))?;
+    let id3 = mp3.remove_id3v2().unwrap_or_default();
+    let mut tag = Tag::from(id3);
+    apply_manual_generic_edits(&mut tag, edits);
+    mp3.set_id3v2(tag.into());
+    mp3.save_to_path(staged, WriteOptions::default())
+        .map_err(|err| format!("Failed to write tags to {}: {err}", staged.display()))
+}
+
+fn apply_generic_tags_aiff_staged(staged: &Path, edits: &ManualTagEdits) -> Result<(), String> {
+    use lofty::config::WriteOptions;
+    use lofty::file::AudioFile;
+    use lofty::iff::aiff::AiffFile;
+    use lofty::tag::Tag;
+
+    let options = write_parse_options();
+    let mut file = std::fs::File::open(staged)
+        .map_err(|err| format!("Failed to open {}: {err}", staged.display()))?;
+    let mut aiff = AiffFile::read_from(&mut file, options)
+        .map_err(|err| format!("Failed to read {}: {err}", staged.display()))?;
+    let text = aiff.remove_text_chunks().unwrap_or_default();
+    let mut tag = Tag::from(text);
+    apply_manual_generic_edits(&mut tag, edits);
+    aiff.set_text_chunks(text_from_generic_tag(tag));
+    aiff.save_to_path(staged, WriteOptions::default())
+        .map_err(|err| format!("Failed to write tags to {}: {err}", staged.display()))
+}
+
+fn text_from_generic_tag(tag: Tag) -> lofty::iff::aiff::AiffTextChunks {
+    lofty::iff::aiff::AiffTextChunks::from(tag)
+}
+
+fn sidecar_fields_for_fallback(
+    path: &Path,
+    edits: &ManualTagEdits,
+) -> crate::tag_store::SidecarManualFields {
+    let existing = crate::tag_store::manual_fields(path).unwrap_or_default();
+    crate::tag_store::SidecarManualFields {
+        instrument: non_empty(Some(edits.instrument.as_str())).unwrap_or(existing.instrument),
+        artist: non_empty(Some(edits.artist.as_str())).unwrap_or(existing.artist),
+        comment: non_empty(Some(edits.comment.as_str())).unwrap_or(existing.comment),
+        title: edits.title.trim().to_string(),
+        bpm: edits.bpm.trim().to_string(),
+        key: edits.key.trim().to_string(),
+        genre: edits.genre.trim().to_string(),
+    }
+}
+
+fn save_manual_edits_to_sidecar(
+    path: &Path,
+    edits: &ManualTagEdits,
+    disk_err: String,
+) -> Result<(), String> {
+    crate::tag_store::set_manual_fields(
+        path,
+        &sidecar_fields_for_fallback(path, edits),
+        TUNDRA_TAG_VERSION,
+    )
+    .map_err(|store_err| format!("{disk_err} (sidecar: {store_err})"))
+}
+
+fn overlay_sidecar_manual_fields(fields: &mut TagFields, sidecar: &crate::tag_store::SidecarManualFields) {
+    if !sidecar.title.trim().is_empty() {
+        fields.title = sidecar.title.trim().to_string();
+    }
+    if !sidecar.artist.trim().is_empty() {
+        fields.artist = sidecar.artist.trim().to_string();
+        fields.file_artist = fields.artist.clone();
+    }
+    if !sidecar.bpm.trim().is_empty() {
+        fields.bpm = sidecar.bpm.trim().to_string();
+    }
+    if !sidecar.key.trim().is_empty() {
+        fields.key = sidecar.key.trim().to_string();
+    }
+    if !sidecar.genre.trim().is_empty() {
+        fields.genre = sidecar.genre.trim().to_string();
+    }
+    if !sidecar.comment.trim().is_empty() {
+        fields.comment = sidecar.comment.trim().to_string();
+        fields.file_comment = fields.comment.clone();
+    }
+    if !sidecar.instrument.trim().is_empty() && fields.instrument.trim().is_empty() {
+        fields.instrument = sidecar.instrument.trim().to_string();
+        fields.explicit_instrument = fields.instrument.clone();
+    }
+}
+
+fn apply_manual_disk_tags(
+    staged: &Path,
+    native: &NativeTags,
+    edits: &ManualTagEdits,
+) -> Result<(), String> {
+    if matches!(Container::of(staged), Some(Container::Wav)) {
+        let native_ref = if native.is_empty() {
+            None
+        } else {
+            Some(native)
+        };
+        return write_wav_info_preserving_chunks(staged, native_ref, Some(edits));
+    }
+    if matches!(Container::of(staged), Some(Container::Flac)) {
+        return apply_manual_flac_staged(staged, native, edits);
+    }
+    if matches!(Container::of(staged), Some(Container::Ogg)) {
+        return apply_manual_ogg_staged(staged, native, edits);
+    }
+    if !native.is_empty() {
+        apply_native_tags_staged(staged, native)?;
+    }
+    apply_generic_tags_staged(staged, edits)
+}
+
+/// Writes user-edited tags to disk and the sidecar store when native writes fail.
+pub fn write_manual_tags(path: &Path, edits: &ManualTagEdits) -> Result<(), String> {
+    if !is_audio(path) {
+        return Err(format!("Not an audio file: {}", path.display()));
+    }
+
+    let native = NativeTags {
+        instrument: non_empty(Some(edits.instrument.as_str())),
+        artist: non_empty(Some(edits.artist.as_str())),
+        comment: non_empty(Some(edits.comment.as_str())),
+    };
+
+    let try_disk = |native: &NativeTags| {
+        stage_and_replace(path, |staged| apply_manual_disk_tags(staged, native, edits))
+    };
+
+    match try_disk(&native) {
+        Ok(()) => {
+            let _ = crate::tag_store::clear_manual_fields(path);
+            Ok(())
+        }
+        Err(err) if native.instrument.is_some() => {
+            crate::tag_store::set_instrument(
+                path,
+                native.instrument.as_ref().expect("checked above"),
+                TUNDRA_TAG_VERSION,
+            )
+            .map_err(|store_error| format!("{err} (sidecar: {store_error})"))?;
+            let native_rest = NativeTags {
+                instrument: None,
+                artist: native.artist,
+                comment: native.comment,
+            };
+            match try_disk(&native_rest) {
+                Ok(()) => {
+                    let _ = crate::tag_store::clear_manual_fields(path);
+                    Ok(())
+                }
+                Err(retry_err) => save_manual_edits_to_sidecar(path, edits, retry_err),
+            }
+        }
+        Err(err) => save_manual_edits_to_sidecar(path, edits, err),
+    }
 }
 
 /// Returns `Ok(true)` when tags were written, `Ok(false)` when nothing was missing.
@@ -2919,6 +3426,75 @@ mod tests {
     }
 
     #[test]
+    fn write_manual_tags_round_trips_wav_fields_after_native_write() {
+        let dir = unique_temp_dir("tundra_manual_wav_tags");
+        let _ = std::fs::create_dir_all(dir.join("KSHMR").join("Kicks"));
+        let audio = dir.join("KSHMR").join("Kicks").join("kick.wav");
+        write_minimal_wav(&audio);
+
+        write_auto_tags(&audio, "Kick").expect("seed native tags");
+
+        let edits = ManualTagEdits {
+            instrument: "Kick".to_string(),
+            artist: "KSHMR".to_string(),
+            title: "Punchy Kick".to_string(),
+            genre: "Drums".to_string(),
+            comment: "Manual edit".to_string(),
+            ..ManualTagEdits::default()
+        };
+        write_manual_tags(&audio, &edits).expect("manual tag save");
+
+        let fields = read_tag_fields(&audio).expect("read saved tags");
+        assert_eq!(fields.instrument, "Kick");
+        assert_eq!(fields.artist, "KSHMR");
+        assert_eq!(fields.title, "Punchy Kick");
+        assert_eq!(fields.genre, "Drums");
+        assert_eq!(fields.comment, "Manual edit");
+
+        let riff = riff_info(&audio);
+        assert_eq!(
+            riff.get(WAV_TITLE_KEY).map(str::to_string),
+            Some("Punchy Kick".to_string())
+        );
+        assert_eq!(
+            riff.get(WAV_GENRE_KEY).map(str::to_string),
+            Some("Drums".to_string())
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn write_manual_tags_round_trips_flac_generic_fields() {
+        let audio = staged_fixture("flac", "tundra_manual_flac_tags");
+        write_auto_tags(&audio, "Kick").expect("seed native tags");
+
+        let edits = ManualTagEdits {
+            instrument: "Kick".to_string(),
+            title: "Warm Kick".to_string(),
+            genre: "Drums".to_string(),
+            bpm: "128".to_string(),
+            key: "Am".to_string(),
+            ..ManualTagEdits::default()
+        };
+        write_manual_tags(&audio, &edits).expect("manual flac tag save");
+
+        let fields = read_tag_fields(&audio).expect("read saved tags");
+        assert_eq!(fields.instrument, "Kick");
+        assert_eq!(fields.title, "Warm Kick");
+        assert_eq!(fields.genre, "Drums");
+        assert_eq!(fields.bpm, "128");
+        assert_eq!(fields.key, "Am");
+
+        let vorbis = vorbis_comments(&audio);
+        use lofty::tag::Accessor;
+        assert_eq!(vorbis.title().as_deref(), Some("Warm Kick"));
+        assert_eq!(vorbis.genre().as_deref(), Some("Drums"));
+
+        let _ = std::fs::remove_dir_all(audio.parent().unwrap());
+    }
+
+    #[test]
     fn write_auto_tags_extends_file_with_existing_non_auto_tags() {
         use lofty::config::WriteOptions;
         use lofty::file::{AudioFile, TaggedFileExt};
@@ -3096,7 +3672,7 @@ mod tests {
     /// container so third-party taggers and re-scans agree.
     #[test]
     fn instrument_round_trips_and_is_searchable_for_every_format() {
-        for ext in ["wav", "flac", "mp3", "ogg"] {
+        for ext in ["wav", "flac", "mp3", "ogg", "aiff"] {
             let audio = staged_fixture(ext, &format!("tundra_round_trip_{ext}"));
 
             assert!(

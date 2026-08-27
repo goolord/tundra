@@ -10,9 +10,10 @@ use iced::alignment;
 use iced::widget::canvas::Text;
 use iced::{Color, Pixels, Point, Rectangle, Renderer, Size, Theme, Vector};
 use std::cell::Cell;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::source::arc_samples::PlaybackPosition;
+use crate::waveform_peaks::WaveformPeaks;
 
 const MIN_ZOOM: f32 = 1.0;
 const ZOOM_FACTOR: f32 = 1.25;
@@ -22,6 +23,7 @@ const PAN_STEP: f32 = 0.08;
 const TIME_MARKER_HEIGHT: f32 = 16.0;
 const MIN_TICK_GAP_PX: f32 = 8.0;
 const AMPLITUDE_GUTTER: f32 = 36.0;
+const PLOT_CLIP_BLEED_LEFT: f32 = 2.0;
 const AMPLITUDE_PAD_TOP: f32 = 11.0;
 const AMPLITUDE_TICKS: [f32; 5] = [1.0, 0.5, 0.0, -0.5, -1.0];
 const MAX_OVERSCROLL: f32 = 0.14;
@@ -235,6 +237,7 @@ impl WaveFormView {
         self.overscroll = 0.0;
     }
 
+    #[cfg(test)]
     pub(crate) fn max_offset(&self, sample_count: usize) -> f64 {
         max_left(sample_count, self.zoom)
     }
@@ -292,6 +295,22 @@ impl WaveFormView {
 
     fn content_transform_active(&self) -> bool {
         self.overscroll != 0.0
+    }
+
+    /// Scale anchor for overscroll bounce: pin the visible edge so rubber-band
+    /// stretch does not clip the waveform against the plot boundary.
+    fn content_transform_origin_x(&self, width: f32, sample_count: usize) -> f32 {
+        if self.overscroll.abs() <= OVERSCROLL_STOP {
+            return width / 2.0;
+        }
+        let max = max_left(sample_count, self.zoom);
+        if self.offset <= f64::EPSILON && self.overscroll < 0.0 {
+            0.0
+        } else if max > f64::EPSILON && self.offset + f64::EPSILON >= max && self.overscroll > 0.0 {
+            width
+        } else {
+            width / 2.0
+        }
     }
 
     fn column_count(&self, width: f32, visible_samples: usize) -> usize {
@@ -384,7 +403,8 @@ struct PanAnchor {
 }
 
 pub struct WaveForm {
-    pub samples: Vec<f32>,
+    sample_count: usize,
+    peaks: Arc<Mutex<WaveformPeaks>>,
     view: WaveFormView,
     sample_rate: u32,
     playback_position: Option<Arc<PlaybackPosition>>,
@@ -481,9 +501,10 @@ impl WaveformPalette {
 }
 
 impl WaveForm {
-    pub fn new(samples: Vec<f32>) -> Self {
+    pub fn new_pending(sample_count: usize, peaks: Arc<Mutex<WaveformPeaks>>) -> Self {
         Self {
-            samples,
+            sample_count,
+            peaks,
             view: WaveFormView::default(),
             sample_rate: 0,
             playback_position: None,
@@ -497,10 +518,46 @@ impl WaveForm {
         }
     }
 
+    pub fn sample_count(&self) -> usize {
+        self.sample_count
+    }
+
+    pub fn set_sample_count(&mut self, sample_count: usize) {
+        if self.sample_count != sample_count {
+            self.sample_count = sample_count;
+            self.invalidate_cache();
+        }
+    }
+
+    pub fn apply_peaks_ready(&mut self) -> Option<usize> {
+        let count = self
+            .peaks
+            .lock()
+            .ok()
+            .filter(|peaks| peaks.complete && peaks.sample_count > 0)
+            .map(|peaks| peaks.sample_count)?;
+        self.set_sample_count(count);
+        Some(count)
+    }
+
+    pub fn invalidate_cache(&mut self) {
+        self.cache.clear();
+        self.content_cache_key.set((0, 0, 0, 0, 0));
+    }
+
+    fn peaks_complete(&self) -> bool {
+        self.peaks
+            .lock()
+            .map(|peaks| peaks.complete)
+            .unwrap_or(false)
+    }
+
     fn sync_content_cache(&self, theme: &Theme, plot_width: f32) {
+        let peaks_flag = self.peaks_complete() as u32;
         let key = self
             .view
-            .draw_cache_key(self.samples.len(), plot_width, theme);
+            .draw_cache_key(self.sample_count, plot_width, theme);
+        let key = (key.0, key.1, key.2, key.3, key.4 ^ peaks_flag);
         if self.content_cache_key.get() != key {
             self.cache.clear();
             self.content_cache_key.set(key);
@@ -509,6 +566,10 @@ impl WaveForm {
 
     pub fn set_sample_rate(&mut self, sample_rate: u32) {
         self.sample_rate = sample_rate;
+    }
+
+    pub fn sample_rate(&self) -> u32 {
+        self.sample_rate
     }
 
     pub fn set_playback_position(&mut self, position: Arc<PlaybackPosition>) {
@@ -542,15 +603,17 @@ impl WaveForm {
         view: WaveFormView,
         width: f32,
         height: f32,
+        sample_count: usize,
         draw: impl FnOnce(&mut Frame),
     ) {
         let (scale_x, scale_y) = view.content_scale();
         let translate_x = view.content_translate_x(width);
+        let origin_x = view.content_transform_origin_x(width, sample_count);
         frame.push_transform();
         frame.translate(Vector::new(translate_x, 0.0));
-        frame.translate(Vector::new(width / 2.0, height / 2.0));
+        frame.translate(Vector::new(origin_x, height / 2.0));
         frame.scale_nonuniform(Vector::new(scale_x, scale_y));
-        frame.translate(Vector::new(-width / 2.0, -height / 2.0));
+        frame.translate(Vector::new(-origin_x, -height / 2.0));
         draw(frame);
         frame.pop_transform();
     }
@@ -578,7 +641,7 @@ impl WaveForm {
     }
 
     fn playhead_content_x(&self, view: WaveFormView, plot_width: f32, progress: f64) -> Option<f32> {
-        if self.samples.is_empty() || plot_width <= 0.0 {
+        if self.sample_count == 0 || plot_width <= 0.0 {
             return None;
         }
 
@@ -586,14 +649,14 @@ impl WaveForm {
             .playback_position
             .as_ref()
             .map(|position| position.total_frames() as usize)
-            .unwrap_or(self.samples.len());
+            .unwrap_or(self.sample_count);
         if frame_count == 0 {
             return None;
         }
 
         let progress_frame = ((progress * frame_count as f64).round() as usize)
             .min(frame_count.saturating_sub(1));
-        let (start, end, phase) = view.sample_window(self.samples.len());
+        let (start, end, phase) = view.sample_window(self.sample_count);
         let visible = end.saturating_sub(start);
         if visible == 0 {
             return None;
@@ -628,7 +691,7 @@ impl WaveForm {
     }
 
     fn progress_at_x(&self, view: WaveFormView, plot: PlotArea, x: f32) -> Option<f64> {
-        if self.samples.is_empty() || plot.width <= 0.0 {
+        if self.sample_count == 0 || plot.width <= 0.0 {
             return None;
         }
 
@@ -636,12 +699,12 @@ impl WaveForm {
             .playback_position
             .as_ref()
             .map(|position| position.total_frames() as usize)
-            .unwrap_or(self.samples.len());
+            .unwrap_or(self.sample_count);
         if frame_count == 0 {
             return None;
         }
 
-        let (start, end, phase) = view.sample_window(self.samples.len());
+        let (start, end, phase) = view.sample_window(self.sample_count);
         let visible = end.saturating_sub(start);
         if visible == 0 {
             return None;
@@ -693,6 +756,7 @@ impl WaveForm {
         self.view = view;
     }
 
+    #[cfg(test)]
     fn column_extents(chunk: &[f32]) -> (f32, f32) {
         let mut iter = chunk.iter().map(|sample| sample.clamp(-1.0, 1.0));
         let Some(first) = iter.next() else {
@@ -730,7 +794,8 @@ impl WaveForm {
         }
     }
 
-    /// Lanczos-3 at sample index `t`; zero-extend outside `[0, samples.len())`. `t = 0` is `samples[0]`.
+    /// Lanczos-3 at sample index `t`; zero-extend outside `[0, samples.len())`.
+    #[cfg(test)]
     fn interpolate_at(samples: &[f32], t: f64) -> f32 {
         if samples.is_empty() || !t.is_finite() {
             return 0.0;
@@ -750,6 +815,36 @@ impl WaveForm {
             sum += sample * Self::lanczos3(t - i as f64);
         }
         sum as f32
+    }
+
+    /// Lanczos-3 at mono frame index `t` using peak midpoints.
+    fn interpolate_peak_at(peaks: &WaveformPeaks, t: f64) -> f32 {
+        if peaks.sample_count == 0 || !t.is_finite() {
+            return 0.0;
+        }
+        let n = peaks.sample_count;
+        let a = i64::from(LANCZOS_A);
+        let t = t.clamp(-a as f64, n as f64 + a as f64);
+        let center = t.floor() as i64;
+        let first = (center - a + 1).max(0);
+        let last = (center + a).min(n as i64 - 1);
+        if first > last {
+            return 0.0;
+        }
+        let mut sum = 0.0;
+        for i in first..=last {
+            let sample = peaks.midpoint_at(i as usize) as f64;
+            sum += sample * Self::lanczos3(t - i as f64);
+        }
+        sum as f32
+    }
+
+    fn column_extents_from_peaks(
+        peaks: &WaveformPeaks,
+        chunk_start: usize,
+        chunk_end: usize,
+    ) -> (f32, f32) {
+        peaks.extents_for_range(chunk_start, chunk_end)
     }
 
     fn sample_index_at_x(x: f32, start: usize, phase: f32, px_per_sample: f32) -> f64 {
@@ -793,6 +888,7 @@ impl WaveForm {
         )
     }
 
+    #[cfg(test)]
     fn detected_peak_y(columns: &[ColumnSample], center: f32, upper: bool) -> Option<f32> {
         let mut peak: Option<f32> = None;
         for column in columns {
@@ -1022,7 +1118,10 @@ impl WaveForm {
         debug_assert!(column_count <= width.ceil() as usize);
 
         let x_shift = -phase * px_per_sample;
-        let slice = &self.samples[start..end];
+        let peaks = match self.peaks.lock() {
+            Ok(peaks) => peaks,
+            Err(_) => return Vec::new(),
+        };
 
         let mut out = Vec::with_capacity(column_count);
         for col in 0..column_count {
@@ -1031,8 +1130,11 @@ impl WaveForm {
                 break;
             }
             let chunk_end = (chunk_start + samples_per_col).min(visible_count);
-            let (min_sample, max_sample) =
-                Self::column_extents(&slice[chunk_start..chunk_end]);
+            let (min_sample, max_sample) = Self::column_extents_from_peaks(
+                &peaks,
+                start + chunk_start,
+                start + chunk_end,
+            );
             let x = (col as f32 + 0.5) * column_width + x_shift;
             out.push(ColumnSample {
                 x,
@@ -1102,7 +1204,7 @@ impl WaveForm {
 
             let tick = Path::line(
                 Point::new(plot.x - 4.0, y),
-                Point::new(plot.x + 4.0, y),
+                Point::new(plot.x, y),
             );
             frame.stroke(
                 &tick,
@@ -1147,11 +1249,11 @@ impl WaveForm {
         let palette = WaveformPalette::from_theme(theme);
         let center = size.height / 2.0;
 
-        if self.samples.is_empty() || size.width <= 0.0 || size.height <= 0.0 {
+        if self.sample_count == 0 || size.width <= 0.0 || size.height <= 0.0 {
             return;
         }
 
-        let (start, end, phase) = view.sample_window(self.samples.len());
+        let (start, end, phase) = view.sample_window(self.sample_count);
         let visible_count = end.saturating_sub(start);
         if visible_count == 0 {
             return;
@@ -1222,7 +1324,10 @@ impl WaveForm {
             return;
         }
         let x_shift = -phase * px_per_sample;
-        let slice = &self.samples[start..end];
+        let peaks = match self.peaks.lock() {
+            Ok(peaks) => peaks,
+            Err(_) => return,
+        };
 
         let stem_stroke = Stroke::default()
             .with_color(palette.stroke.scale_alpha(0.55))
@@ -1235,9 +1340,10 @@ impl WaveForm {
             .with_line_join(LineJoin::Round);
 
         let mut stem_builder = path::Builder::new();
-        for (index, sample) in slice.iter().enumerate() {
+        for index in 0..visible_count {
+            let sample = peaks.midpoint_at(start + index).clamp(-1.0, 1.0);
             let x = (index as f32 + 0.5) * px_per_sample + x_shift;
-            let y = center - sample.clamp(-1.0, 1.0) * center;
+            let y = center - sample * center;
             if (y - center).abs() > 0.35 {
                 stem_builder.move_to(Point::new(x, center));
                 stem_builder.line_to(Point::new(x, y));
@@ -1251,7 +1357,7 @@ impl WaveForm {
             let pixels = layout.width.ceil().max(1.0) as usize;
             for x in (0..pixels).map(|px| px as f32 + 0.5) {
                 let t = Self::sample_index_at_x(x, start, phase, px_per_sample);
-                let sample = Self::interpolate_at(&self.samples, t).clamp(-1.0, 1.0);
+                let sample = Self::interpolate_peak_at(&peaks, t).clamp(-1.0, 1.0);
                 let y = center - sample * center;
                 if trace_started {
                     trace_builder.line_to(Point::new(x, y));
@@ -1261,9 +1367,10 @@ impl WaveForm {
                 }
             }
         } else {
-            for (index, sample) in slice.iter().enumerate() {
+            for index in 0..visible_count {
+                let sample = peaks.midpoint_at(start + index).clamp(-1.0, 1.0);
                 let x = (index as f32 + 0.5) * px_per_sample + x_shift;
-                let y = center - sample.clamp(-1.0, 1.0) * center;
+                let y = center - sample * center;
                 if trace_started {
                     trace_builder.line_to(Point::new(x, y));
                 } else {
@@ -1407,12 +1514,12 @@ impl WaveForm {
         size: Size,
         view: WaveFormView,
     ) {
-        if self.sample_rate == 0 || self.samples.is_empty() || size.width <= 0.0 {
+        if self.sample_rate == 0 || self.sample_count == 0 || size.width <= 0.0 {
             return;
         }
 
         let sample_rate = self.sample_rate as f64;
-        let (start, end, phase) = view.sample_window(self.samples.len());
+        let (start, end, phase) = view.sample_window(self.sample_count());
         let visible_samples = end.saturating_sub(start);
         if visible_samples == 0 {
             return;
@@ -1521,7 +1628,7 @@ impl WaveForm {
                     }
                     view.apply_pan_delta(
                         pan_delta as f64 * PAN_STEP as f64,
-                        self.samples.len(),
+                        self.sample_count(),
                     );
                     return true;
                 }
@@ -1534,7 +1641,7 @@ impl WaveForm {
                     .map(|point| ((point.x - plot.x) / plot.width).clamp(0.0, 1.0))
                     .unwrap_or(0.5);
                 let lines = WaveFormView::wheel_lines(*delta);
-                view.accumulate_wheel(lines, anchor_x, self.samples.len(), &mut state.wheel_lines)
+                view.accumulate_wheel(lines, anchor_x, self.sample_count(), &mut state.wheel_lines)
             }
             _ => false,
         }
@@ -1560,8 +1667,8 @@ impl Program<Message> for WaveForm {
         let plot = PlotArea::from_size(size);
         let plot_size = plot.size();
         let plot_clip = Rectangle::new(
-            Point::new(plot.x, plot.y),
-            Size::new(plot.width, plot.height + TIME_MARKER_HEIGHT),
+            Point::new(plot.x - PLOT_CLIP_BLEED_LEFT, plot.y),
+            Size::new(plot.width + PLOT_CLIP_BLEED_LEFT, plot.height + TIME_MARKER_HEIGHT),
         );
 
         let mut bg_frame = Frame::new(renderer, size);
@@ -1582,6 +1689,7 @@ impl Program<Message> for WaveForm {
                             view,
                             plot.width,
                             plot.height,
+                            self.sample_count(),
                             |frame| {
                                 draw_content(frame);
                                 if let Some(progress) = progress {
@@ -1630,8 +1738,8 @@ impl Program<Message> for WaveForm {
         bounds: Rectangle,
         cursor: Cursor,
     ) -> Option<Action<Message>> {
-        if state.tracked_samples != self.samples.len() {
-            state.tracked_samples = self.samples.len();
+        if state.tracked_samples != self.sample_count() {
+            state.tracked_samples = self.sample_count();
             state.wheel_lines = 0.0;
         }
 
@@ -1648,6 +1756,7 @@ impl Program<Message> for WaveForm {
             && state.scrub_active
         {
             state.scrub_active = false;
+            self.ui_scrubbing.set(false);
             return Some(
                 Action::publish(Message::WaveformScrubEnd(state.last_scrub_progress)).and_capture(),
             );
@@ -1689,6 +1798,7 @@ impl Program<Message> for WaveForm {
             ) {
                 state.scrub_active = true;
                 state.last_scrub_progress = progress;
+                self.ui_scrubbing.set(true);
                 return Some(Action::publish(Message::WaveformScrub(progress)).and_capture());
             }
         }
@@ -1727,7 +1837,7 @@ impl Program<Message> for WaveForm {
         {
             let last_x = state.last_pan_x.unwrap_or(position.x);
             let plot = PlotArea::from_size(bounds.size());
-            let visible = visible_fraction_of(self.samples.len(), self.view.zoom);
+            let visible = visible_fraction_of(self.sample_count(), self.view.zoom);
             let step = -(position.x - last_x) as f64 / plot.width as f64 * visible;
             state.last_pan_x = Some(position.x);
 
@@ -1736,7 +1846,7 @@ impl Program<Message> for WaveForm {
                 offset: anchor.view_offset,
                 overscroll: anchor.overscroll,
             });
-            view.apply_pan_delta(step, self.samples.len());
+            view.apply_pan_delta(step, self.sample_count());
             state.last_pan_view = Some(view);
             return Some(Action::request_redraw().and_capture());
         }
@@ -1832,6 +1942,25 @@ mod wheel_zoom_tests {
         view.offset = view.max_offset(100_000);
         let (_, end, _) = view.sample_window(100_000);
         assert_eq!(end, 100_000);
+    }
+
+    #[test]
+    fn playhead_and_first_sample_start_at_plot_origin() {
+        let view = WaveFormView::default();
+        let plot_width = 800.0;
+        let sample_count = 48_000;
+        let (start, end, phase) = view.sample_window(sample_count);
+        assert_eq!((start, phase), (0, 0.0));
+        let layout = view.waveform_layout(plot_width, end - start);
+        let x_shift = -phase * layout.px_per_sample;
+        let first_col_x = 0.5 * layout.column_width + x_shift;
+        assert!(
+            first_col_x - layout.column_width * 0.5 >= -f32::EPSILON,
+            "first column envelope should reach the left plot edge"
+        );
+        let sample_pos = 0.0_f32 - phase;
+        let playhead_x = sample_pos * layout.px_per_sample;
+        assert!((playhead_x - 0.0).abs() < f32::EPSILON);
     }
 
     #[test]

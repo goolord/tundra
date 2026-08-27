@@ -1,36 +1,48 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
-
-use rodio::{ChannelCount, Sample, SampleRate, Source};
 
 pub struct PlaybackPosition {
     frame: AtomicU64,
-    total_frames: u64,
+    total_frames: AtomicU64,
 }
 
 impl PlaybackPosition {
     pub fn new(total_frames: u64) -> Arc<Self> {
         Arc::new(Self {
             frame: AtomicU64::new(0),
-            total_frames,
+            total_frames: AtomicU64::new(total_frames),
         })
     }
 
     pub fn progress(&self) -> f64 {
-        if self.total_frames == 0 {
+        let total = self.total_frames.load(Ordering::Acquire);
+        if total == 0 {
             return 0.0;
         }
-        self.frame.load(Ordering::Acquire) as f64 / self.total_frames as f64
+        self.frame.load(Ordering::Acquire) as f64 / total as f64
     }
 
     pub fn total_frames(&self) -> u64 {
+        self.total_frames.load(Ordering::Acquire)
+    }
+
+    pub fn set_total_frames(&self, total_frames: u64) {
         self.total_frames
+            .store(total_frames, Ordering::Release);
+        let frame = self.frame.load(Ordering::Acquire);
+        if total_frames > 0 && frame > total_frames {
+            self.frame.store(total_frames, Ordering::Release);
+        }
     }
 
     pub fn set_frame(&self, frame: u64) {
-        self.frame
-            .store(frame.min(self.total_frames), Ordering::Release);
+        let total = self.total_frames.load(Ordering::Acquire);
+        let capped = if total == 0 {
+            frame
+        } else {
+            frame.min(total)
+        };
+        self.frame.store(capped, Ordering::Release);
     }
 
     pub fn reset(&self) {
@@ -38,69 +50,16 @@ impl PlaybackPosition {
     }
 }
 
-pub struct ArcSamplesSource {
-    samples: Arc<Vec<Sample>>,
-    channels: ChannelCount,
-    sample_rate: SampleRate,
-    offset: usize,
-    position: Option<Arc<PlaybackPosition>>,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-impl ArcSamplesSource {
-    pub fn new(
-        samples: Arc<Vec<Sample>>,
-        channels: ChannelCount,
-        sample_rate: SampleRate,
-        offset: usize,
-        position: Option<Arc<PlaybackPosition>>,
-    ) -> Self {
-        let offset = offset.min(samples.len());
-        Self {
-            samples,
-            channels,
-            sample_rate,
-            offset,
-            position,
-        }
-    }
-}
-
-impl Iterator for ArcSamplesSource {
-    type Item = Sample;
-
-    fn next(&mut self) -> Option<Sample> {
-        if self.offset >= self.samples.len() {
-            return None;
-        }
-
-        let channels = self.channels as usize;
-        if channels > 0
-            && self.offset.is_multiple_of(channels)
-            && let Some(position) = &self.position
-        {
-            position.set_frame((self.offset / channels) as u64);
-        }
-
-        let sample = self.samples[self.offset];
-        self.offset += 1;
-        Some(sample)
-    }
-}
-
-impl Source for ArcSamplesSource {
-    fn current_span_len(&self) -> Option<usize> {
-        Some(self.samples.len().saturating_sub(self.offset))
-    }
-
-    fn channels(&self) -> ChannelCount {
-        self.channels
-    }
-
-    fn sample_rate(&self) -> SampleRate {
-        self.sample_rate
-    }
-
-    fn total_duration(&self) -> Option<Duration> {
-        None
+    #[test]
+    fn set_total_frames_enables_progress() {
+        let position = PlaybackPosition::new(0);
+        position.set_frame(500);
+        assert_eq!(position.progress(), 0.0);
+        position.set_total_frames(1_000);
+        assert!((position.progress() - 0.5).abs() < f64::EPSILON);
     }
 }

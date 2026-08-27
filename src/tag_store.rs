@@ -18,9 +18,26 @@ use std::time::UNIX_EPOCH;
 
 use rusqlite::Connection;
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SidecarManualFields {
+    pub instrument: String,
+    pub artist: String,
+    pub title: String,
+    pub bpm: String,
+    pub key: String,
+    pub genre: String,
+    pub comment: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SidecarTag {
     instrument: String,
+    artist: String,
+    title: String,
+    bpm: String,
+    key: String,
+    genre: String,
+    comment: String,
     tag_version: u32,
     mtime_secs: u64,
     size: u64,
@@ -186,6 +203,32 @@ fn prepare_schema(connection: &Connection) -> Result<(), String> {
         "INTEGER NOT NULL DEFAULT 0",
     )?;
     ensure_column(connection, "instrument_tags", "size", "INTEGER NOT NULL DEFAULT 0")?;
+    ensure_column(
+        connection,
+        "instrument_tags",
+        "title",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    ensure_column(
+        connection,
+        "instrument_tags",
+        "artist",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    ensure_column(connection, "instrument_tags", "bpm", "TEXT NOT NULL DEFAULT ''")?;
+    ensure_column(connection, "instrument_tags", "key", "TEXT NOT NULL DEFAULT ''")?;
+    ensure_column(
+        connection,
+        "instrument_tags",
+        "genre",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    ensure_column(
+        connection,
+        "instrument_tags",
+        "comment",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
     Ok(())
 }
 
@@ -260,7 +303,8 @@ fn load_all() -> Result<HashMap<PathBuf, SidecarTag>, String> {
     let connection = open()?;
     let mut statement = connection
         .prepare(
-            "SELECT path, instrument, tag_version, mtime_secs, size FROM instrument_tags",
+            "SELECT path, instrument, tag_version, mtime_secs, size, title, artist, bpm, key, genre, comment
+             FROM instrument_tags",
         )
         .map_err(|err| format!("Failed to query tag store: {err}"))?;
     let rows = statement
@@ -271,22 +315,48 @@ fn load_all() -> Result<HashMap<PathBuf, SidecarTag>, String> {
                 row.get::<_, u32>(2)?,
                 row.get::<_, i64>(3)?,
                 row.get::<_, i64>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, String>(8)?,
+                row.get::<_, String>(9)?,
+                row.get::<_, String>(10)?,
             ))
         })
         .map_err(|err| format!("Failed to read tag store: {err}"))?;
     Ok(rows
         .filter_map(Result::ok)
-        .map(|(path, instrument, tag_version, mtime_secs, size)| {
+        .map(
+            |(
+                path,
+                instrument,
+                tag_version,
+                mtime_secs,
+                size,
+                title,
+                artist,
+                bpm,
+                initial_key,
+                genre,
+                comment,
+            )| {
             (
                 key(Path::new(&path)),
                 SidecarTag {
                     instrument,
+                    artist,
+                    title,
+                    bpm,
+                    key: initial_key,
+                    genre,
+                    comment,
                     tag_version,
                     mtime_secs: mtime_secs.max(0) as u64,
                     size: size.max(0) as u64,
                 },
             )
-        })
+        },
+        )
         .collect())
 }
 
@@ -320,37 +390,66 @@ pub fn tag_version(path: &Path) -> Option<u32> {
     cached(path).map(|entry| entry.tag_version)
 }
 
-/// Records `instrument` for `path`, replacing any previous entry.
-pub fn set_instrument(path: &Path, instrument: &str, tag_version: u32) -> Result<(), String> {
-    let instrument = instrument.trim();
-    if instrument.is_empty() {
-        return Err("Instrument label cannot be empty".into());
-    }
+/// Manual tag fields stored when the container cannot hold generic tags.
+pub fn manual_fields(path: &Path) -> Option<SidecarManualFields> {
+    cached(path).and_then(|entry| {
+        let fields = SidecarManualFields {
+            instrument: entry.instrument.clone(),
+            artist: entry.artist.clone(),
+            title: entry.title.clone(),
+            bpm: entry.bpm.clone(),
+            key: entry.key.clone(),
+            genre: entry.genre.clone(),
+            comment: entry.comment.clone(),
+        };
+        if fields.instrument.trim().is_empty()
+            && fields.artist.trim().is_empty()
+            && fields.title.trim().is_empty()
+            && fields.bpm.trim().is_empty()
+            && fields.key.trim().is_empty()
+            && fields.genre.trim().is_empty()
+            && fields.comment.trim().is_empty()
+        {
+            None
+        } else {
+            Some(fields)
+        }
+    })
+}
+
+fn write_sidecar_entry(path: &Path, entry: SidecarTag) -> Result<(), String> {
     let key = key(path);
     let stored = key.to_string_lossy().into_owned();
-    let (mtime_secs, size) = file_stamp(path).unwrap_or((0, 0));
-    let entry = SidecarTag {
-        instrument: instrument.to_string(),
-        tag_version,
-        mtime_secs,
-        size,
-    };
-
     open()?
         .execute(
-            "INSERT INTO instrument_tags (path, instrument, tag_version, mtime_secs, size)
-             VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO instrument_tags (
+                 path, instrument, tag_version, mtime_secs, size,
+                 title, artist, bpm, key, genre, comment
+             )
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
              ON CONFLICT(path) DO UPDATE SET
                  instrument = excluded.instrument,
                  tag_version = excluded.tag_version,
                  mtime_secs = excluded.mtime_secs,
-                 size = excluded.size",
+                 size = excluded.size,
+                 title = excluded.title,
+                 artist = excluded.artist,
+                 bpm = excluded.bpm,
+                 key = excluded.key,
+                 genre = excluded.genre,
+                 comment = excluded.comment",
             (
                 &stored,
-                instrument,
-                tag_version,
-                mtime_secs as i64,
-                size as i64,
+                &entry.instrument,
+                entry.tag_version,
+                entry.mtime_secs as i64,
+                entry.size as i64,
+                &entry.title,
+                &entry.artist,
+                &entry.bpm,
+                &entry.key,
+                &entry.genre,
+                &entry.comment,
             ),
         )
         .map_err(|err| format!("Failed to save tag for {}: {err}", path.display()))?;
@@ -367,6 +466,100 @@ pub fn set_instrument(path: &Path, instrument: &str, tag_version: u32) -> Result
             map.insert(key, entry);
             *store = Store::Ready(map);
         }
+    }
+    Ok(())
+}
+
+fn merge_sidecar_entry(path: &Path, update: impl FnOnce(&mut SidecarTag)) -> Result<(), String> {
+    let (mtime_secs, size) = file_stamp(path).unwrap_or((0, 0));
+    let mut entry = cached(path).unwrap_or(SidecarTag {
+        instrument: String::new(),
+        artist: String::new(),
+        title: String::new(),
+        bpm: String::new(),
+        key: String::new(),
+        genre: String::new(),
+        comment: String::new(),
+        tag_version: 0,
+        mtime_secs,
+        size,
+    });
+    entry.mtime_secs = mtime_secs;
+    entry.size = size;
+    update(&mut entry);
+    write_sidecar_entry(path, entry)
+}
+
+/// Records `instrument` for `path`, replacing any previous entry.
+pub fn set_instrument(path: &Path, instrument: &str, tag_version: u32) -> Result<(), String> {
+    let instrument = instrument.trim();
+    if instrument.is_empty() {
+        return Err("Instrument label cannot be empty".into());
+    }
+    merge_sidecar_entry(path, |entry| {
+        entry.instrument = instrument.to_string();
+        entry.tag_version = tag_version;
+    })
+}
+
+/// Records manual tag fields when the container cannot hold them.
+pub fn set_manual_fields(
+    path: &Path,
+    fields: &SidecarManualFields,
+    tag_version: u32,
+) -> Result<(), String> {
+    merge_sidecar_entry(path, |entry| {
+        entry.instrument = fields.instrument.trim().to_string();
+        entry.artist = fields.artist.trim().to_string();
+        entry.title = fields.title.trim().to_string();
+        entry.bpm = fields.bpm.trim().to_string();
+        entry.key = fields.key.trim().to_string();
+        entry.genre = fields.genre.trim().to_string();
+        entry.comment = fields.comment.trim().to_string();
+        entry.tag_version = tag_version;
+    })
+}
+
+/// Clears manual tag columns after a successful native write.
+pub fn clear_manual_fields(path: &Path) -> Result<(), String> {
+    let Some(entry) = cached(path) else {
+        return Ok(());
+    };
+    let manual_empty = entry.title.trim().is_empty()
+        && entry.artist.trim().is_empty()
+        && entry.bpm.trim().is_empty()
+        && entry.key.trim().is_empty()
+        && entry.genre.trim().is_empty()
+        && entry.comment.trim().is_empty();
+    if entry.instrument.trim().is_empty() && manual_empty {
+        return remove_sidecar(path);
+    }
+    merge_sidecar_entry(path, |entry| {
+        entry.artist.clear();
+        entry.title.clear();
+        entry.bpm.clear();
+        entry.key.clear();
+        entry.genre.clear();
+        entry.comment.clear();
+    })
+}
+
+/// Removes the sidecar row for `path`.
+pub fn remove_sidecar(path: &Path) -> Result<(), String> {
+    let cache_key = key(path);
+    let stored = cache_key.to_string_lossy().into_owned();
+    if db_path().is_some_and(|path| path.exists()) {
+        open()?.execute(
+            "DELETE FROM instrument_tags WHERE path = ?1",
+            [&stored],
+        )
+        .map_err(|err| format!("Failed to remove tag for {}: {err}", path.display()))?;
+    }
+    let mut store = cache()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Store::Ready(map) = &mut *store {
+        map.remove(&cache_key);
     }
     Ok(())
 }
@@ -487,6 +680,12 @@ mod tests {
         let (mtime_secs, size) = file_stamp(&audio).expect("stamp");
         let entry = SidecarTag {
             instrument: "Kick".into(),
+            artist: String::new(),
+            title: String::new(),
+            bpm: String::new(),
+            key: String::new(),
+            genre: String::new(),
+            comment: String::new(),
             tag_version: 1,
             mtime_secs,
             size,
@@ -501,6 +700,12 @@ mod tests {
 
         let stale = SidecarTag {
             instrument: "Kick".into(),
+            artist: String::new(),
+            title: String::new(),
+            bpm: String::new(),
+            key: String::new(),
+            genre: String::new(),
+            comment: String::new(),
             tag_version: 1,
             mtime_secs: 0,
             size: 0,

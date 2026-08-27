@@ -25,6 +25,8 @@
 				<string>wav</string>
 				<string>mp3</string>
 				<string>ogg</string>
+				<string>aiff</string>
+				<string>aif</string>
 			</array>
 			<key>CFBundleTypeName</key>
 			<string>Audio file</string>
