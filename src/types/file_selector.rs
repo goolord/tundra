@@ -18,7 +18,6 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const TUNDRA_ACCENT: Color = Color::from_rgb8(0x50, 0x7a, 0xe0);
 const TUNDRA_MUTED_ICON: Color = Color::from_rgb8(0x52, 0x56, 0x5c);
 const TAG_CHIP_RADIUS: f32 = 16.0;
 const FILTER_INPUT_RADIUS: f32 = 0.0;
@@ -226,7 +225,7 @@ impl Program<Message> for FileListScrollbar {
                     && point.y <= thumb_bounds.y + thumb_bounds.height
             });
 
-        let thumb_color = muted_text(theme).scale_alpha(if hovered { 0.72 } else { 0.48 });
+        let thumb_color = ui_muted_text(theme).scale_alpha(if hovered { 0.72 } else { 0.48 });
         let thumb = CanvasPath::rectangle(thumb_bounds.position(), thumb_bounds.size());
         frame.fill(&thumb, thumb_color);
         vec![frame.into_geometry()]
@@ -305,15 +304,6 @@ fn sidebar_panel(theme: &theme::Theme) -> Color {
     Color::from_rgb(base.r * 0.52, base.g * 0.52, base.b * 0.54)
 }
 
-fn muted_text(theme: &theme::Theme) -> Color {
-    theme
-        .extended_palette()
-        .background
-        .base
-        .text
-        .scale_alpha(0.72)
-}
-
 fn tree_icon_color(theme: &theme::Theme, emphasized: bool) -> Color {
     let palette = theme.extended_palette();
     if emphasized {
@@ -333,7 +323,7 @@ fn file_tree_button_style(
         text_color: if selected {
             palette.background.base.text
         } else {
-            muted_text(theme)
+            ui_muted_text(theme)
         },
         border: Border {
             width: 0.0,
@@ -387,48 +377,13 @@ fn file_tree_row_container_style(
     }
 }
 
-fn selection_stripe(selected: bool) -> Element<'static, Message> {
-    container(
-        Space::new()
-            .width(Length::Fill)
-            .height(Length::Fill),
-    )
-    .width(Length::Fixed(3.0))
-    .height(Length::Fill)
-    .style(move |_theme| container::Style {
-        background: Some(if selected {
-            TUNDRA_ACCENT.into()
-        } else {
-            Color::TRANSPARENT.into()
-        }),
-        ..Default::default()
-    })
-    .into()
-}
-
 fn file_tree_row(content: Element<'_, Message>, selected: bool) -> Element<'_, Message> {
     Row::new()
-        .push(selection_stripe(selected))
+        .push(selection_stripe(selected, 3.0, Length::Fill))
         .push(content)
         .width(Length::Fill)
         .height(Length::Fixed(FILE_ROW_HEIGHT))
         .into()
-}
-
-fn tag_field_accent(field: TagField) -> Color {
-    match field {
-        TagField::Title => Color::from_rgb8(0x50, 0x7a, 0xe0),
-        TagField::Artist => Color::from_rgb8(0x66, 0x72, 0xe8),
-        TagField::Album => Color::from_rgb8(0x48, 0x96, 0xc8),
-        TagField::Genre => Color::from_rgb8(0x52, 0xa8, 0x86),
-        TagField::Comment => Color::from_rgb8(0x78, 0x82, 0x98),
-        TagField::AlbumArtist => Color::from_rgb8(0x62, 0x66, 0xd8),
-        TagField::Composer => Color::from_rgb8(0x86, 0x70, 0xc0),
-        TagField::Label => Color::from_rgb8(0x6a, 0x88, 0xb4),
-        TagField::Bpm => Color::from_rgb8(0xc8, 0x72, 0x48),
-        TagField::Key => Color::from_rgb8(0x9a, 0x68, 0xc0),
-        TagField::Instrument => Color::from_rgb8(0x52, 0xa8, 0x86),
-    }
 }
 
 fn tag_chip_close_style(theme: &theme::Theme, status: ButtonStatus) -> ButtonStyle {
@@ -460,7 +415,7 @@ fn tag_chip_close_style(theme: &theme::Theme, status: ButtonStatus) -> ButtonSty
 
 fn tag_chip(filter: &TagFilter) -> Element<'static, Message> {
     let field = filter.field;
-    let accent = tag_field_accent(field);
+    let accent = tag_field_color(field);
     let value = filter.value.clone();
 
     container(
@@ -653,7 +608,7 @@ fn file_search_header(
                     ..iced::Font::default()
                 })
                 .style(|theme: &theme::Theme| iced::widget::text::Style {
-                    color: Some(muted_text(theme)),
+                    color: Some(ui_muted_text(theme)),
                 }),
         );
 
@@ -758,7 +713,7 @@ fn favorites_list_header() -> Element<'static, Message> {
                     ..iced::Font::default()
                 })
                 .style(|theme: &theme::Theme| iced::widget::text::Style {
-                    color: Some(muted_text(theme)),
+                    color: Some(ui_muted_text(theme)),
                 }),
         ]
         .spacing(8)
@@ -897,7 +852,7 @@ fn file_search_case_button(case_sensitive: bool) -> Element<'static, Message> {
                 .size(11)
                 .style(move |theme: &theme::Theme| iced::widget::text::Style {
                     color: Some(if case_sensitive {
-                        muted_text(theme).scale_alpha(0.72)
+                        ui_muted_text(theme).scale_alpha(0.72)
                     } else {
                         TUNDRA_ACCENT.scale_alpha(0.95)
                     }),
@@ -912,7 +867,7 @@ fn file_search_case_button(case_sensitive: bool) -> Element<'static, Message> {
                     color: Some(if case_sensitive {
                         TUNDRA_ACCENT.scale_alpha(0.95)
                     } else {
-                        muted_text(theme).scale_alpha(0.72)
+                        ui_muted_text(theme).scale_alpha(0.72)
                     }),
                 }),
         ]
@@ -979,7 +934,7 @@ fn tag_section_header(filter_count: usize) -> Element<'static, Message> {
                     ..iced::Font::default()
                 })
                 .style(|theme: &theme::Theme| iced::widget::text::Style {
-                    color: Some(muted_text(theme)),
+                    color: Some(ui_muted_text(theme)),
                 }),
         );
 
@@ -1026,7 +981,7 @@ fn filter_helper_text(label: &str) -> Element<'_, Message> {
         text(label)
             .size(10)
             .style(|theme: &theme::Theme| iced::widget::text::Style {
-                color: Some(muted_text(theme).scale_alpha(0.85)),
+                color: Some(ui_muted_text(theme).scale_alpha(0.85)),
             })
             .into(),
     )
@@ -1045,20 +1000,20 @@ fn tag_suggestion_row(field: TagField, highlighted: bool) -> Element<'static, Me
                         ..iced::Font::default()
                     })
                     .style(move |_theme: &theme::Theme| iced::widget::text::Style {
-                        color: Some(tag_field_accent(field).scale_alpha(0.95)),
+                        color: Some(tag_field_color(field).scale_alpha(0.95)),
                     }),
             )
             .padding([2, 0]),
             text(":")
                 .size(11)
                 .style(|theme: &theme::Theme| iced::widget::text::Style {
-                    color: Some(muted_text(theme)),
+                    color: Some(ui_muted_text(theme)),
                 }),
             Space::new().width(Length::Fill),
             text(hint)
                 .size(10)
                 .style(|theme: &theme::Theme| iced::widget::text::Style {
-                    color: Some(muted_text(theme)),
+                    color: Some(ui_muted_text(theme)),
                 }),
         ]
         .spacing(4)
@@ -1652,7 +1607,7 @@ fn file_tree_label(
                 color: Some(if selected_copy || hovered_copy {
                     theme.extended_palette().background.base.text
                 } else {
-                    muted_text(theme)
+                    ui_muted_text(theme)
                 }),
             })
             .font(iced::Font {

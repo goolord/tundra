@@ -164,6 +164,12 @@ fn engine_label(engine: &str) -> &'static str {
     }
 }
 
+pub fn confidence_percent(confidence: Option<f64>) -> String {
+    confidence
+        .map(|value| format!("{:.0}%", value * 100.0))
+        .unwrap_or_else(|| "—".into())
+}
+
 fn format_confidence(confidence: Option<f64>) -> String {
     confidence
         .map(|value| format!(" ({value:.0}%)", value = value * 100.0))
