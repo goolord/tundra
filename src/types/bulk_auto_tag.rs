@@ -1,6 +1,6 @@
-use super::common::{resource_path, truncate_path, Message};
+use super::common::{resource_svg, truncate_path, Message};
 use crate::bulk_auto_tag::{BulkApplySummary, BulkDirGroup, BulkProgressSnapshot, BulkScanSummary};
-use iced::widget::{button, checkbox, container, progress_bar, row, scrollable, text, Button, Column, Row, Space, Svg};
+use iced::widget::{button, checkbox, container, progress_bar, row, scrollable, text, Button, Column, Row, Space};
 use iced::widget::button::{Status as ButtonStatus, Style as ButtonStyle};
 use iced::widget::Id;
 use iced::{Alignment, Border, Color, Element, Length, Shadow, Theme, keyboard::Modifiers, theme};
@@ -858,7 +858,7 @@ fn file_row(
     };
 
     let label_row = row![
-        Svg::from_path(resource_path("music-solid.svg"))
+        resource_svg("music-solid.svg")
             .width(Length::Fixed(13.0))
             .height(Length::Fixed(13.0))
             .style(move |theme, _status| iced::widget::svg::Style {
@@ -947,7 +947,7 @@ fn directory_group(
                 .push(
                     Button::new(
                         row![
-                            Svg::from_path(resource_path("folder-solid.svg"))
+                            resource_svg("folder-solid.svg")
                                 .width(Length::Fixed(14.0))
                                 .height(Length::Fixed(14.0))
                                 .style(move |theme, _status| iced::widget::svg::Style {
@@ -1080,7 +1080,7 @@ fn review_body(state: &BulkAutoTagState, modifiers: Modifiers) -> Element<'stati
 
     body = body.push(
         row![
-            Svg::from_path(resource_path("folder-solid.svg"))
+            resource_svg("folder-solid.svg")
                 .width(Length::Fixed(12.0))
                 .height(Length::Fixed(12.0))
                 .style(|_theme, _status| iced::widget::svg::Style {
@@ -1243,7 +1243,7 @@ pub fn bulk_auto_tag_view<'a>(
                 .push(
                     container(
                         row![
-                            Svg::from_path(resource_path("folder-solid.svg"))
+                            resource_svg("folder-solid.svg")
                                 .width(Length::Fixed(14.0))
                                 .height(Length::Fixed(14.0))
                                 .style(|_theme, _status| iced::widget::svg::Style {
@@ -1401,7 +1401,7 @@ pub fn bulk_auto_tag_view<'a>(
                 let root_label = truncate_path(&root, 64);
                 done = done.push(
                     row![
-                        Svg::from_path(resource_path("folder-solid.svg"))
+                        resource_svg("folder-solid.svg")
                             .width(Length::Fixed(12.0))
                             .height(Length::Fixed(12.0))
                             .style(|_theme, _status| iced::widget::svg::Style {

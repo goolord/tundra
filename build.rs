@@ -19,16 +19,37 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-fn copy_icons(src_dir: &Path, dst_dir: &Path) -> std::io::Result<()> {
-    fs::create_dir_all(dst_dir)?;
+fn write_embedded_resources(manifest: &Path) -> std::io::Result<()> {
+    let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    let icons_src = manifest.join("resources");
+    let mut body = String::from(
+        "use iced::widget::svg::Handle;\n\npub fn handle(name: &str) -> Option<Handle> {\n    let bytes: &[u8] = match name {\n",
+    );
+    let mut embedded = 0usize;
     for name in RESOURCE_FILES {
-        let src = src_dir.join(name);
+        let src = icons_src.join(name);
         if src.is_file() {
             warn_if_lfs_pointer(&src, name);
-            fs::copy(&src, dst_dir.join(name))?;
+            body.push_str(&format!(
+                "        {name:?} => include_bytes!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/resources/{name}\")),\n"
+            ));
+            embedded += 1;
         }
     }
-    Ok(())
+    if embedded == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "no SVG resources under resources/; run git lfs pull or cargo xtask setup",
+        ));
+    }
+    if !icons_src.join("play.svg").is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "missing resources/play.svg (required fallback icon)",
+        ));
+    }
+    body.push_str("        _ => return None,\n    };\n    Some(Handle::from_memory(bytes))\n}\n");
+    fs::write(out_dir.join("embedded_resources.rs"), body)
 }
 
 fn copy_scripts(src_dir: &Path, dst_dir: &Path) -> std::io::Result<()> {
@@ -106,8 +127,11 @@ fn main() {
 
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let models_src = manifest.join("resources/models");
-    let icons_src = manifest.join("resources");
     let scripts_src = manifest.join("scripts");
+
+    write_embedded_resources(&manifest).unwrap_or_else(|err| {
+        panic!("Failed to embed SVG resources: {err}");
+    });
 
     for dest in exe_dirs(&manifest) {
         if models_src.is_dir() {
@@ -117,12 +141,6 @@ fn main() {
                     dest.join("models").display()
                 );
             }
-        }
-        if let Err(err) = copy_icons(&icons_src, &dest.join("resources")) {
-            println!(
-                "cargo:warning=Failed to copy icons to {}: {err}",
-                dest.join("resources").display()
-            );
         }
         if scripts_src.is_dir() {
             if let Err(err) = copy_scripts(&scripts_src, &dest.join("scripts")) {

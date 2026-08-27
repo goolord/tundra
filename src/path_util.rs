@@ -75,7 +75,7 @@ fn manifest_dir() -> Option<PathBuf> {
     dir.is_dir().then_some(dir)
 }
 
-/// Directories to search for bundled assets (scripts, models, icons).
+/// Directories to search for bundled assets (scripts, models).
 pub fn exe_search_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
     let mut push = |path: PathBuf| {

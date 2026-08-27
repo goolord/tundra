@@ -44,7 +44,33 @@ struct Tier2CliResponse {
     engine: Option<String>,
 }
 
-const INSTALL_HINT: &str = "Install classifiers with: cargo xtask setup";
+const INSTALL_HINT: &str =
+    "Install classifiers with: cargo xtask setup (or use a release package with scripts/.venv)";
+
+pub fn bundled_python_exe() -> Option<PathBuf> {
+    #[cfg(windows)]
+    const VENV_REL: &str = "scripts/.venv/Scripts/python.exe";
+    #[cfg(not(windows))]
+    const VENV_REL: &str = "scripts/.venv/bin/python3";
+
+    crate::path_util::find_beside(&[VENV_REL], |candidate| candidate.is_file())
+}
+
+fn run_python_script(
+    python: &Path,
+    scripts_dir: &Path,
+    script: &str,
+    path: &Path,
+) -> Result<std::process::Output, std::io::Error> {
+    let script_path = scripts_dir.join(script);
+    let mut command = Command::new(python);
+    configure_classifier_command(&mut command);
+    command
+        .arg(&script_path)
+        .current_dir(scripts_dir)
+        .arg(path)
+        .output()
+}
 pub const UV_PYTHON: &str = if cfg!(windows) { "3.12" } else { "3.14" };
 /// Matches the bulk-tagger high-confidence badge (>= 85%).
 const HIGH_CLASSIFIER_CONFIDENCE: f64 = 0.85;
@@ -263,6 +289,36 @@ fn run_script(script: &str, path: &Path) -> Result<String, ClassifyError> {
     }
 
     let mut attempts: Vec<String> = Vec::new();
+
+    if let Some(python) = bundled_python_exe() {
+        match run_python_script(&python, &scripts_dir, script, path) {
+            Ok(output) if output.status.success() => {
+                return String::from_utf8(output.stdout)
+                    .map_err(|err| {
+                        ClassifyError::new(
+                            "Couldn't analyze this file.",
+                            format!("Invalid UTF-8 from {script}: {err}"),
+                        )
+                    })
+                    .map(|text| text.trim().to_string());
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                attempts.push(if stderr.is_empty() {
+                    format!(
+                        "{} {script} exited with status {}",
+                        python.display(),
+                        output.status
+                    )
+                } else {
+                    format!("{} {script}: {stderr}", python.display())
+                });
+            }
+            Err(err) => {
+                attempts.push(format!("{}: {err}", python.display()));
+            }
+        }
+    }
 
     if let Some(output) = try_uv_run(&scripts_dir, script, path) {
         match output {
