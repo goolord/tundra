@@ -24,11 +24,8 @@ def handle_request(payload: dict[str, Any]) -> dict[str, Any]:
 
 def main() -> None:
     try:
-        tensorflow_ready = tier2_lib.warm()
-        print(
-            json.dumps({"ready": True, "tensorflow": tensorflow_ready}),
-            flush=True,
-        )
+        onnx_ready = tier2_lib.warm()
+        print(json.dumps({"ready": True, "onnx": onnx_ready}), flush=True)
     except Exception as err:
         print(json.dumps({"ready": False, "error": str(err)}), flush=True)
         sys.exit(1)
