@@ -617,19 +617,24 @@ impl WaveForm {
         frame.pop_transform();
     }
 
+    /// Mirrors the transform `with_content_transform` applies while drawing, including its
+    /// overscroll-dependent origin. Using a fixed `width / 2.0` origin here would put the playhead
+    /// and the click-to-seek mapping on a different transform than the waveform underneath them.
     fn map_content_x(&self, view: WaveFormView, width: f32, x: f32) -> f32 {
         let (scale_x, _) = view.content_scale();
         let translate_x = view.content_translate_x(width);
-        (x - width / 2.0) * scale_x + width / 2.0 + translate_x
+        let origin_x = view.content_transform_origin_x(width, self.sample_count());
+        (x - origin_x) * scale_x + origin_x + translate_x
     }
 
     fn unmap_content_x(&self, view: WaveFormView, width: f32, x: f32) -> f32 {
         let (scale_x, _) = view.content_scale();
         let translate_x = view.content_translate_x(width);
+        let origin_x = view.content_transform_origin_x(width, self.sample_count());
         if scale_x.abs() < 1e-6 {
-            return width / 2.0;
+            return origin_x;
         }
-        (x - translate_x - width / 2.0) / scale_x + width / 2.0
+        (x - translate_x - origin_x) / scale_x + origin_x
     }
 
     fn playback_progress(&self) -> Option<f64> {
@@ -662,8 +667,10 @@ impl WaveForm {
         }
 
         let px_per_sample = plot_width / visible as f32;
-        let sample_pos = progress_frame.saturating_sub(start) as f32 - phase;
-        Some(sample_pos * px_per_sample)
+        // Signed on purpose: a playhead before the window belongs off the left edge. Saturating the
+        // subtraction would park it on the first visible sample and read as a stuck playhead.
+        let sample_pos = progress_frame as f64 - start as f64 - phase as f64;
+        Some((sample_pos * px_per_sample as f64) as f32)
     }
 
     fn playhead_screen_x(&self, view: WaveFormView, plot: PlotArea, progress: f64) -> Option<f32> {
@@ -741,6 +748,12 @@ impl WaveForm {
     ) -> Option<Geometry> {
         let plot = PlotArea::from_size(size);
         let x = self.playhead_screen_x(view, plot, progress)?;
+        // This layer is drawn unclipped, so an off-window playhead would streak across the
+        // amplitude gutter instead of simply being out of view. Matches `plot_clip`, which the
+        // transformed path draws through, so the head does not jump when overscroll settles.
+        if x < plot.x - PLOT_CLIP_BLEED_LEFT || x > plot.x + plot.width {
+            return None;
+        }
         let accent = theme.extended_palette().primary.base.color;
         let mut frame = Frame::new(renderer, size);
         Self::stroke_playhead(&mut frame, x, size.height, accent);
@@ -816,26 +829,24 @@ impl WaveForm {
         sum as f32
     }
 
-    /// Lanczos-3 at mono frame index `t` using peak midpoints in bucket space.
+    /// Lanczos-3 at mono frame index `t` using peak midpoints.
     fn interpolate_peak_at(peaks: &WaveformPeaks, t: f64) -> f32 {
         if peaks.sample_count == 0 || !t.is_finite() {
             return 0.0;
         }
-        let n_buckets = crate::waveform_peaks::PEAK_BUCKET_COUNT;
-        let last_bucket = peaks.sample_count.saturating_sub(1) * n_buckets / peaks.sample_count;
-        let bucket_t = t * n_buckets as f64 / peaks.sample_count as f64;
+        let n = peaks.sample_count;
         let a = i64::from(LANCZOS_A);
-        let bucket_t = bucket_t.clamp(-a as f64, last_bucket as f64 + a as f64);
-        let center = bucket_t.floor() as i64;
+        let t = t.clamp(-a as f64, n as f64 + a as f64);
+        let center = t.floor() as i64;
         let first = (center - a + 1).max(0);
-        let last = (center + a).min(last_bucket as i64);
+        let last = (center + a).min(n as i64 - 1);
         if first > last {
             return 0.0;
         }
         let mut sum = 0.0;
         for i in first..=last {
-            let sample = peaks.bucket_midpoint(i as usize) as f64;
-            sum += sample * Self::lanczos3(bucket_t - i as f64);
+            let sample = peaks.midpoint_at(i as usize) as f64;
+            sum += sample * Self::lanczos3(t - i as f64);
         }
         sum as f32
     }
@@ -1803,11 +1814,16 @@ impl Program<Message> for WaveForm {
                 state.last_pan_view = None;
                 return Some(Action::publish(Message::WaveformPanStarted).and_capture());
             }
-            if let Some(progress) = self.progress_at_x(
-                state.last_pan_view.unwrap_or(self.view),
-                PlotArea::from_size(bounds.size()),
-                position.x,
-            ) {
+            let plot = PlotArea::from_size(bounds.size());
+            // The amplitude gutter is not part of the timeline; a press there would otherwise
+            // clamp to the window start and seek.
+            if position.x >= plot.x
+                && let Some(progress) = self.progress_at_x(
+                    state.last_pan_view.unwrap_or(self.view),
+                    plot,
+                    position.x,
+                )
+            {
                 state.scrub_active = true;
                 state.last_scrub_progress = progress;
                 self.ui_scrubbing.set(true);
@@ -1895,6 +1911,111 @@ impl Program<Message> for WaveForm {
             return iced::mouse::Interaction::Pointer;
         }
         iced::mouse::Interaction::default()
+    }
+}
+
+#[cfg(test)]
+mod seek_tests {
+    use super::*;
+
+    fn waveform(sample_count: usize) -> WaveForm {
+        WaveForm::new_pending(sample_count, Arc::new(Mutex::new(WaveformPeaks::empty())))
+    }
+
+    #[test]
+    fn click_lands_where_the_playhead_is_drawn() {
+        let sample_count = 480_000;
+        let mut wf = waveform(sample_count);
+        let plot = PlotArea::from_size(Size::new(832.0, 240.0));
+
+        for (zoom, offset) in [(1.0_f32, 0.0_f64), (8.0, 0.1), (64.0, 0.5), (512.0, 0.75)] {
+            wf.view = WaveFormView {
+                zoom,
+                offset,
+                overscroll: 0.0,
+            };
+            let view = wf.view;
+            let (start, end, _) = view.sample_window(sample_count);
+            let px_per_sample = plot.width / (end - start) as f32;
+            let tolerance = 1.0 + px_per_sample;
+
+            for step in 0..=20 {
+                let x = plot.x + plot.width * (step as f32 / 20.0);
+                let progress = wf
+                    .progress_at_x(view, plot, x)
+                    .expect("click inside the plot must resolve to a progress");
+                let back = wf
+                    .playhead_screen_x(view, plot, progress)
+                    .expect("progress must resolve back to a playhead x");
+                assert!(
+                    (back - x).abs() <= tolerance,
+                    "zoom {zoom} offset {offset}: clicked {x}, playhead drawn at {back}"
+                );
+            }
+        }
+    }
+
+    /// `map_content_x` has to reproduce the transform `with_content_transform` applies, otherwise
+    /// the playhead and the click mapping drift away from the waveform during an overscroll
+    /// rubber-band.
+    #[test]
+    fn content_mapping_matches_the_drawing_transform() {
+        let sample_count = 480_000;
+        let mut wf = waveform(sample_count);
+        let width = 832.0_f32;
+
+        for (offset, overscroll) in [(0.0_f64, -0.1_f32), (0.9, 0.1), (0.4, 0.05), (0.4, 0.0)] {
+            wf.view = WaveFormView {
+                zoom: 8.0,
+                offset,
+                overscroll,
+            };
+            let view = wf.view;
+            let (scale_x, _) = view.content_scale();
+            let translate_x = view.content_translate_x(width);
+            let origin_x = view.content_transform_origin_x(width, sample_count);
+
+            for step in 0..=10 {
+                let x = width * (step as f32 / 10.0);
+                let drawn = (x - origin_x) * scale_x + origin_x + translate_x;
+                let mapped = wf.map_content_x(view, width, x);
+                assert!(
+                    (mapped - drawn).abs() < 1e-3,
+                    "offset {offset} overscroll {overscroll}: content {x} drawn at {drawn}, \
+                     mapped to {mapped}"
+                );
+                let back = wf.unmap_content_x(view, width, mapped);
+                assert!(
+                    (back - x).abs() < 1e-2,
+                    "offset {offset} overscroll {overscroll}: {x} round-tripped to {back}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn playhead_left_of_the_window_is_not_pinned_to_the_left_edge() {
+        let sample_count = 480_000;
+        let mut wf = waveform(sample_count);
+        wf.view = WaveFormView {
+            zoom: 8.0,
+            offset: 0.5,
+            overscroll: 0.0,
+        };
+        let plot = PlotArea::from_size(Size::new(832.0, 240.0));
+        let (start, _, _) = wf.view.sample_window(sample_count);
+        assert!(start > 0);
+
+        // Playback sits well before the visible window, so the playhead belongs off-screen
+        // to the left rather than parked on the first visible sample.
+        let progress = (start as f64 / 2.0) / sample_count as f64;
+        let x = wf
+            .playhead_content_x(wf.view, plot.width, progress)
+            .expect("playhead x should be computable");
+        assert!(
+            x < 0.0,
+            "playhead for a sample before the window should be left of the plot, got {x}"
+        );
     }
 }
 
@@ -2276,40 +2397,33 @@ mod envelope_tests {
     }
 
     #[test]
-    fn interpolate_peak_at_follows_bucket_centers() {
-        let bucket = 10;
-        let sample_count = 1_000_000;
-        let sample_index =
-            bucket as f64 * sample_count as f64 / crate::waveform_peaks::PEAK_BUCKET_COUNT as f64;
+    fn trace_meets_each_stem_at_its_own_x() {
+        let sample_count = 64;
         let mut peaks = WaveformPeaks::new(sample_count);
-        peaks.min[bucket] = -0.4;
-        peaks.max[bucket] = 0.6;
-        let expected = peaks.bucket_midpoint(bucket);
-        let value = WaveForm::interpolate_peak_at(&peaks, sample_index);
-        assert!(
-            (value - expected).abs() < 1e-5,
-            "bucket {bucket} at sample {sample_index}: got {value}, want {expected}"
-        );
-    }
-
-    #[test]
-    fn interpolate_peak_at_ignores_buckets_beyond_file_end() {
-        let sample_count = 1_000_000;
         let n_buckets = crate::waveform_peaks::PEAK_BUCKET_COUNT;
-        let mut peaks = WaveformPeaks::new(sample_count);
-        let last_bucket = (sample_count - 1) * n_buckets / sample_count;
-        peaks.min[last_bucket] = 0.5;
-        peaks.max[last_bucket] = 0.5;
-        if last_bucket + 1 < n_buckets {
-            peaks.min[last_bucket + 1] = 1.0;
-            peaks.max[last_bucket + 1] = 1.0;
+        for index in 0..sample_count {
+            let bucket = index * n_buckets / sample_count;
+            let value = (index as f32 * 0.37).sin();
+            peaks.min[bucket] = value;
+            peaks.max[bucket] = value;
         }
-        let sample_index = last_bucket as f64 * sample_count as f64 / n_buckets as f64;
-        let value = WaveForm::interpolate_peak_at(&peaks, sample_index);
-        assert!(
-            (value - 0.5).abs() < 0.05,
-            "bucket {last_bucket} must not pull from trailing bucket: got {value}"
-        );
+
+        let start = 10;
+        let end = 30;
+        let px_per_sample = 8.0_f32;
+        let phase = 0.25_f32;
+        let x_shift = -phase * px_per_sample;
+
+        for index in 0..(end - start) {
+            let stem = peaks.midpoint_at(start + index);
+            let x = (index as f32 + 0.5) * px_per_sample + x_shift;
+            let t = WaveForm::sample_index_at_x(x, start, phase, px_per_sample);
+            let trace = WaveForm::interpolate_peak_at(&peaks, t);
+            assert!(
+                (trace - stem).abs() < 1e-5,
+                "sample {index} at x {x}: stem {stem}, trace {trace}"
+            );
+        }
     }
 
     #[test]

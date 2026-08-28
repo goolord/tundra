@@ -127,7 +127,7 @@ fn instrument_hint(path: &Path) -> Option<(String, HintSource)> {
             field: TagField::Bpm,
             value: "120".into(),
         }];
-        let result = collect_tag_matches(&paths, &filters, Arc::new(cache), true);
+        let result = collect_tag_matches(&paths, &filters, Arc::new(cache));
         assert_eq!(result.paths, vec![audio.clone()]);
         let _ = std::fs::remove_file(&audio);
         let _ = std::fs::remove_dir(dir);
@@ -163,7 +163,7 @@ fn instrument_hint(path: &Path) -> Option<(String, HintSource)> {
                 value: "Bm".into(),
             },
         ];
-        let result = collect_tag_matches(&paths, &filters, Arc::new(cache), true);
+        let result = collect_tag_matches(&paths, &filters, Arc::new(cache));
         assert!(result.paths.is_empty(), "partial tag matches should be rejected");
         let _ = std::fs::remove_file(&audio);
         let _ = std::fs::remove_dir(dir);
@@ -341,7 +341,7 @@ fn instrument_hint(path: &Path) -> Option<(String, HintSource)> {
         let mut lookup = MetadataLookup::new(Arc::clone(&metadata));
         assert_eq!(lookup.tag_fields(&audio).explicit_instrument, "Snare");
 
-        let hits = tag_search_cached_paths(
+        let hits = tag_search_paths(
             std::slice::from_ref(&audio),
             &[TagFilter {
                 field: TagField::Instrument,
@@ -355,22 +355,27 @@ fn instrument_hint(path: &Path) -> Option<(String, HintSource)> {
     }
 
     #[test]
-    fn cached_tag_search_skips_unindexed_files() {
+    fn tag_only_search_skips_unindexed_files() {
         let dir = unique_temp_dir("tundra_cached_skip");
         std::fs::create_dir_all(&dir).expect("temp dir");
         let audio = dir.join("snare.wav");
         std::fs::write(&audio, b"RIFF").unwrap();
-        let hits = tag_search_cached_paths(
+        let filters = vec![TagFilter {
+            field: TagField::Instrument,
+            value: "snare".to_string(),
+        }];
+
+        let hits = search_paths(
             std::slice::from_ref(&audio),
-            &[TagFilter {
-                field: TagField::Instrument,
-                value: "snare".to_string(),
-            }],
+            "",
+            &filters,
+            false,
+            false,
             Arc::new(HashMap::new()),
         );
         assert!(
             hits.paths.is_empty(),
-            "tag-only search must not parse unindexed files"
+            "a library-wide tag query must not parse unindexed files"
         );
         let _ = std::fs::remove_file(&audio);
         let _ = std::fs::remove_dir(dir);
@@ -999,14 +1004,17 @@ fn instrument_hint(path: &Path) -> Option<(String, HintSource)> {
             .expect("flac should carry vorbis comments")
     }
 
+    /// Mirrors the app: index the file, then search the index.
     fn finds_by_instrument(path: &Path, query: &str) -> bool {
+        let paths = vec![path.to_path_buf()];
+        let indexed = Arc::new(index_paths(&paths, Arc::new(HashMap::new())));
         tag_search_paths(
-            std::slice::from_ref(&path.to_path_buf()),
+            &paths,
             &[TagFilter {
                 field: TagField::Instrument,
                 value: query.to_string(),
             }],
-            Arc::new(HashMap::new()),
+            indexed,
         )
         .paths
         .iter()

@@ -6,7 +6,7 @@ use iced::widget::canvas::{self, Action, Event, Frame, Program};
 use iced::widget::canvas::Path as CanvasPath;
 use iced::widget::scrollable::{self, Scrollbar, Status as ScrollableStatus};
 use iced::widget::text::Wrapping;
-use iced::widget::{button, container, mouse_area, row, scrollable as scrollable_widget, text, Button, Column, Row, Space, TextInput};
+use iced::widget::{button, container, mouse_area, row, scrollable as scrollable_widget, stack, text, Button, Column, Row, Space, TextInput};
 use iced::widget::Id;
 use iced::{Alignment, Background, Border, Color, Element, Length, Rectangle, Shadow, theme};
 use iced::keyboard::Modifiers;
@@ -1014,7 +1014,8 @@ fn filter_input_with_clear(
     input: Element<'_, Message>,
     show_clear: bool,
     on_clear: Message,
-    on_focus: Message,
+    on_activate: Message,
+    active: bool,
 ) -> Element<'_, Message> {
     let clear_slot: Element<'_, Message> = if show_clear {
         filter_clear_button(on_clear)
@@ -1025,54 +1026,89 @@ fn filter_input_with_clear(
             .into()
     };
 
-    row![
-        container(mouse_area(input).on_press(on_focus))
+    // The overlay spans the whole input so the button can sit inside its right padding.
+    // It must stay transparent to the mouse everywhere except the button itself: `Space` and
+    // `button` report `Interaction::None` outside their own bounds, which is what lets clicks
+    // reach the TextInput underneath. Giving this layer a background, a `mouse_area`, or any
+    // other widget that claims an interaction will silently break click-to-focus.
+    // When inactive, the click-catcher sits under this overlay so × still clears.
+    let clear_overlay = container(clear_slot)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(iced::alignment::Horizontal::Right)
+        .align_y(iced::alignment::Vertical::Center);
+
+    if active {
+        container(stack![input, clear_overlay].width(Length::Fill))
+            .width(Length::Fill)
+            .into()
+    } else {
+        container(
+            stack![
+                input,
+                mouse_area(
+                    Space::new()
+                        .width(Length::Fill)
+                        .height(Length::Fill),
+                )
+                .on_press(on_activate),
+                clear_overlay,
+            ]
             .width(Length::Fill),
-        clear_slot,
-    ]
-    .align_y(Alignment::Center)
-    .width(Length::Fill)
-    .into()
+        )
+        .width(Length::Fill)
+        .into()
+    }
 }
 
 fn filter_input_padding() -> iced::Padding {
-    iced::Padding::from([8.0, 10.0])
+    iced::Padding::from([8.0, 10.0]).right(filter_clear_inset())
 }
 
-fn file_search_input(search_value: &str) -> Element<'_, Message> {
+fn file_search_input(search_value: &str, active: bool) -> Element<'_, Message> {
     let show_clear = !search_value.is_empty();
 
-    let input = TextInput::new("Search files…", search_value)
-        .id(Id::new(FILE_SEARCH_INPUT_ID))
-        .on_input(Message::Search)
-        .size(13)
-        .padding(filter_input_padding())
-        .width(Length::Fill);
+    let input = mouse_area(
+        TextInput::new("Search files…", search_value)
+            .id(Id::new(FILE_SEARCH_INPUT_ID))
+            .on_input(Message::Search)
+            .size(13)
+            .padding(filter_input_padding())
+            .width(Length::Fill),
+    )
+    .on_press(Message::SearchFocused(true))
+    .into();
 
     filter_input_with_clear(
-        input.into(),
+        input,
         show_clear,
         Message::Search(String::new()),
         Message::SearchFocused(true),
+        active,
     )
 }
 
-fn tag_search_input(tag_search_value: &str) -> Element<'_, Message> {
+fn tag_search_input(tag_search_value: &str, active: bool) -> Element<'_, Message> {
     let show_clear = !tag_search_value.is_empty();
 
-    let input = TextInput::new("title:value — Enter or Tab", tag_search_value)
-        .id(Id::new(TAG_SEARCH_INPUT_ID))
-        .on_input(Message::TagSearchInput)
-        .on_submit(Message::TagSearchSubmit)
-        .size(12)
-        .padding(filter_input_padding())
-        .width(Length::Fill);
+    let input = mouse_area(
+        TextInput::new("title:value — Enter or Tab", tag_search_value)
+            .id(Id::new(TAG_SEARCH_INPUT_ID))
+            .on_input(Message::TagSearchInput)
+            .on_submit(Message::TagSearchSubmit)
+            .size(12)
+            .padding(filter_input_padding())
+            .width(Length::Fill),
+    )
+    .on_press(Message::TagSearchFocused(true))
+    .into();
 
     filter_input_with_clear(
-        input.into(),
+        input,
         show_clear,
         Message::TagSearchInput(String::new()),
         Message::TagSearchFocused(true),
+        active,
     )
 }
 
@@ -1202,13 +1238,16 @@ impl FileSelector {
         let tag_search_value = self.tag_search_value.clone();
         let tag_filters = self.tag_filters.clone();
         let tag_search_error = self.tag_search_error.clone();
-        let (file_list, list_error) = FileList::list_buttons(dir);
+        let search_active = self.search_active();
         self.current_dir = dir.to_owned();
-        self.file_list = file_list;
+        if !search_active {
+            let (file_list, list_error) = FileList::list_buttons(dir);
+            self.file_list = file_list;
+            self.list_error = list_error;
+        }
         self.selected.clear();
         self.selection_anchor = None;
         self.hovered_file = None;
-        self.list_error = list_error;
         self.search_value = search_value;
         self.search_case_sensitive = search_case_sensitive;
         self.search_show_directories = search_show_directories;
@@ -1322,6 +1361,7 @@ impl FileSelector {
         search_enabled: bool,
         favorites: &FavoritesStore,
         modifiers: Modifiers,
+        filter_focus: FilterFocus,
     ) -> Column<'_, Message> {
         let mut column = Column::new().spacing(0).height(Length::Fill);
 
@@ -1413,7 +1453,10 @@ impl FileSelector {
                 self.search_show_directories,
                 self.favorites_only,
             )))
-            .push(file_search_input(&self.search_value))
+            .push(file_search_input(
+                &self.search_value,
+                filter_focus == FilterFocus::FileSearch,
+            ))
             .push(filter_section_divider())
             .push(filter_label_row(tag_section_header(self.tag_filters.len())));
 
@@ -1468,7 +1511,10 @@ impl FileSelector {
             Vec::new()
         };
         filter_body = filter_body.push(tag_suggestions_slot(suggestions));
-        filter_body = filter_body.push(tag_search_input(&self.tag_search_value));
+        filter_body = filter_body.push(tag_search_input(
+            &self.tag_search_value,
+            filter_focus == FilterFocus::TagSearch,
+        ));
 
         let filter_dock = container(
             Column::new()

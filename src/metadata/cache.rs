@@ -66,15 +66,15 @@ impl MetadataLookup {
         fields_clone
     }
 
-    pub fn tag_fields(&mut self, path: &Path) -> TagFields {
-        self.tag_fields_for_search(path, true)
+    /// Tags from the index only; an unindexed file reports nothing rather than being parsed.
+    /// Search uses this because a tag filter spans the whole library, and opening every
+    /// unindexed audio file to answer one query costs minutes. `index_paths` fills the index.
+    pub(crate) fn indexed_tag_fields(&self, path: &Path) -> Option<&TagFields> {
+        self.lookup_cached(path).map(|entry| &entry.fields)
     }
 
-    pub(crate) fn tag_fields_for_search(&mut self, path: &Path, allow_disk_read: bool) -> TagFields {
+    pub fn tag_fields(&mut self, path: &Path) -> TagFields {
         let cached = self.lookup_cached(path).cloned();
-        if !allow_disk_read && cached.is_none() {
-            return TagFields::default();
-        }
 
         if let Some(mtime_secs) = file_mtime_secs(path) {
             if let Some(cached) = &cached {

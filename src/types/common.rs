@@ -82,6 +82,16 @@ pub fn window_title(active_file: Option<&str>) -> String {
     }
 }
 
+/// Which filter-bar text field owns keyboard focus. At most one is active; the other gets a
+/// click-catcher overlay so two TextInputs cannot stay focused together.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FilterFocus {
+    #[default]
+    None,
+    FileSearch,
+    TagSearch,
+}
+
 #[derive(Debug, Clone)]
 pub enum Message {
     FileListSelect {
@@ -100,6 +110,7 @@ pub enum Message {
     FileListScrollbarRelease,
     Search(String),
     SearchFocused(bool),
+    FilterTab(bool),
     TagSearchInput(String),
     TagSearchSubmit,
     TagSearchAutocomplete,

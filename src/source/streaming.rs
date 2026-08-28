@@ -54,6 +54,10 @@ pub struct StreamSource {
     decoder: Decoder<BufReader<File>>,
     channels: usize,
     sample_rate: u32,
+    /// Where the decoder was seeked to. `sample_index` counts from this source's first sample,
+    /// so reported frames have to be biased by it or a seeked stream reports itself as playing
+    /// from the top of the file.
+    start_frame: u64,
     sample_index: usize,
     position: Option<Arc<PlaybackPosition>>,
 }
@@ -106,9 +110,14 @@ impl StreamSource {
             decoder,
             channels,
             sample_rate,
+            start_frame: skip_frames,
             sample_index: 0,
             position,
         })
+    }
+
+    fn frame_at(&self, sample_index: usize) -> u64 {
+        self.start_frame + (sample_index / self.channels) as u64
     }
 }
 
@@ -119,7 +128,7 @@ impl Iterator for StreamSource {
         let sample = self.decoder.next()?;
         if self.channels > 0 && self.sample_index.is_multiple_of(self.channels) {
             if let Some(position) = &self.position {
-                position.set_frame((self.sample_index / self.channels) as u64);
+                position.set_frame(self.frame_at(self.sample_index));
             }
         }
         self.sample_index += 1;
@@ -177,5 +186,33 @@ mod tests {
             let info = probe_decoder(&path).unwrap_or_else(|err| panic!("{ext}: {err}"));
             assert!(info.total_frames > 0, "{ext} should report frame count");
         }
+    }
+
+    #[test]
+    fn seeked_stream_reports_frames_from_the_seek_point() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/assets/tone.wav");
+        let info = probe_decoder(&path).expect("probe tone.wav");
+        let position = PlaybackPosition::new(info.total_frames);
+
+        let mut source =
+            StreamSource::open(&path, 0.5, info.total_frames, Some(Arc::clone(&position)))
+                .expect("open seeked stream");
+        assert!(
+            source.start_frame > 0,
+            "test needs a decoder that can actually seek"
+        );
+
+        // Pulling samples must advance from the seek point, not replay the file's frame
+        // numbering from zero and drag the playhead back to the start.
+        for _ in 0..source.channels * 64 {
+            if source.next().is_none() {
+                break;
+            }
+        }
+        assert!(
+            position.progress() >= 0.5,
+            "playhead fell back to {} after seeking to 0.5",
+            position.progress()
+        );
     }
 }
