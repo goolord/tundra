@@ -3,9 +3,9 @@ use futures::future::Aborted;
 use crate::metadata::{SearchResult, TagField};
 use iced::widget::button::{Status as ButtonStatus, Style as ButtonStyle};
 use iced::widget::svg::Handle;
-use iced::widget::{button, column, container, text, Button, Space, Svg};
+use iced::widget::{button, column, container, row, text, Button, Space, Svg};
 use iced::window::Direction;
-use iced::{Border, Color, Element, Length, Padding, Shadow, Theme, theme};
+use iced::{Alignment, Border, Color, Element, Length, Padding, Shadow, Theme, theme};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -37,20 +37,20 @@ pub struct Dialog {
 }
 
 impl Dialog {
-    pub fn about(body: String) -> Self {
+    fn titled(title: &'static str, body: String) -> Self {
         Self {
-            title: "About Tundra".into(),
+            title: title.into(),
             body,
             rows: Vec::new(),
         }
     }
 
+    pub fn about(body: String) -> Self {
+        Self::titled("About Tundra", body)
+    }
+
     pub fn notice(body: String) -> Self {
-        Self {
-            title: "Notice".into(),
-            body,
-            rows: Vec::new(),
-        }
+        Self::titled("Notice", body)
     }
 
     pub fn waveform_help() -> Self {
@@ -71,15 +71,10 @@ impl Dialog {
     }
 
     pub fn error(body: String) -> Self {
-        Self {
-            title: "Error".into(),
-            body,
-            rows: Vec::new(),
-        }
+        Self::titled("Error", body)
     }
 }
 
-/// Window / title-bar label: `Tundra` or `Tundra - {filename}`.
 pub fn window_title(active_file: Option<&str>) -> String {
     match active_file {
         Some(name) => format!("Tundra - {name}"),
@@ -206,7 +201,7 @@ pub enum Message {
     ToggleAutoTagDetails,
     OpenTagEditorFor(PathBuf),
     CloseTagEditor,
-    TagEditorInput(super::tag_editor::TagEditorField, String),
+    TagEditorInput(crate::metadata::TagField, String),
     TagEditorSave,
     OpenBulkAutoTag,
     CloseBulkAutoTag,
@@ -260,6 +255,7 @@ pub enum Message {
 }
 
 pub const AUDIO_EXTENSIONS: &[&str] = &["flac", "wav", "mp3", "ogg", "aiff", "aif"];
+pub const FILE_DRAG_THRESHOLD: f32 = 8.0;
 
 pub fn is_audio(path: &Path) -> bool {
     path.extension()
@@ -297,12 +293,8 @@ pub fn is_hidden(entry: &Path) -> bool {
 pub fn startup_directory() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|err| {
         eprintln!("Could not read current directory: {err}");
-        dirs::home_dir().unwrap_or_else(fallback_directory)
+        dirs::home_dir().unwrap_or_else(std::env::temp_dir)
     })
-}
-
-fn fallback_directory() -> PathBuf {
-    std::env::temp_dir()
 }
 
 pub fn truncate_path(path: &Path, max_chars: usize) -> String {
@@ -348,6 +340,103 @@ pub fn drag_out_notice(intro: impl AsRef<str>) -> String {
 }
 
 pub const TUNDRA_ACCENT: Color = Color::from_rgb8(0x50, 0x7a, 0xe0);
+pub const UI_DANGER: Color = Color::from_rgb8(0xff, 0x66, 0x66);
+pub const MODAL_ERROR: Color = Color::from_rgb(0.95, 0.62, 0.62);
+pub const MODAL_WARN: Color = Color::from_rgb(0.88, 0.78, 0.52);
+pub const MODAL_OK: Color = Color::from_rgb(0.62, 0.88, 0.68);
+
+pub fn modal_error_style(_theme: &Theme) -> iced::widget::text::Style {
+    iced::widget::text::Style {
+        color: Some(MODAL_ERROR),
+    }
+}
+
+pub fn modal_warn_style(_theme: &Theme) -> iced::widget::text::Style {
+    iced::widget::text::Style {
+        color: Some(MODAL_WARN),
+    }
+}
+
+pub fn modal_ok_style(_theme: &Theme) -> iced::widget::text::Style {
+    iced::widget::text::Style {
+        color: Some(MODAL_OK),
+    }
+}
+
+pub fn modal_card_style(theme: &Theme) -> container::Style {
+    let palette = theme.extended_palette();
+    container::Style {
+        background: Some(palette.background.base.color.into()),
+        border: Border {
+            width: 1.0,
+            color: palette.background.strong.color,
+            radius: 0.0.into(),
+        },
+        shadow: Shadow {
+            color: palette.background.base.text.scale_alpha(0.25),
+            offset: iced::Vector::new(0.0, 4.0),
+            blur_radius: 16.0,
+        },
+        ..Default::default()
+    }
+}
+
+pub fn modal_shell<'a>(
+    body: impl Into<Element<'a, Message>>,
+    width: f32,
+) -> container::Container<'a, Message> {
+    container(body)
+        .width(Length::Fixed(width))
+        .style(modal_card_style)
+}
+
+pub fn modal_panel_style(theme: &Theme) -> container::Style {
+    let palette = theme.extended_palette();
+    container::Style {
+        background: Some(palette.background.weak.color.scale_alpha(0.35).into()),
+        border: Border {
+            radius: 0.0.into(),
+            width: 1.0,
+            color: palette.background.strong.color.scale_alpha(0.22),
+        },
+        ..Default::default()
+    }
+}
+
+pub fn modal_label_style(theme: &Theme) -> iced::widget::text::Style {
+    iced::widget::text::Style {
+        color: Some(
+            theme
+                .extended_palette()
+                .background
+                .base
+                .text
+                .scale_alpha(0.65),
+        ),
+    }
+}
+
+pub fn modal_info_row<'a>(
+    label: &'a str,
+    value: impl Into<std::borrow::Cow<'a, str>>,
+) -> Element<'a, Message> {
+    container(
+        row![
+            text(label)
+                .size(11)
+                .width(Length::Fixed(88.0))
+                .style(modal_label_style),
+            text(value.into()).size(12).width(Length::Fill),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .width(Length::Fill),
+    )
+    .padding([6, 8])
+    .width(Length::Fill)
+    .style(modal_panel_style)
+    .into()
+}
 
 pub fn ui_muted_text(theme: &Theme) -> Color {
     theme
@@ -404,17 +493,16 @@ pub fn modal_button_style(theme: &Theme, status: ButtonStatus, primary: bool) ->
 
 pub fn tag_field_color(field: TagField) -> Color {
     match field {
-        TagField::Title => Color::from_rgb8(0x50, 0x7a, 0xe0),
+        TagField::Title => TUNDRA_ACCENT,
         TagField::Artist => Color::from_rgb8(0x66, 0x72, 0xe8),
         TagField::Album => Color::from_rgb8(0x48, 0x96, 0xc8),
-        TagField::Genre => Color::from_rgb8(0x52, 0xa8, 0x86),
+        TagField::Genre | TagField::Instrument => Color::from_rgb8(0x52, 0xa8, 0x86),
         TagField::Comment => Color::from_rgb8(0x78, 0x82, 0x98),
         TagField::AlbumArtist => Color::from_rgb8(0x62, 0x66, 0xd8),
         TagField::Composer => Color::from_rgb8(0x86, 0x70, 0xc0),
         TagField::Label => Color::from_rgb8(0x6a, 0x88, 0xb4),
         TagField::Bpm => Color::from_rgb8(0xc8, 0x72, 0x48),
         TagField::Key => Color::from_rgb8(0x9a, 0x68, 0xc0),
-        TagField::Instrument => Color::from_rgb8(0x52, 0xa8, 0x86),
     }
 }
 
@@ -433,7 +521,6 @@ pub fn selection_stripe(selected: bool, width: f32, height: Length) -> Element<'
         .into()
 }
 
-/// Elapsed seconds as `m:ss` or `h:mm:ss`.
 pub fn format_duration(secs: f64) -> String {
     let total = secs.max(0.0).floor() as u64;
     let hours = total / 3600;

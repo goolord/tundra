@@ -589,7 +589,6 @@ mod tests {
 
     const FORMATS: [&str; 5] = ["wav", "flac", "mp3", "ogg", "aiff"];
 
-    /// Builds `<scratch>/Kicks/` holding one real file per supported format.
     fn kick_folder(label: &str) -> (PathBuf, Vec<PathBuf>) {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

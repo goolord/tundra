@@ -11,8 +11,8 @@ use super::fields::{TagField, TagFilter, TagFields};
 use super::hints::{instrument_search_terms, instrument_terms_related};
 
 pub const FILE_SEARCH_MIN_QUERY_LEN: usize = 2;
-pub const TAG_SEARCH_DEBOUNCE_MS: u64 = 200;
 pub(crate) const FILE_SEARCH_DEBOUNCE_MS: u64 = 200;
+pub const TAG_SEARCH_DEBOUNCE_MS: u64 = FILE_SEARCH_DEBOUNCE_MS;
 pub(crate) const FILE_SEARCH_DEBOUNCE_MS_SHORT: u64 = 450;
 const CONTAINS_NAME_MATCH_SCORE: i64 = 400;
 const FILE_SEARCH_MIN_FUZZY_SCORE: i32 = 70;
@@ -277,7 +277,21 @@ pub(crate) fn file_search_matcher(case_sensitive: bool) -> SkimMatcherV2 {
 }
 
 pub(crate) fn tag_search_matcher() -> SkimMatcherV2 {
-    SkimMatcherV2::default().ignore_case()
+    file_search_matcher(false)
+}
+
+fn min_term_scores(
+    terms: &[String],
+    mut score_term: impl FnMut(&str) -> Option<i64>,
+) -> Option<i64> {
+    if terms.is_empty() {
+        return None;
+    }
+    let mut min = i64::MAX;
+    for term in terms {
+        min = min.min(score_term(term)?);
+    }
+    Some(min)
 }
 
 fn instrument_field_score(
@@ -285,15 +299,9 @@ fn instrument_field_score(
     value: &str,
     query: &str,
 ) -> Option<i64> {
-    let terms = file_search_terms(query);
-    if terms.is_empty() {
-        return None;
-    }
-    let mut scores = Vec::with_capacity(terms.len());
-    for term in &terms {
-        scores.push(instrument_term_score(matcher, value, term)?);
-    }
-    Some(scores.into_iter().min().unwrap_or(0))
+    min_term_scores(&file_search_terms(query), |term| {
+        instrument_term_score(matcher, value, term)
+    })
 }
 
 fn instrument_term_score(matcher: &SkimMatcherV2, value: &str, term: &str) -> Option<i64> {
@@ -320,19 +328,10 @@ fn instrument_term_score(matcher: &SkimMatcherV2, value: &str, term: &str) -> Op
 }
 
 fn tag_value_score(matcher: &SkimMatcherV2, value: &str, query: &str) -> Option<i64> {
-    let terms = file_search_terms(query);
-    if terms.is_empty() {
-        return None;
-    }
-    let mut scores = Vec::with_capacity(terms.len());
-    for term in &terms {
+    min_term_scores(&file_search_terms(query), |term| {
         let score = term_field_score(matcher, value, term, false);
-        if score <= 0 {
-            return None;
-        }
-        scores.push(score);
-    }
-    Some(scores.into_iter().min().unwrap_or(0))
+        (score > 0).then_some(score)
+    })
 }
 
 pub(crate) fn tag_field_score(

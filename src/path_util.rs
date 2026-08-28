@@ -48,9 +48,97 @@ pub fn is_under(path: &Path, root: &Path) -> bool {
     path.starts_with(root)
 }
 
+fn tundra_app_dir(base: Option<PathBuf>, require_create: bool) -> Option<PathBuf> {
+    let mut dir = base?;
+    dir.push("tundra");
+    if require_create {
+        std::fs::create_dir_all(&dir).ok()?;
+    } else {
+        let _ = std::fs::create_dir_all(&dir);
+    }
+    Some(dir)
+}
+
+pub fn tundra_cache_dir() -> Option<PathBuf> {
+    tundra_app_dir(dirs::cache_dir(), false)
+}
+
+pub fn tundra_config_dir() -> Option<PathBuf> {
+    tundra_app_dir(dirs::config_dir(), false)
+}
+
+pub fn tundra_data_dir() -> Option<PathBuf> {
+    tundra_app_dir(dirs::data_dir(), true)
+}
+
+pub fn cache_file(name: &str) -> Option<PathBuf> {
+    tundra_cache_dir().map(|mut path| {
+        path.push(name);
+        path
+    })
+}
+
+pub fn config_file(name: &str) -> Option<PathBuf> {
+    tundra_config_dir().map(|mut path| {
+        path.push(name);
+        path
+    })
+}
+
+pub fn read_bincode<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
+    bincode::deserialize(&std::fs::read(path).ok()?).ok()
+}
+
+pub fn read_bincode_or_default<T: Default + serde::de::DeserializeOwned>(
+    path: &Path,
+    label: &str,
+) -> T {
+    match std::fs::read(path) {
+        Ok(bytes) => match bincode::deserialize(&bytes) {
+            Ok(value) => value,
+            Err(err) => {
+                eprintln!(
+                    "Failed to deserialize {label} ({}): {err}",
+                    path.display()
+                );
+                T::default()
+            }
+        },
+        Err(err) if err.kind() == io::ErrorKind::NotFound => T::default(),
+        Err(err) => {
+            eprintln!("Failed to read {label} ({}): {err}", path.display());
+            T::default()
+        }
+    }
+}
+
+pub fn write_bincode<T: serde::Serialize>(path: &Path, value: &T, label: &str) -> bool {
+    let Ok(bytes) = bincode::serialize(value) else {
+        eprintln!("Failed to serialize {label}");
+        return false;
+    };
+    if let Err(err) = write_atomic(path, &bytes) {
+        eprintln!("Failed to write {label}: {err}");
+        return false;
+    }
+    true
+}
+
 pub fn file_name_lossy(path: &Path) -> Option<String> {
     path.file_name()
         .map(|name| name.to_string_lossy().into_owned())
+}
+
+pub fn file_label(path: &Path) -> String {
+    file_name_lossy(path).unwrap_or_else(|| path.display().to_string())
+}
+
+pub fn path_io_error(verb: &str, path: &Path, err: impl std::fmt::Display) -> String {
+    format!("Failed to {verb} {}: {err}", path.display())
+}
+
+pub fn open_file(path: &Path) -> Result<std::fs::File, String> {
+    std::fs::File::open(path).map_err(|err| path_io_error("open", path, err))
 }
 
 pub fn file_stem_lossy(path: &Path) -> Option<String> {

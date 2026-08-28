@@ -1,15 +1,4 @@
-//! SQLite sidecar for instrument labels the audio container itself cannot hold.
-//!
-//! Native container tags stay the primary store because they travel with the
-//! file. This store is a fallback: written only when a native write fails (a
-//! read-only sample library, an unsupported container layout), and read only
-//! when no native tag is present. Search consults it through the same
-//! `instrument` lookup as everything else, so `instrument:Kick` matches
-//! sidecar-tagged files identically to natively tagged ones.
-//!
-//! Lookups happen once per file during a scan, so the table is mirrored in an
-//! in-memory map. The map is small: it only ever holds files whose container
-//! refused a write.
+//! SQLite fallback when the audio container cannot hold tags.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -18,16 +7,7 @@ use std::time::UNIX_EPOCH;
 
 use rusqlite::Connection;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct SidecarManualFields {
-    pub instrument: String,
-    pub artist: String,
-    pub title: String,
-    pub bpm: String,
-    pub key: String,
-    pub genre: String,
-    pub comment: String,
-}
+pub use crate::metadata::ManualTagEdits as SidecarManualFields;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SidecarTag {
@@ -41,6 +21,33 @@ struct SidecarTag {
     tag_version: u32,
     mtime_secs: u64,
     size: u64,
+}
+
+impl SidecarTag {
+    fn manual_fields(&self) -> SidecarManualFields {
+        SidecarManualFields {
+            instrument: self.instrument.clone(),
+            artist: self.artist.clone(),
+            title: self.title.clone(),
+            bpm: self.bpm.clone(),
+            key: self.key.clone(),
+            genre: self.genre.clone(),
+            comment: self.comment.clone(),
+        }
+    }
+
+    fn generic_empty(&self) -> bool {
+        [
+            &self.title,
+            &self.artist,
+            &self.bpm,
+            &self.key,
+            &self.genre,
+            &self.comment,
+        ]
+        .iter()
+        .all(|value| value.trim().is_empty())
+    }
 }
 
 enum Store {
@@ -70,24 +77,14 @@ fn stamp_matches(path: &Path, entry: &SidecarTag) -> bool {
 }
 
 fn cache_db_path() -> Option<PathBuf> {
-    let mut dir = dirs::cache_dir()?;
-    dir.push("tundra");
-    dir.push("tags.db");
-    Some(dir)
+    crate::path_util::cache_file("tags.db")
 }
 
 fn data_db_path() -> Option<PathBuf> {
-    let mut dir = dirs::data_dir()?;
-    dir.push("tundra");
-    std::fs::create_dir_all(&dir).ok()?;
-    dir.push("tags.db");
-    Some(dir)
-}
-
-fn sibling_with_suffix(path: &Path, suffix: &str) -> PathBuf {
-    let mut name = path.as_os_str().to_os_string();
-    name.push(suffix);
-    PathBuf::from(name)
+    crate::path_util::tundra_data_dir().map(|mut dir| {
+        dir.push("tags.db");
+        dir
+    })
 }
 
 fn migrate_sqlite_file(src: &Path, dest: &Path) {
@@ -103,14 +100,14 @@ fn migrate_sqlite_file(src: &Path, dest: &Path) {
         return;
     }
     for suffix in ["-wal", "-shm"] {
-        let src_side = sibling_with_suffix(src, suffix);
+        let src_side = crate::path_util::sidecar(src, suffix);
         if src_side.exists() {
-            let _ = std::fs::copy(&src_side, sibling_with_suffix(dest, suffix));
+            let _ = std::fs::copy(&src_side, crate::path_util::sidecar(dest, suffix));
         }
     }
     let _ = std::fs::remove_file(src);
     for suffix in ["-wal", "-shm"] {
-        let _ = std::fs::remove_file(sibling_with_suffix(src, suffix));
+        let _ = std::fs::remove_file(crate::path_util::sidecar(src, suffix));
     }
 }
 
@@ -385,35 +382,14 @@ pub fn instrument(path: &Path) -> Option<String> {
     cached(path).map(|entry| entry.instrument)
 }
 
-/// Tundra tag version recorded for `path` in the sidecar store.
 pub fn tag_version(path: &Path) -> Option<u32> {
     cached(path).map(|entry| entry.tag_version)
 }
 
-/// Manual tag fields stored when the container cannot hold generic tags.
 pub fn manual_fields(path: &Path) -> Option<SidecarManualFields> {
     cached(path).and_then(|entry| {
-        let fields = SidecarManualFields {
-            instrument: entry.instrument.clone(),
-            artist: entry.artist.clone(),
-            title: entry.title.clone(),
-            bpm: entry.bpm.clone(),
-            key: entry.key.clone(),
-            genre: entry.genre.clone(),
-            comment: entry.comment.clone(),
-        };
-        if fields.instrument.trim().is_empty()
-            && fields.artist.trim().is_empty()
-            && fields.title.trim().is_empty()
-            && fields.bpm.trim().is_empty()
-            && fields.key.trim().is_empty()
-            && fields.genre.trim().is_empty()
-            && fields.comment.trim().is_empty()
-        {
-            None
-        } else {
-            Some(fields)
-        }
+        let fields = entry.manual_fields();
+        (!fields.is_empty()).then_some(fields)
     })
 }
 
@@ -490,7 +466,6 @@ fn merge_sidecar_entry(path: &Path, update: impl FnOnce(&mut SidecarTag)) -> Res
     write_sidecar_entry(path, entry)
 }
 
-/// Records `instrument` for `path`, replacing any previous entry.
 pub fn set_instrument(path: &Path, instrument: &str, tag_version: u32) -> Result<(), String> {
     let instrument = instrument.trim();
     if instrument.is_empty() {
@@ -502,7 +477,6 @@ pub fn set_instrument(path: &Path, instrument: &str, tag_version: u32) -> Result
     })
 }
 
-/// Records manual tag fields when the container cannot hold them.
 pub fn set_manual_fields(
     path: &Path,
     fields: &SidecarManualFields,
@@ -520,18 +494,11 @@ pub fn set_manual_fields(
     })
 }
 
-/// Clears manual tag columns after a successful native write.
 pub fn clear_manual_fields(path: &Path) -> Result<(), String> {
     let Some(entry) = cached(path) else {
         return Ok(());
     };
-    let manual_empty = entry.title.trim().is_empty()
-        && entry.artist.trim().is_empty()
-        && entry.bpm.trim().is_empty()
-        && entry.key.trim().is_empty()
-        && entry.genre.trim().is_empty()
-        && entry.comment.trim().is_empty();
-    if entry.instrument.trim().is_empty() && manual_empty {
+    if entry.instrument.trim().is_empty() && entry.generic_empty() {
         return remove_sidecar(path);
     }
     merge_sidecar_entry(path, |entry| {
@@ -544,7 +511,6 @@ pub fn clear_manual_fields(path: &Path) -> Result<(), String> {
     })
 }
 
-/// Removes the sidecar row for `path`.
 pub fn remove_sidecar(path: &Path) -> Result<(), String> {
     let cache_key = key(path);
     let stored = cache_key.to_string_lossy().into_owned();
@@ -568,22 +534,10 @@ pub fn remove_sidecar(path: &Path) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    fn scratch_dir(prefix: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "{prefix}_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|value| value.as_nanos())
-                .unwrap_or_default()
-        ));
-        std::fs::create_dir_all(&dir).expect("create temp dir");
-        dir
-    }
-
     #[test]
     fn round_trips_instrument_and_version_through_sqlite() {
-        let dir = scratch_dir("tundra_tag_store");
+        let scratch = crate::test_fixtures::ScratchDir::new("tundra_tag_store");
+        let dir = scratch.path();
         let db = dir.join("tags.db");
         let connection = Connection::open(&db).expect("open db");
         connection
@@ -615,7 +569,6 @@ mod tests {
         assert_eq!(stored, ("Kick".to_string(), 1, 100, 512));
 
         drop(connection);
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -628,7 +581,8 @@ mod tests {
 
     #[test]
     fn prepare_schema_adds_missing_columns() {
-        let dir = scratch_dir("tundra_tag_store_migrate");
+        let scratch = crate::test_fixtures::ScratchDir::new("tundra_tag_store_migrate");
+        let dir = scratch.path();
         let db = dir.join("tags.db");
         let connection = Connection::open(&db).expect("open db");
         connection
@@ -669,12 +623,12 @@ mod tests {
         prepare_schema(&connection).expect("migrate is idempotent");
 
         drop(connection);
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn stamp_mismatch_or_missing_file_hides_sidecar() {
-        let dir = scratch_dir("tundra_tag_store_stamp");
+        let scratch = crate::test_fixtures::ScratchDir::new("tundra_tag_store_stamp");
+        let dir = scratch.path();
         let audio = dir.join("kick.wav");
         std::fs::write(&audio, b"audio-v1").expect("write");
         let (mtime_secs, size) = file_stamp(&audio).expect("stamp");
@@ -717,47 +671,45 @@ mod tests {
 
         let _ = std::fs::remove_file(&audio);
         assert!(!stamp_matches(&audio, &entry));
-
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn migrate_copies_db_and_wal_then_removes_source() {
-        let dir = scratch_dir("tundra_tag_store_cache_migrate");
+        let scratch = crate::test_fixtures::ScratchDir::new("tundra_tag_store_cache_migrate");
+        let dir = scratch.path();
         let src_dir = dir.join("cache");
         let dest_dir = dir.join("data");
         std::fs::create_dir_all(&src_dir).expect("cache dir");
         let src = src_dir.join("tags.db");
         let dest = dest_dir.join("tags.db");
         std::fs::write(&src, b"sqlite-main").expect("db");
-        std::fs::write(sibling_with_suffix(&src, "-wal"), b"wal").expect("wal");
-        std::fs::write(sibling_with_suffix(&src, "-shm"), b"shm").expect("shm");
+        std::fs::write(crate::path_util::sidecar(&src, "-wal"), b"wal").expect("wal");
+        std::fs::write(crate::path_util::sidecar(&src, "-shm"), b"shm").expect("shm");
 
         migrate_sqlite_file(&src, &dest);
 
         assert_eq!(std::fs::read(&dest).expect("dest"), b"sqlite-main");
         assert_eq!(
-            std::fs::read(sibling_with_suffix(&dest, "-wal")).expect("wal"),
+            std::fs::read(crate::path_util::sidecar(&dest, "-wal")).expect("wal"),
             b"wal"
         );
         assert_eq!(
-            std::fs::read(sibling_with_suffix(&dest, "-shm")).expect("shm"),
+            std::fs::read(crate::path_util::sidecar(&dest, "-shm")).expect("shm"),
             b"shm"
         );
         assert!(!src.exists());
-        assert!(!sibling_with_suffix(&src, "-wal").exists());
-        assert!(!sibling_with_suffix(&src, "-shm").exists());
+        assert!(!crate::path_util::sidecar(&src, "-wal").exists());
+        assert!(!crate::path_util::sidecar(&src, "-shm").exists());
 
         std::fs::write(&src, b"should-not-overwrite").expect("new cache");
         migrate_sqlite_file(&src, &dest);
         assert_eq!(std::fs::read(&dest).expect("kept dest"), b"sqlite-main");
-
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn migrate_noops_when_source_missing() {
-        let dir = scratch_dir("tundra_tag_store_migrate_missing");
+        let scratch = crate::test_fixtures::ScratchDir::new("tundra_tag_store_migrate_missing");
+        let dir = scratch.path();
         let src = dir.join("missing.db");
         let dest = dir.join("dest.db");
 
@@ -768,7 +720,8 @@ mod tests {
 
     #[test]
     fn set_instrument_persists_stamp_and_round_trips_through_cache() {
-        let dir = scratch_dir("tundra_tag_store_set");
+        let scratch = crate::test_fixtures::ScratchDir::new("tundra_tag_store_set");
+        let dir = scratch.path();
         let db = dir.join("tags.db");
         let audio = dir.join("kick.wav");
         std::fs::write(&audio, b"audio-v1-bytes").expect("write");
@@ -783,18 +736,17 @@ mod tests {
                 "stamp mismatch must hide stale sidecar row"
             );
         });
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn set_instrument_rejects_empty_label() {
-        let dir = scratch_dir("tundra_tag_store_empty");
+        let scratch = crate::test_fixtures::ScratchDir::new("tundra_tag_store_empty");
+        let dir = scratch.path();
         let db = dir.join("tags.db");
         let audio = dir.join("kick.wav");
         std::fs::write(&audio, b"audio").expect("write");
         with_test_db(db, || {
             assert!(set_instrument(&audio, "   ", 1).is_err());
         });
-        let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -1,6 +1,4 @@
-//! Sidebar width, volume, loop, always-on-top prefs.
-
-use super::cache::cache_file;
+use crate::path_util::{cache_file, read_bincode, write_bincode};
 use crate::types::player::clamp_volume;
 use crate::types::Message;
 use iced::{Task, window};
@@ -12,109 +10,62 @@ pub(crate) const SIDEBAR_RESIZER_HIT_WIDTH: f32 = 10.0;
 pub(crate) const SIDEBAR_RESIZER_LINE_WIDTH: f32 = 2.0;
 pub(crate) const WINDOW_RESIZE_BORDER: f32 = 8.0;
 pub(crate) const TITLE_DRAG_THRESHOLD: f32 = 4.0;
-pub(crate) const FILE_DRAG_THRESHOLD: f32 = 8.0;
 
 fn load_cached_f32(name: &str, default: f32, clamp: impl Fn(f32) -> f32) -> f32 {
-    let Some(path) = cache_file(name) else {
-        return default;
-    };
-    match std::fs::read(path) {
-        Ok(bytes) => bincode::deserialize::<f32>(&bytes)
-            .ok()
-            .filter(|value| value.is_finite())
-            .map(clamp)
-            .unwrap_or(default),
-        Err(_) => default,
-    }
+    cache_file(name)
+        .and_then(|path| read_bincode(&path))
+        .filter(|value: &f32| value.is_finite())
+        .map(clamp)
+        .unwrap_or(default)
 }
 
 fn load_cached_bool(name: &str, default: bool) -> bool {
-    let Some(path) = cache_file(name) else {
-        return default;
-    };
-    match std::fs::read(path) {
-        Ok(bytes) => bincode::deserialize(&bytes).unwrap_or(default),
-        Err(_) => default,
+    cache_file(name)
+        .and_then(|path| read_bincode(&path))
+        .unwrap_or(default)
+}
+
+fn persist_cached<T: serde::Serialize>(name: &str, value: &T, label: &str) {
+    if let Some(path) = cache_file(name) {
+        write_bincode(&path, value, label);
     }
 }
 
-fn persist_cached_bool(name: &str, value: bool, label: &str) {
-    let Some(path) = cache_file(name) else {
-        return;
-    };
-    let Ok(bytes) = bincode::serialize(&value) else {
-        eprintln!("Failed to serialize {label}");
-        return;
-    };
-    if let Err(err) = crate::path_util::write_atomic(&path, &bytes) {
-        eprintln!("Failed to write {label}: {err}");
-    }
+pub(crate) fn load_sidebar_width() -> f32 {
+    load_cached_f32(
+        "sidebar_width.bin",
+        DEFAULT_SIDEBAR_WIDTH,
+        |width| width.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH),
+    )
 }
 
-fn persist_cached_f32(name: &str, value: f32, label: &str) {
-    let Some(path) = cache_file(name) else {
-        return;
-    };
-    let Ok(bytes) = bincode::serialize(&value) else {
-        eprintln!("Failed to serialize {label}");
-        return;
-    };
-    if let Err(err) = crate::path_util::write_atomic(&path, &bytes) {
-        eprintln!("Failed to write {label}: {err}");
-    }
+pub(crate) fn persist_sidebar_width(width: f32) {
+    let width = width.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
+    persist_cached("sidebar_width.bin", &width, "sidebar width");
 }
 
-pub(crate) struct SidebarSettings;
-
-impl SidebarSettings {
-    pub(crate) fn load() -> f32 {
-        load_cached_f32(
-            "sidebar_width.bin",
-            DEFAULT_SIDEBAR_WIDTH,
-            |width| width.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH),
-        )
-    }
-
-    pub(crate) fn persist(width: f32) {
-        let width = width.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
-        persist_cached_f32("sidebar_width.bin", width, "sidebar width");
-    }
+pub(crate) fn load_volume() -> f32 {
+    load_cached_f32("volume.bin", 1.0, clamp_volume)
 }
 
-pub(crate) struct VolumeSettings;
-
-impl VolumeSettings {
-    pub(crate) fn load() -> f32 {
-        load_cached_f32("volume.bin", 1.0, clamp_volume)
-    }
-
-    pub(crate) fn persist(volume: f32) {
-        persist_cached_f32("volume.bin", clamp_volume(volume), "volume");
-    }
+pub(crate) fn persist_volume(volume: f32) {
+    persist_cached("volume.bin", &clamp_volume(volume), "volume");
 }
 
-pub(crate) struct LoopSettings;
-
-impl LoopSettings {
-    pub(crate) fn load() -> bool {
-        load_cached_bool("looping.bin", false)
-    }
-
-    pub(crate) fn persist(looping: bool) {
-        persist_cached_bool("looping.bin", looping, "loop");
-    }
+pub(crate) fn load_looping() -> bool {
+    load_cached_bool("looping.bin", false)
 }
 
-pub(crate) struct AlwaysOnTopSettings;
+pub(crate) fn persist_looping(looping: bool) {
+    persist_cached("looping.bin", &looping, "loop");
+}
 
-impl AlwaysOnTopSettings {
-    pub(crate) fn load() -> bool {
-        load_cached_bool("always_on_top.bin", false)
-    }
+pub(crate) fn load_always_on_top() -> bool {
+    load_cached_bool("always_on_top.bin", false)
+}
 
-    pub(crate) fn persist(always_on_top: bool) {
-        persist_cached_bool("always_on_top.bin", always_on_top, "always on top");
-    }
+pub(crate) fn persist_always_on_top(always_on_top: bool) {
+    persist_cached("always_on_top.bin", &always_on_top, "always on top");
 }
 
 pub fn window_level(always_on_top: bool) -> window::Level {

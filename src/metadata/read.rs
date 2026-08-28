@@ -20,11 +20,7 @@ pub(crate) fn push_field(value: &mut String, source: Option<impl AsRef<str>>) {
     }
 }
 
-pub fn read_tag_fields_mtime(path: &Path) -> Option<u64> {
-    file_mtime_secs(path)
-}
-
-pub(crate) fn file_mtime_secs(path: &Path) -> Option<u64> {
+pub fn file_mtime_secs(path: &Path) -> Option<u64> {
     let modified = std::fs::metadata(path).ok()?.modified().ok()?;
     modified
         .duration_since(std::time::UNIX_EPOCH)
@@ -115,12 +111,9 @@ pub fn tundra_tag_is_current(path: &Path, comment: &str) -> bool {
     file_tundra_tag_version(path, comment, "") == Some(TUNDRA_TAG_VERSION)
 }
 
-fn is_tundra_written_comment(comment: &str) -> bool {
-    parse_tundra_comment_version(comment).is_some()
-}
-
 fn tundra_owns_tags(comment: &str) -> bool {
-    is_tundra_written_comment(comment) || instrument_from_marked_comment(comment).is_some()
+    parse_tundra_comment_version(comment).is_some()
+        || instrument_from_marked_comment(comment).is_some()
 }
 
 /// Tundra may replace tags it wrote; sidecar alone does not own native tags.
@@ -422,23 +415,32 @@ pub(crate) fn write_native_tags(path: &Path, tags: &NativeTags) -> Result<(), St
     stage_and_replace(path, |staged| apply_native_tags_staged(staged, tags))
 }
 
+fn apply_id3_native_tags(id3: &mut lofty::id3::v2::Id3v2Tag, tags: &NativeTags) {
+    use lofty::tag::Accessor;
+    if let Some(instrument) = &tags.instrument {
+        id3.insert_user_text(ID3_INSTRUMENT_KEY.to_string(), instrument.clone());
+    }
+    if let Some(artist) = &tags.artist {
+        id3.set_artist(artist.clone());
+    }
+    if let Some(comment) = &tags.comment {
+        id3.set_comment(comment.clone());
+    }
+}
+
 pub(crate) fn apply_native_tags_staged(staged: &Path, tags: &NativeTags) -> Result<(), String> {
     use lofty::config::WriteOptions;
     use lofty::file::AudioFile;
-    use lofty::tag::Accessor;
 
     let container = Container::of(staged)
         .ok_or_else(|| format!("Unsupported file type: {}", staged.display()))?;
     let options = write_parse_options();
     let read_error =
-        |err: lofty::error::FileParseError| format!("Failed to read {}: {err}", staged.display());
+        |err: lofty::error::FileParseError| crate::path_util::path_io_error("read", staged, err);
     let write_error = |err: lofty::error::FileEncodingError| {
-        format!("Failed to write tags to {}: {err}", staged.display())
+        crate::path_util::path_io_error("write tags to", staged, err)
     };
-    let open = || {
-        std::fs::File::open(staged)
-            .map_err(|err| format!("Failed to open {}: {err}", staged.display()))
-    };
+    let open = || crate::path_util::open_file(staged);
 
     match container {
         Container::Wav => write_wav_info_preserving_chunks(staged, Some(tags), None),
@@ -468,15 +470,7 @@ pub(crate) fn apply_native_tags_staged(staged: &Path, tags: &NativeTags) -> Resu
                 lofty::mpeg::MpegFile::read_from(&mut file, options).map_err(read_error)?
             };
             let mut id3 = mp3.remove_id3v2().unwrap_or_default();
-            if let Some(instrument) = &tags.instrument {
-                id3.insert_user_text(ID3_INSTRUMENT_KEY.to_string(), instrument.clone());
-            }
-            if let Some(artist) = &tags.artist {
-                id3.set_artist(artist.clone());
-            }
-            if let Some(comment) = &tags.comment {
-                id3.set_comment(comment.clone());
-            }
+            apply_id3_native_tags(&mut id3, tags);
             mp3.set_id3v2(id3);
             mp3.save_to_path(staged, WriteOptions::default())
                 .map_err(write_error)
@@ -490,15 +484,7 @@ pub(crate) fn apply_native_tags_staged(staged: &Path, tags: &NativeTags) -> Resu
             apply_aiff_text_tags(&mut text, tags);
             aiff.set_text_chunks(text);
             let mut id3 = aiff.remove_id3v2().unwrap_or_default();
-            if let Some(instrument) = &tags.instrument {
-                id3.insert_user_text(ID3_INSTRUMENT_KEY.to_string(), instrument.clone());
-            }
-            if let Some(artist) = &tags.artist {
-                id3.set_artist(artist.clone());
-            }
-            if let Some(comment) = &tags.comment {
-                id3.set_comment(comment.clone());
-            }
+            apply_id3_native_tags(&mut id3, tags);
             aiff.set_id3v2(id3);
             aiff.save_to_path(staged, WriteOptions::default())
                 .map_err(write_error)
@@ -516,12 +502,12 @@ pub(crate) fn write_wav_info_preserving_chunks(
         return Ok(());
     }
     let bytes = std::fs::read(path)
-        .map_err(|err| format!("Failed to read {}: {err}", path.display()))?;
+        .map_err(|err| crate::path_util::path_io_error("read", path, err))?;
     let mut chunks = parse_riff_wave_chunks(&bytes)?;
     upsert_wav_list_info_chunk(&mut chunks, native, generic);
     let encoded = encode_riff_wave(&chunks);
     std::fs::write(path, encoded)
-        .map_err(|err| format!("Failed to write tags to {}: {err}", path.display()))
+        .map_err(|err| crate::path_util::path_io_error("write tags to", path, err))
 }
 
 pub(crate) fn parse_riff_wave_chunks(bytes: &[u8]) -> Result<Vec<([u8; 4], Vec<u8>)>, String> {
@@ -746,7 +732,7 @@ pub(crate) fn tundra_comment(existing: Option<&str>) -> String {
     let Some(existing) = existing.map(str::trim).filter(|text| !text.is_empty()) else {
         return marker;
     };
-    if is_tundra_written_comment(existing) || instrument_from_marked_comment(existing).is_some() {
+    if tundra_owns_tags(existing) {
         marker
     } else {
         existing.to_string()
@@ -793,28 +779,27 @@ pub(crate) fn apply_path_artist_hint(fields: &mut TagFields, path: &Path) {
     push_field(&mut fields.artist, artist_hint_from_path(path));
 }
 
+fn overlay_nonempty(dest: &mut String, source: &str) {
+    let trimmed = source.trim();
+    if !trimmed.is_empty() {
+        *dest = trimmed.to_string();
+    }
+}
+
 pub(crate) fn overlay_sidecar_manual_fields(
     fields: &mut TagFields,
     sidecar: &crate::tag_store::SidecarManualFields,
 ) {
-    if !sidecar.title.trim().is_empty() {
-        fields.title = sidecar.title.trim().to_string();
-    }
+    overlay_nonempty(&mut fields.title, &sidecar.title);
+    overlay_nonempty(&mut fields.artist, &sidecar.artist);
     if !sidecar.artist.trim().is_empty() {
-        fields.artist = sidecar.artist.trim().to_string();
         fields.file_artist = fields.artist.clone();
     }
-    if !sidecar.bpm.trim().is_empty() {
-        fields.bpm = sidecar.bpm.trim().to_string();
-    }
-    if !sidecar.key.trim().is_empty() {
-        fields.key = sidecar.key.trim().to_string();
-    }
-    if !sidecar.genre.trim().is_empty() {
-        fields.genre = sidecar.genre.trim().to_string();
-    }
+    overlay_nonempty(&mut fields.bpm, &sidecar.bpm);
+    overlay_nonempty(&mut fields.key, &sidecar.key);
+    overlay_nonempty(&mut fields.genre, &sidecar.genre);
+    overlay_nonempty(&mut fields.comment, &sidecar.comment);
     if !sidecar.comment.trim().is_empty() {
-        fields.comment = sidecar.comment.trim().to_string();
         fields.file_comment = fields.comment.clone();
     }
     if !sidecar.instrument.trim().is_empty() && fields.instrument.trim().is_empty() {

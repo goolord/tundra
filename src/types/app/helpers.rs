@@ -1,5 +1,3 @@
-//! Background search, directory walks, drag interaction state.
-
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -205,4 +203,78 @@ pub(crate) fn tag_search_can_autocomplete(input: &str) -> bool {
     !input.contains(':')
         && !input.trim().is_empty()
         && tag_field_best_match(input).is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cached_paths_for_root;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    #[test]
+    fn cached_paths_for_root_uses_subtree_caches() {
+        let root = PathBuf::from(r"F:\Samples");
+        let sub = PathBuf::from(r"F:\Samples\ADM Samples - Copy");
+        let mut cache = HashMap::new();
+        cache.insert(
+            sub.clone(),
+            vec![
+                sub.join("Snare").join("01_Snare.flac"),
+                sub.join("Snare").join("02_Snare.flac"),
+            ],
+        );
+
+        let (paths, found) = cached_paths_for_root(&cache, &root);
+        assert!(found);
+        assert_eq!(paths.len(), 2);
+        assert!(paths.iter().any(|p| p.ends_with("01_Snare.flac")));
+    }
+
+    #[test]
+    fn cached_paths_for_root_unions_stale_parent_and_verbatim_root() {
+        let root = PathBuf::from(r"\\?\F:\Samples");
+        let child = PathBuf::from(r"F:\Samples\ADM Samples - Copy");
+        let mut cache = HashMap::new();
+        cache.insert(
+            root.clone(),
+            vec![PathBuf::from(r"\\?\F:\Samples\Old\kick.wav")],
+        );
+        cache.insert(
+            child.clone(),
+            vec![child.join("Snare").join("01_Snare.flac")],
+        );
+
+        let (paths, found) = cached_paths_for_root(&cache, &root);
+        assert!(found);
+        assert!(
+            paths.iter().any(|p| p.ends_with("01_Snare.flac")),
+            "stale parent listing must not hide a later child cache"
+        );
+        assert!(paths.iter().any(|p| p.ends_with("kick.wav")));
+    }
+
+    #[test]
+    fn cached_paths_for_root_keeps_one_listing_per_cache_key() {
+        let root = PathBuf::from(r"F:\Samples");
+        let verbatim = PathBuf::from(r"\\?\F:\Samples");
+        let mut cache = HashMap::new();
+        cache.insert(
+            root.clone(),
+            vec![
+                PathBuf::from(r"F:\Samples\a.wav"),
+                PathBuf::from(r"F:\Samples\b.wav"),
+            ],
+        );
+        cache.insert(
+            verbatim,
+            vec![PathBuf::from(r"\\?\F:\Samples\stale.wav")],
+        );
+
+        let (paths, found) = cached_paths_for_root(&cache, &root);
+        assert!(found);
+        assert_eq!(paths.len(), 2, "same directory under two spellings must not union");
+        assert!(paths.iter().any(|p| p.ends_with("a.wav")));
+        assert!(paths.iter().any(|p| p.ends_with("b.wav")));
+        assert!(paths.iter().all(|p| !p.ends_with("stale.wav")));
+    }
 }

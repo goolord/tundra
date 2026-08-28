@@ -1,8 +1,4 @@
-//! Cross-module integration tests for file-operation data safety.
-//!
-//! Covers end-to-end flows that span `path_util`, `metadata`, and `tag_store`.
-//! Unit-level edge cases live beside each module; this file focuses on
-//! multi-step crash/recovery and sidecar fallback behavior.
+//! Crash/recovery and sidecar-fallback flows across path_util, metadata, and tag_store.
 
 use std::fs;
 

@@ -1,5 +1,3 @@
-//! Dir and metadata caches on disk.
-
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -46,11 +44,8 @@ impl DirCache {
         self.0.read().unwrap().contains_key(&key)
     }
 
-    pub(crate) fn retain(&mut self, mut keep: impl FnMut(&PathBuf) -> bool) -> bool {
-        let mut map = self.0.write().unwrap();
-        let before = map.len();
-        map.retain(|path, _| keep(path));
-        before != map.len()
+    pub(crate) fn retain(&mut self, keep: impl FnMut(&PathBuf) -> bool) -> bool {
+        retain_paths(&mut self.0.write().unwrap(), keep)
     }
 
     pub(crate) fn from_map(map: HashMap<PathBuf, Vec<PathBuf>>) -> Self {
@@ -65,12 +60,8 @@ impl DirCache {
         DirCache(Arc::new(RwLock::new(normalized)))
     }
 
-    fn get_path() -> Option<std::path::PathBuf> {
-        tundra_cache_dir().map(|mut cache_dir| {
-            cache_dir.push("dir_cache");
-            cache_dir.set_extension("bin");
-            cache_dir
-        })
+    fn get_path() -> Option<PathBuf> {
+        crate::path_util::cache_file("dir_cache.bin")
     }
 
     fn persist_map(map: &HashMap<PathBuf, Vec<PathBuf>>) {
@@ -81,13 +72,7 @@ impl DirCache {
     }
 
     pub(crate) fn persist_map_to(path: &Path, map: &HashMap<PathBuf, Vec<PathBuf>>) {
-        let Ok(bytes) = bincode::serialize(map) else {
-            eprintln!("Failed to serialize directory cache");
-            return;
-        };
-        if let Err(err) = crate::path_util::write_atomic(path, &bytes) {
-            eprintln!("Failed to write directory cache: {err}");
-        }
+        crate::path_util::write_bincode(path, map, "directory cache");
     }
 
     pub(crate) fn persist(&self) {
@@ -99,28 +84,7 @@ impl DirCache {
 }
 
 fn load_dir_cache_map() -> HashMap<PathBuf, Vec<PathBuf>> {
-    let Some(path) = DirCache::get_path() else {
-        return HashMap::new();
-    };
-    match std::fs::read(path) {
-        Ok(bytes) => bincode::deserialize(&bytes).unwrap_or_default(),
-        Err(_) => HashMap::new(),
-    }
-}
-
-fn tundra_cache_dir() -> Option<PathBuf> {
-    dirs::cache_dir().map(|mut cache_dir| {
-        cache_dir.push("tundra");
-        let _ = std::fs::create_dir_all(&cache_dir);
-        cache_dir
-    })
-}
-
-pub(crate) fn cache_file(name: &str) -> Option<PathBuf> {
-    tundra_cache_dir().map(|mut path| {
-        path.push(name);
-        path
-    })
+    load_cached_map(DirCache::get_path())
 }
 
 impl MetadataCache {
@@ -132,10 +96,10 @@ impl MetadataCache {
         Arc::clone(&self.0)
     }
 
-    fn get_path() -> Option<std::path::PathBuf> {
+    fn get_path() -> Option<PathBuf> {
         // v10: instrument now reads from each container's canonical key, so
         // entries cached under the old per-format logic must be re-read.
-        cache_file("metadata_cache_v10.bin")
+        crate::path_util::cache_file("metadata_cache_v10.bin")
     }
 
     fn persist_map(cache: &HashMap<PathBuf, CachedMetadata>) {
@@ -151,13 +115,7 @@ impl MetadataCache {
             .filter(|(_, cached)| cached.mtime_secs != 0)
             .map(|(path, cached)| (path.clone(), cached.clone()))
             .collect();
-        let Ok(bytes) = bincode::serialize(&persistable) else {
-            eprintln!("Failed to serialize metadata cache");
-            return;
-        };
-        if let Err(err) = crate::path_util::write_atomic(path, &bytes) {
-            eprintln!("Failed to write metadata cache: {err}");
-        }
+        crate::path_util::write_bincode(path, &persistable, "metadata cache");
     }
 
     pub(crate) fn persist(&self) {
@@ -171,11 +129,8 @@ impl MetadataCache {
         Self(Arc::new(RwLock::new(map)))
     }
 
-    pub(crate) fn retain(&mut self, mut keep: impl FnMut(&PathBuf) -> bool) -> bool {
-        let mut cache = self.0.write().unwrap();
-        let before = cache.len();
-        cache.retain(|path, _| keep(path));
-        before != cache.len()
+    pub(crate) fn retain(&mut self, keep: impl FnMut(&PathBuf) -> bool) -> bool {
+        retain_paths(&mut self.0.write().unwrap(), keep)
     }
 
     pub(crate) fn snapshot(&self) -> Arc<HashMap<PathBuf, CachedMetadata>> {
@@ -190,10 +145,6 @@ impl MetadataCache {
         self.persist();
     }
 
-    fn cache_lookup_keys(path: &Path) -> Vec<PathBuf> {
-        crate::path_util::cache_lookup_keys(path)
-    }
-
     pub(crate) fn merge_path(&mut self, path: &Path, entry: CachedMetadata) {
         let raw = path.to_path_buf();
         let key = crate::path_util::cache_key(raw.clone());
@@ -205,9 +156,9 @@ impl MetadataCache {
     }
 
     pub(crate) fn tag_fields_for(&self, path: &Path) -> TagFields {
-        if let Some(mtime_secs) = crate::metadata::read_tag_fields_mtime(path) {
+        if let Some(mtime_secs) = crate::metadata::file_mtime_secs(path) {
             if let Ok(cache) = self.0.read() {
-                for key in Self::cache_lookup_keys(path) {
+                for key in crate::path_util::cache_lookup_keys(path) {
                     if let Some(cached) = cache.get(&key) {
                         if cached.mtime_secs == mtime_secs {
                             return cached.fields.clone();
@@ -230,13 +181,18 @@ impl MetadataCache {
 }
 
 fn load_metadata_cache_map() -> HashMap<PathBuf, CachedMetadata> {
-    let Some(path) = MetadataCache::get_path() else {
-        return HashMap::new();
-    };
-    match std::fs::read(path) {
-        Ok(bytes) => bincode::deserialize(&bytes).unwrap_or_default(),
-        Err(_) => HashMap::new(),
-    }
+    load_cached_map(MetadataCache::get_path())
+}
+
+fn load_cached_map<T: Default + serde::de::DeserializeOwned>(path: Option<PathBuf>) -> T {
+    path.and_then(|path| crate::path_util::read_bincode(&path))
+        .unwrap_or_default()
+}
+
+fn retain_paths<V>(map: &mut HashMap<PathBuf, V>, mut keep: impl FnMut(&PathBuf) -> bool) -> bool {
+    let before = map.len();
+    map.retain(|path, _| keep(path));
+    before != map.len()
 }
 
 pub(crate) fn load_startup_caches(allowed: AllowedDirectories) -> PersistedCaches {

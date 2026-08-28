@@ -1,5 +1,3 @@
-//! Tag read/write, search, path hints.
-
 mod auto_tag;
 mod cache;
 mod fields;

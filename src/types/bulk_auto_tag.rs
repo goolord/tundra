@@ -1,6 +1,7 @@
 use super::common::{
-    modal_button_style, resource_svg, selection_stripe, truncate_path, ui_muted_text, Message,
-    TUNDRA_ACCENT,
+    modal_button_style, modal_error_style, modal_shell, modal_warn_style, resource_svg,
+    selection_stripe, truncate_path, ui_muted_text, Message, MODAL_OK, MODAL_WARN, TUNDRA_ACCENT,
+    UI_DANGER,
 };
 use crate::bulk_auto_tag::{BulkApplySummary, BulkDirGroup, BulkProgressSnapshot, BulkScanSummary};
 use iced::widget::{button, checkbox, container, progress_bar, row, scrollable, text, Button, Column, Row, Space};
@@ -20,6 +21,15 @@ const ROW_HEIGHT: f32 = 36.0;
 const SELECTION_STRIPE_WIDTH: f32 = 3.0;
 const CHECKBOX_COLUMN_WIDTH: f32 = 28.0;
 const EXPAND_TOGGLE_WIDTH: f32 = 32.0;
+
+fn folder_icon() -> iced::widget::Svg<'static> {
+    resource_svg("folder-solid.svg")
+        .width(Length::Fixed(12.0))
+        .height(Length::Fixed(12.0))
+        .style(|_theme, _status| iced::widget::svg::Style {
+            color: Some(TUNDRA_ACCENT.scale_alpha(0.75)),
+        })
+}
 
 fn list_row(content: Element<'static, Message>) -> Element<'static, Message> {
     Row::new()
@@ -218,7 +228,7 @@ impl BulkAutoTagState {
         self.selection_anchor = self.selected.iter().next().cloned();
     }
 
-    pub fn check_selected(&mut self) {
+    pub fn set_selected_accepted(&mut self, accepted: bool) {
         for key in self.selected.clone() {
             if let Some(file) = self
                 .groups
@@ -226,21 +236,7 @@ impl BulkAutoTagState {
                 .and_then(|group| group.files.get_mut(key.file_idx))
             {
                 if file.suggested.is_some() && file.error.is_none() {
-                    file.accepted = true;
-                }
-            }
-        }
-    }
-
-    pub fn uncheck_selected(&mut self) {
-        for key in self.selected.clone() {
-            if let Some(file) = self
-                .groups
-                .get_mut(key.dir_idx)
-                .and_then(|group| group.files.get_mut(key.file_idx))
-            {
-                if file.suggested.is_some() && file.error.is_none() {
-                    file.accepted = false;
+                    file.accepted = accepted;
                 }
             }
         }
@@ -621,11 +617,11 @@ fn checkbox_cell(checkbox: Element<'static, Message>) -> Element<'static, Messag
 }
 
 fn confidence_badge(confidence: Option<f64>) -> Element<'static, Message> {
-    let (label, tone) = match confidence {
-        Some(value) if value >= 0.85 => (crate::auto_tag::confidence_percent(Some(value)), CONF_HIGH),
-        Some(value) if value >= 0.65 => (crate::auto_tag::confidence_percent(Some(value)), CONF_MED),
-        Some(value) => (crate::auto_tag::confidence_percent(Some(value)), CONF_LOW),
-        None => (crate::auto_tag::confidence_percent(None), CONF_LOW),
+    let label = crate::auto_tag::confidence_percent(confidence);
+    let tone = match confidence {
+        Some(value) if value >= crate::auto_tag::HIGH_CLASSIFIER_CONFIDENCE => CONF_HIGH,
+        Some(value) if value >= 0.65 => CONF_MED,
+        _ => CONF_LOW,
     };
     container(
         text(label)
@@ -651,30 +647,21 @@ fn confidence_badge(confidence: Option<f64>) -> Element<'static, Message> {
     .into()
 }
 
+fn table_header_label<'a>(label: &'a str) -> iced::widget::Text<'a> {
+    text(label).size(10).style(|theme: &Theme| iced::widget::text::Style {
+        color: Some(ui_muted_text(theme)),
+    })
+}
+
 fn table_header() -> Element<'static, Message> {
     container(
         row![
             Space::new().width(Length::Fixed(FILE_INDENT)),
             Space::new().width(Length::Fixed(SELECTION_STRIPE_WIDTH)),
             Space::new().width(Length::Fixed(CHECKBOX_COLUMN_WIDTH)),
-            text("File")
-                .size(10)
-                .width(Length::FillPortion(2))
-                .style(|theme: &Theme| iced::widget::text::Style {
-                    color: Some(ui_muted_text(theme)),
-                }),
-            text("Suggested tag")
-                .size(10)
-                .width(Length::FillPortion(1))
-                .style(|theme: &Theme| iced::widget::text::Style {
-                    color: Some(ui_muted_text(theme)),
-                }),
-            text("Confidence")
-                .size(10)
-                .width(Length::Fixed(72.0))
-                .style(|theme: &Theme| iced::widget::text::Style {
-                    color: Some(ui_muted_text(theme)),
-                }),
+            table_header_label("File").width(Length::FillPortion(2)),
+            table_header_label("Suggested tag").width(Length::FillPortion(1)),
+            table_header_label("Confidence").width(Length::Fixed(72.0)),
         ]
         .spacing(8)
         .align_y(Alignment::Center)
@@ -720,11 +707,7 @@ fn file_row(
     file: &crate::bulk_auto_tag::BulkFileProposal,
     zebra: bool,
 ) -> Element<'static, Message> {
-    let name = file
-        .path
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| file.path.display().to_string());
+    let name = crate::path_util::file_label(&file.path);
     let selected = state.is_selected(dir_idx, file_idx);
     let shift = modifiers.shift();
     let control = modifiers.control() || modifiers.logo();
@@ -738,9 +721,7 @@ fn file_row(
                 .push(
                     container(
                         row![
-                            text("✕").size(11).style(|_theme: &Theme| iced::widget::text::Style {
-                                color: Some(Color::from_rgb(0.95, 0.62, 0.62)),
-                            }),
+                            text("✕").size(11).style(modal_error_style),
                             text(name).size(11).width(Length::Fill),
                             text(error).size(10).style(|theme: &Theme| iced::widget::text::Style {
                                 color: Some(ui_muted_text(theme)),
@@ -759,9 +740,9 @@ fn file_row(
                         container::Style {
                             background: Some(
                                 if zebra {
-                                    Color::from_rgb8(0xff, 0x66, 0x66).scale_alpha(0.06)
+                                    UI_DANGER.scale_alpha(0.06)
                                 } else {
-                                    Color::from_rgb8(0xff, 0x66, 0x66).scale_alpha(0.08)
+                                    UI_DANGER.scale_alpha(0.08)
                                 }
                                 .into(),
                             ),
@@ -1014,12 +995,7 @@ fn review_body(state: &BulkAutoTagState, modifiers: Modifiers) -> Element<'stati
 
     body = body.push(
         row![
-            resource_svg("folder-solid.svg")
-                .width(Length::Fixed(12.0))
-                .height(Length::Fixed(12.0))
-                .style(|_theme, _status| iced::widget::svg::Style {
-                    color: Some(TUNDRA_ACCENT.scale_alpha(0.75)),
-                }),
+            folder_icon(),
             text(format!("{root_label}  ·  {dir_count} folders · {file_count} files"))
                 .size(11)
                 .style(|theme: &Theme| iced::widget::text::Style {
@@ -1156,9 +1132,7 @@ pub fn bulk_auto_tag_view<'a>(
         header.push(
             text("Apply writes tags permanently. There is no undo. Untagged files may get a new tag container (for example ID3 on WAV).")
                 .size(11)
-                .style(|_theme: &Theme| iced::widget::text::Style {
-                    color: Some(Color::from_rgb(0.88, 0.78, 0.52)),
-                })
+                .style(modal_warn_style)
                 .width(Length::Fill),
         )
     } else {
@@ -1210,9 +1184,7 @@ pub fn bulk_auto_tag_view<'a>(
                 pick = pick.push(
                     text(error)
                         .size(12)
-                        .style(|_theme: &Theme| iced::widget::text::Style {
-                            color: Some(Color::from_rgb(0.95, 0.62, 0.62)),
-                        }),
+                        .style(modal_error_style),
                 );
             }
             pick.into()
@@ -1264,7 +1236,7 @@ pub fn bulk_auto_tag_view<'a>(
                                 if summary.written == 1 { "" } else { "s" }
                             )
                         },
-                        Color::from_rgb(0.88, 0.78, 0.52),
+                        MODAL_WARN,
                     )
                 } else {
                     let file_word = if summary.written == 1 { "file" } else { "files" };
@@ -1280,15 +1252,12 @@ pub fn bulk_auto_tag_view<'a>(
                             summary.failed.len()
                         ));
                     }
-                    (
-                        message,
-                        Color::from_rgb(0.62, 0.88, 0.68),
-                    )
+                    (message, MODAL_OK)
                 };
                 let banner = if summary.cancelled {
-                    Color::from_rgb8(0xd4, 0xa5, 0x4a)
+                    CONF_MED
                 } else {
-                    Color::from_rgb8(0x5c, 0xb8, 0x85)
+                    CONF_HIGH
                 };
                 done = done.push(
                     container(
@@ -1335,12 +1304,7 @@ pub fn bulk_auto_tag_view<'a>(
                 let root_label = truncate_path(&root, 64);
                 done = done.push(
                     row![
-                        resource_svg("folder-solid.svg")
-                            .width(Length::Fixed(12.0))
-                            .height(Length::Fixed(12.0))
-                            .style(|_theme, _status| iced::widget::svg::Style {
-                                color: Some(TUNDRA_ACCENT.scale_alpha(0.75)),
-                            }),
+                        folder_icon(),
                         text(root_label)
                             .size(11)
                             .style(|theme: &Theme| iced::widget::text::Style {
@@ -1409,29 +1373,11 @@ pub fn bulk_auto_tag_view<'a>(
         layout = layout.height(Length::Fill);
     }
 
-    container(layout.padding(20))
-        .width(Length::Fixed(820.0))
+    modal_shell(layout.padding(20), 820.0)
         .height(if is_review {
             Length::Fixed(REVIEW_MODAL_HEIGHT)
         } else {
             Length::Shrink
-        })
-        .style(|theme: &Theme| {
-            let palette = theme.extended_palette();
-            container::Style {
-                background: Some(palette.background.base.color.into()),
-                border: Border {
-                    width: 1.0,
-                    color: palette.background.strong.color,
-                    radius: 0.0.into(),
-                },
-                shadow: Shadow {
-                    color: palette.background.base.text.scale_alpha(0.25),
-                    offset: iced::Vector::new(0.0, 4.0),
-                    blur_radius: 16.0,
-                },
-                ..Default::default()
-            }
         })
         .into()
 }

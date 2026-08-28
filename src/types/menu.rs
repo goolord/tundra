@@ -160,6 +160,15 @@ fn window_button(
     .into()
 }
 
+fn ghost_hover_fill(theme: &theme::Theme, status: ButtonStatus) -> iced::Color {
+    let text = theme.extended_palette().background.base.text;
+    match status {
+        ButtonStatus::Hovered => text.scale_alpha(0.08),
+        ButtonStatus::Pressed => text.scale_alpha(0.14),
+        _ => iced::Color::TRANSPARENT,
+    }
+}
+
 fn window_button_style(
     theme: &theme::Theme,
     status: ButtonStatus,
@@ -186,14 +195,11 @@ fn window_button_style(
             style.background = Some(iced::Color::from_rgb8(0x9a, 0x1f, 0x12).into());
             style.text_color = iced::Color::WHITE;
         }
-        (_, ButtonStatus::Hovered) => {
-            style.background = Some(palette.background.base.text.scale_alpha(0.08).into());
-        }
-        (_, ButtonStatus::Pressed) => {
-            style.background = Some(palette.background.base.text.scale_alpha(0.14).into());
+        (WindowButtonKind::Close, _) => {
+            style.background = Some(iced::Color::TRANSPARENT.into());
         }
         _ => {
-            style.background = Some(iced::Color::TRANSPARENT.into());
+            style.background = Some(ghost_hover_fill(theme, status).into());
         }
     }
     style
@@ -273,24 +279,13 @@ fn menu_bar_style(theme: &theme::Theme, status: Status) -> iced_aw::style::menu_
 
 fn flat_button_style(theme: &theme::Theme, status: ButtonStatus) -> ButtonStyle {
     let palette = theme.extended_palette();
-    let base = ButtonStyle {
+    ButtonStyle {
         text_color: palette.background.base.text,
         border: Border::default(),
         shadow: Shadow::default(),
         ..ButtonStyle::default()
-    };
-
-    match status {
-        ButtonStatus::Active | ButtonStatus::Disabled => {
-            base.with_background(iced::Color::TRANSPARENT)
-        }
-        ButtonStatus::Hovered => {
-            base.with_background(palette.background.base.text.scale_alpha(0.08))
-        }
-        ButtonStatus::Pressed => {
-            base.with_background(palette.background.base.text.scale_alpha(0.14))
-        }
     }
+    .with_background(ghost_hover_fill(theme, status))
 }
 
 fn menu_root_button_style(theme: &theme::Theme, status: ButtonStatus) -> ButtonStyle {
@@ -305,20 +300,7 @@ fn menu_root_button_style(theme: &theme::Theme, status: ButtonStatus) -> ButtonS
         ..ButtonStyle::default()
     };
 
-    match status {
-        ButtonStatus::Active => {
-            style.background = Some(iced::Color::TRANSPARENT.into());
-        }
-        ButtonStatus::Hovered => {
-            style.background = Some(palette.background.base.text.scale_alpha(0.08).into());
-        }
-        ButtonStatus::Pressed => {
-            style.background = Some(palette.background.base.text.scale_alpha(0.14).into());
-        }
-        ButtonStatus::Disabled => {
-            style.background = Some(iced::Color::TRANSPARENT.into());
-        }
-    }
+    style.background = Some(ghost_hover_fill(theme, status).into());
     style
 }
 

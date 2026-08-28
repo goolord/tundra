@@ -72,8 +72,7 @@ fn run_python_script(
         .output()
 }
 pub const UV_PYTHON: &str = if cfg!(windows) { "3.12" } else { "3.14" };
-/// Matches the bulk-tagger high-confidence badge (>= 85%).
-const HIGH_CLASSIFIER_CONFIDENCE: f64 = 0.85;
+pub const HIGH_CLASSIFIER_CONFIDENCE: f64 = 0.85;
 
 /// Single-file path persists cache immediately so manual Auto Tag survives app restarts.
 pub fn classify_file(path: &Path) -> Result<ClassificationResult, ClassifyError> {
@@ -158,21 +157,22 @@ fn engine_label(engine: &str) -> &'static str {
     match engine {
         "tensorflow" => "Essentia TensorFlow",
         "essentia-spectral" => "Essentia spectral",
-        "librosa-spectral" => "Librosa spectral",
-        "librosa-fallback" => "Librosa spectral",
+        "librosa-spectral" | "librosa-fallback" => "Librosa spectral",
         _ => "Essentia",
     }
 }
 
+fn format_percent(confidence: Option<f64>) -> Option<String> {
+    confidence.map(|value| format!("{:.0}%", value * 100.0))
+}
+
 pub fn confidence_percent(confidence: Option<f64>) -> String {
-    confidence
-        .map(|value| format!("{:.0}%", value * 100.0))
-        .unwrap_or_else(|| "—".into())
+    format_percent(confidence).unwrap_or_else(|| "—".into())
 }
 
 fn format_confidence(confidence: Option<f64>) -> String {
-    confidence
-        .map(|value| format!(" ({value:.0}%)", value = value * 100.0))
+    format_percent(confidence)
+        .map(|percent| format!(" ({percent})"))
         .unwrap_or_default()
 }
 
@@ -426,10 +426,6 @@ fn run_tier2_subprocess(path: &Path) -> Result<classifier_pool::Tier2Response, C
         zcr: parsed.zcr,
         engine: parsed.engine,
     })
-}
-
-pub fn classify_file_blocking(path: PathBuf) -> Result<ClassificationResult, ClassifyError> {
-    classify_file(&path)
 }
 
 #[cfg(test)]

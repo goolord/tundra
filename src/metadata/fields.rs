@@ -282,7 +282,6 @@ pub fn tag_field_best_match(input: &str) -> Option<TagField> {
         .copied()
 }
 
-/// User-editable tag values for the manual tag editor.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ManualTagEdits {
     pub instrument: String,
@@ -295,6 +294,16 @@ pub struct ManualTagEdits {
 }
 
 impl ManualTagEdits {
+    pub const EDITOR_FIELDS: [TagField; 7] = [
+        TagField::Instrument,
+        TagField::Artist,
+        TagField::Title,
+        TagField::Bpm,
+        TagField::Key,
+        TagField::Genre,
+        TagField::Comment,
+    ];
+
     pub fn from_tag_fields(fields: &TagFields) -> Self {
         Self {
             instrument: fields.field_value(TagField::Instrument).to_string(),
@@ -305,5 +314,40 @@ impl ManualTagEdits {
             genre: fields.genre.clone(),
             comment: fields.comment.clone(),
         }
+    }
+
+    pub fn field_value(&self, field: TagField) -> &str {
+        match field {
+            TagField::Instrument => &self.instrument,
+            TagField::Artist => &self.artist,
+            TagField::Title => &self.title,
+            TagField::Bpm => &self.bpm,
+            TagField::Key => &self.key,
+            TagField::Genre => &self.genre,
+            TagField::Comment => &self.comment,
+            TagField::Album | TagField::AlbumArtist | TagField::Composer | TagField::Label => "",
+        }
+    }
+
+    pub fn set_field(&mut self, field: TagField, value: String) {
+        let slot = match field {
+            TagField::Instrument => &mut self.instrument,
+            TagField::Artist => &mut self.artist,
+            TagField::Title => &mut self.title,
+            TagField::Bpm => &mut self.bpm,
+            TagField::Key => &mut self.key,
+            TagField::Genre => &mut self.genre,
+            TagField::Comment => &mut self.comment,
+            TagField::Album | TagField::AlbumArtist | TagField::Composer | TagField::Label => {
+                return
+            }
+        };
+        *slot = value;
+    }
+
+    pub fn is_empty(&self) -> bool {
+        Self::EDITOR_FIELDS
+            .iter()
+            .all(|field| self.field_value(*field).trim().is_empty())
     }
 }

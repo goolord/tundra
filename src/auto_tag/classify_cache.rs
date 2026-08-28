@@ -63,27 +63,18 @@ impl ClassifyCache {
     }
 
     fn cache_path() -> Option<PathBuf> {
-        dirs::cache_dir().map(|mut path| {
-            path.push("tundra");
-            let _ = std::fs::create_dir_all(&path);
-            path.push(CACHE_FILE);
-            path
-        })
+        path_util::cache_file(CACHE_FILE)
     }
 
     fn load() -> Self {
-        let Some(path) = Self::cache_path() else {
+        let Some(entries) = Self::cache_path().and_then(|path| path_util::read_bincode(&path))
+        else {
             return Self::new();
         };
-        match std::fs::read(path) {
-            Ok(bytes) => bincode::deserialize::<HashMap<PathBuf, CachedClassification>>(&bytes)
-                .map(|entries| Self {
-                    entries,
-                    path_keys: HashMap::new(),
-                    dirty: false,
-                })
-                .unwrap_or_else(|_| Self::new()),
-            Err(_) => Self::new(),
+        Self {
+            entries,
+            path_keys: HashMap::new(),
+            dirty: false,
         }
     }
 
@@ -98,15 +89,9 @@ impl ClassifyCache {
     }
 
     fn persist_to(&mut self, path: &Path) {
-        let Ok(bytes) = bincode::serialize(&self.entries) else {
-            eprintln!("Failed to serialize classify cache");
-            return;
-        };
-        if let Err(err) = path_util::write_atomic(path, &bytes) {
-            eprintln!("Failed to write classify cache: {err}");
-            return;
+        if path_util::write_bincode(path, &self.entries, "classify cache") {
+            self.dirty = false;
         }
-        self.dirty = false;
     }
 
     fn file_stamp(path: &Path) -> Option<FileStamp> {

@@ -1,7 +1,6 @@
 use std::ffi::OsStr;
 use std::path::PathBuf;
 
-/// Paths passed on the command line when the OS opens a file with Tundra.
 pub fn paths_from_args() -> Vec<PathBuf> {
     std::env::args_os()
         .skip(1)
@@ -28,7 +27,6 @@ fn normalize_launch_path(path: PathBuf) -> Option<PathBuf> {
     })
 }
 
-/// First audio file from a launch request, else the first directory.
 pub fn primary_open_target(paths: &[PathBuf]) -> Option<PathBuf> {
     paths
         .iter()

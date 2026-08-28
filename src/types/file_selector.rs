@@ -386,6 +386,38 @@ fn file_tree_row(content: Element<'_, Message>, selected: bool) -> Element<'_, M
         .into()
 }
 
+fn file_row_menu<'a>(
+    content: impl Into<Element<'a, Message>>,
+    path: PathBuf,
+    extras: bool,
+    search_enabled: bool,
+    favorite_label: Option<String>,
+    selected: bool,
+) -> Element<'a, Message> {
+    file_tree_row(
+        ContextMenu::new(content, move || {
+            file_context_menu(
+                Message::FileCopyName(path.clone()),
+                Message::FileCopyPath(path.clone()),
+                Message::FileRevealInFileManager(path.clone()),
+                (extras && search_enabled).then(|| Message::OpenAutoTagFor(path.clone())),
+                extras.then(|| {
+                    (
+                        favorite_label
+                            .clone()
+                            .unwrap_or_else(|| "Add to favorites".into()),
+                        Message::ToggleFavorite(path.clone()),
+                    )
+                }),
+                extras.then(|| Message::OpenTagEditorFor(path.clone())),
+            )
+        })
+        .style(context_menu_style)
+        .into(),
+        selected,
+    )
+}
+
 fn tag_chip_close_style(theme: &theme::Theme, status: ButtonStatus) -> ButtonStyle {
     let palette = theme.extended_palette();
     let mut style = ButtonStyle {
@@ -403,11 +435,11 @@ fn tag_chip_close_style(theme: &theme::Theme, status: ButtonStatus) -> ButtonSty
         }
         ButtonStatus::Hovered => {
             style.text_color = palette.background.base.text;
-            style.background = Some(Color::from_rgb8(0xff, 0x66, 0x66).scale_alpha(0.22).into());
+            style.background = Some(UI_DANGER.scale_alpha(0.22).into());
         }
         ButtonStatus::Pressed => {
             style.text_color = palette.background.base.text;
-            style.background = Some(Color::from_rgb8(0xff, 0x66, 0x66).scale_alpha(0.38).into());
+            style.background = Some(UI_DANGER.scale_alpha(0.38).into());
         }
     }
     style
@@ -481,10 +513,10 @@ fn tag_chip(filter: &TagFilter) -> Element<'static, Message> {
     .into()
 }
 
-fn tag_count_badge(count: usize) -> Element<'static, Message> {
+fn accent_badge(label: impl Into<String>, size: u32) -> Element<'static, Message> {
     container(
-        text(format!("{count}"))
-            .size(10)
+        text(label.into())
+            .size(size)
             .font(iced::Font {
                 weight: iced::font::Weight::Semibold,
                 ..iced::Font::default()
@@ -583,17 +615,12 @@ fn selection_status_label(count: usize) -> Element<'static, Message> {
     .into()
 }
 
-fn file_search_header(
-    active: bool,
-    case_sensitive: bool,
-    show_directories: bool,
-    favorites_only: bool,
-) -> Element<'static, Message> {
-    let mut header = Row::new()
+fn filter_section_header(icon: &'static str, title: &'static str) -> Row<'static, Message> {
+    Row::new()
         .spacing(8)
         .align_y(Alignment::Center)
         .push(
-            resource_svg("search-solid.svg")
+            resource_svg(icon)
                 .width(Length::Fixed(12.0))
                 .height(Length::Fixed(12.0))
                 .style(|_theme, _status| iced::widget::svg::Style {
@@ -601,7 +628,7 @@ fn file_search_header(
                 }),
         )
         .push(
-            text("File search")
+            text(title)
                 .size(11)
                 .font(iced::Font {
                     weight: iced::font::Weight::Semibold,
@@ -610,32 +637,19 @@ fn file_search_header(
                 .style(|theme: &theme::Theme| iced::widget::text::Style {
                     color: Some(ui_muted_text(theme)),
                 }),
-        );
+        )
+}
+
+fn file_search_header(
+    active: bool,
+    case_sensitive: bool,
+    show_directories: bool,
+    favorites_only: bool,
+) -> Element<'static, Message> {
+    let mut header = filter_section_header("search-solid.svg", "File search");
 
     if active {
-        header = header.push(
-            container(
-                text("active")
-                    .size(9)
-                    .font(iced::Font {
-                        weight: iced::font::Weight::Semibold,
-                        ..iced::Font::default()
-                    })
-                    .style(|_theme: &theme::Theme| iced::widget::text::Style {
-                        color: Some(TUNDRA_ACCENT.scale_alpha(0.95)),
-                    }),
-            )
-            .padding([2, 6])
-            .style(|_theme| container::Style {
-                background: Some(TUNDRA_ACCENT.scale_alpha(0.18).into()),
-                border: Border {
-                    radius: 8.0.into(),
-                    width: 1.0,
-                    color: TUNDRA_ACCENT.scale_alpha(0.28),
-                },
-                ..Default::default()
-            }),
-        );
+        header = header.push(accent_badge("active", 9));
     }
 
     header
@@ -646,8 +660,56 @@ fn file_search_header(
         .into()
 }
 
+fn toggle_chip_style(theme: &theme::Theme, status: ButtonStatus, active: bool) -> ButtonStyle {
+    let palette = theme.extended_palette();
+    let mut style = ButtonStyle {
+        text_color: palette.background.base.text,
+        border: Border {
+            radius: 6.0.into(),
+            width: 1.0,
+            color: if active {
+                TUNDRA_ACCENT.scale_alpha(0.35)
+            } else {
+                palette.background.strong.color.scale_alpha(0.24)
+            },
+        },
+        ..ButtonStyle::default()
+    };
+    match status {
+        ButtonStatus::Active | ButtonStatus::Disabled => {
+            style.background = Some(
+                if active {
+                    TUNDRA_ACCENT.scale_alpha(0.14)
+                } else {
+                    Color::TRANSPARENT
+                }
+                .into(),
+            );
+        }
+        ButtonStatus::Hovered => {
+            style.background = Some(TUNDRA_ACCENT.scale_alpha(0.18).into());
+        }
+        ButtonStatus::Pressed => {
+            style.background = Some(TUNDRA_ACCENT.scale_alpha(0.26).into());
+        }
+    }
+    style
+}
+
+fn toggle_chip<'a>(
+    content: impl Into<Element<'a, Message>>,
+    active: bool,
+    message: Message,
+) -> Element<'a, Message> {
+    button(content)
+        .padding([2, 6])
+        .on_press(message)
+        .style(move |theme, status| toggle_chip_style(theme, status, active))
+        .into()
+}
+
 fn file_search_favorites_button(favorites_only: bool) -> Element<'static, Message> {
-    button(
+    toggle_chip(
         text(if favorites_only { "★" } else { "☆" })
             .size(13)
             .style(move |_theme: &theme::Theme| iced::widget::text::Style {
@@ -657,45 +719,9 @@ fn file_search_favorites_button(favorites_only: bool) -> Element<'static, Messag
                     TUNDRA_MUTED_ICON
                 }),
             }),
+        favorites_only,
+        Message::ToggleFavoritesOnly,
     )
-    .padding([2, 6])
-    .on_press(Message::ToggleFavoritesOnly)
-    .style(move |theme: &theme::Theme, status| {
-        let palette = theme.extended_palette();
-        let mut style = ButtonStyle {
-            text_color: palette.background.base.text,
-            border: Border {
-                radius: 6.0.into(),
-                width: 1.0,
-                color: if favorites_only {
-                    TUNDRA_ACCENT.scale_alpha(0.35)
-                } else {
-                    palette.background.strong.color.scale_alpha(0.24)
-                },
-            },
-            ..ButtonStyle::default()
-        };
-        match status {
-            ButtonStatus::Active | ButtonStatus::Disabled => {
-                style.background = Some(
-                    if favorites_only {
-                        TUNDRA_ACCENT.scale_alpha(0.14)
-                    } else {
-                        Color::TRANSPARENT
-                    }
-                    .into(),
-                );
-            }
-            ButtonStatus::Hovered => {
-                style.background = Some(TUNDRA_ACCENT.scale_alpha(0.18).into());
-            }
-            ButtonStatus::Pressed => {
-                style.background = Some(TUNDRA_ACCENT.scale_alpha(0.26).into());
-            }
-        }
-        style
-    })
-    .into()
 }
 
 fn favorites_list_header() -> Element<'static, Message> {
@@ -721,11 +747,7 @@ fn favorites_list_header() -> Element<'static, Message> {
     )
     .width(Length::Fill)
     .padding([8, 10])
-    .style(move |theme| {
-        let mut style = section_divider(theme);
-        style.background = Some(sidebar_panel(theme).into());
-        style
-    })
+    .style(sidebar_section_style)
     .into()
 }
 
@@ -793,7 +815,7 @@ fn favorite_star_button(path: PathBuf, favorite: bool) -> Element<'static, Messa
 }
 
 fn file_search_directories_button(show_directories: bool) -> Element<'static, Message> {
-    button(
+    toggle_chip(
         resource_svg("folder-solid.svg")
             .width(Length::Fixed(12.0))
             .height(Length::Fixed(12.0))
@@ -804,49 +826,13 @@ fn file_search_directories_button(show_directories: bool) -> Element<'static, Me
                     TUNDRA_MUTED_ICON
                 }),
             }),
+        show_directories,
+        Message::ToggleSearchShowDirectories,
     )
-    .padding([2, 6])
-    .on_press(Message::ToggleSearchShowDirectories)
-    .style(move |theme: &theme::Theme, status| {
-        let palette = theme.extended_palette();
-        let mut style = ButtonStyle {
-            text_color: palette.background.base.text,
-            border: Border {
-                radius: 6.0.into(),
-                width: 1.0,
-                color: if show_directories {
-                    TUNDRA_ACCENT.scale_alpha(0.35)
-                } else {
-                    palette.background.strong.color.scale_alpha(0.24)
-                },
-            },
-            ..ButtonStyle::default()
-        };
-        match status {
-            ButtonStatus::Active | ButtonStatus::Disabled => {
-                style.background = Some(
-                    if show_directories {
-                        TUNDRA_ACCENT.scale_alpha(0.14)
-                    } else {
-                        Color::TRANSPARENT
-                    }
-                    .into(),
-                );
-            }
-            ButtonStatus::Hovered => {
-                style.background = Some(TUNDRA_ACCENT.scale_alpha(0.18).into());
-            }
-            ButtonStatus::Pressed => {
-                style.background = Some(TUNDRA_ACCENT.scale_alpha(0.26).into());
-            }
-        }
-        style
-    })
-    .into()
 }
 
 fn file_search_case_button(case_sensitive: bool) -> Element<'static, Message> {
-    button(
+    toggle_chip(
         row![
             text("a")
                 .size(11)
@@ -873,97 +859,18 @@ fn file_search_case_button(case_sensitive: bool) -> Element<'static, Message> {
         ]
         .spacing(0)
         .align_y(Alignment::Center),
+        case_sensitive,
+        Message::ToggleSearchCaseSensitive,
     )
-    .padding([2, 6])
-    .on_press(Message::ToggleSearchCaseSensitive)
-    .style(move |theme: &theme::Theme, status| {
-        let palette = theme.extended_palette();
-        let mut style = ButtonStyle {
-            text_color: palette.background.base.text,
-            border: Border {
-                radius: 6.0.into(),
-                width: 1.0,
-                color: if case_sensitive {
-                    TUNDRA_ACCENT.scale_alpha(0.35)
-                } else {
-                    palette.background.strong.color.scale_alpha(0.24)
-                },
-            },
-            ..ButtonStyle::default()
-        };
-        match status {
-            ButtonStatus::Active | ButtonStatus::Disabled => {
-                style.background = Some(
-                    if case_sensitive {
-                        TUNDRA_ACCENT.scale_alpha(0.14)
-                    } else {
-                        Color::TRANSPARENT
-                    }
-                    .into(),
-                );
-            }
-            ButtonStatus::Hovered => {
-                style.background = Some(TUNDRA_ACCENT.scale_alpha(0.18).into());
-            }
-            ButtonStatus::Pressed => {
-                style.background = Some(TUNDRA_ACCENT.scale_alpha(0.26).into());
-            }
-        }
-        style
-    })
-    .into()
 }
 
 fn tag_section_header(filter_count: usize) -> Element<'static, Message> {
-    let mut header = Row::new()
-        .spacing(8)
-        .align_y(Alignment::Center)
-        .push(
-            resource_svg("music-solid.svg")
-                .width(Length::Fixed(12.0))
-                .height(Length::Fixed(12.0))
-                .style(|_theme, _status| iced::widget::svg::Style {
-                    color: Some(TUNDRA_ACCENT.scale_alpha(0.85)),
-                }),
-        )
-        .push(
-            text("Tag filters")
-                .size(11)
-                .font(iced::Font {
-                    weight: iced::font::Weight::Semibold,
-                    ..iced::Font::default()
-                })
-                .style(|theme: &theme::Theme| iced::widget::text::Style {
-                    color: Some(ui_muted_text(theme)),
-                }),
-        );
+    let mut header = filter_section_header("music-solid.svg", "Tag filters");
 
     if filter_count > 0 {
         header = header
-            .push(tag_count_badge(filter_count))
-            .push(
-                container(
-                    text("active")
-                        .size(9)
-                        .font(iced::Font {
-                            weight: iced::font::Weight::Semibold,
-                            ..iced::Font::default()
-                        })
-                        .style(|_theme: &theme::Theme| iced::widget::text::Style {
-                            color: Some(TUNDRA_ACCENT.scale_alpha(0.95)),
-                        }),
-                )
-                .padding([2, 6])
-                .style(|_theme| container::Style {
-                    background: Some(TUNDRA_ACCENT.scale_alpha(0.18).into()),
-                    border: Border {
-                        radius: 8.0.into(),
-                        width: 1.0,
-                        color: TUNDRA_ACCENT.scale_alpha(0.28),
-                    },
-                    ..Default::default()
-                }),
-            );
+            .push(accent_badge(filter_count.to_string(), 10))
+            .push(accent_badge("active", 9));
     }
 
     header.push(Space::new().width(Length::Fill)).into()
@@ -1184,6 +1091,12 @@ fn section_divider(theme: &theme::Theme) -> container::Style {
     }
 }
 
+fn sidebar_section_style(theme: &theme::Theme) -> container::Style {
+    let mut style = section_divider(theme);
+    style.background = Some(sidebar_panel(theme).into());
+    style
+}
+
 impl DirUp {
     pub fn view(&self, cwd: PathBuf) -> Element<'_, Message> {
         let path_label = truncate_path(&cwd, 32);
@@ -1197,7 +1110,9 @@ impl DirUp {
                     }),
                 text(path_label)
                     .size(11)
-                    .color(Color::from_rgb(0.62, 0.66, 0.72)),
+                    .style(|theme: &theme::Theme| iced::widget::text::Style {
+                        color: Some(ui_muted_text(theme)),
+                    }),
             ]
             .spacing(10)
             .align_y(Alignment::Center),
@@ -1212,11 +1127,7 @@ impl DirUp {
 
         container(content)
             .width(Length::Fill)
-            .style(move |theme| {
-                let mut style = section_divider(theme);
-                style.background = Some(sidebar_panel(theme).into());
-                style
-            })
+            .style(sidebar_section_style)
             .into()
     }
 }
@@ -1248,12 +1159,7 @@ impl FileList {
                 } else {
                     file_type.is_dir()
                 };
-                let keep = if is_dir {
-                    !is_hidden(&path)
-                } else {
-                    is_audio(&path)
-                };
-                keep.then(|| FileButton::with_kind(path, dir, is_dir))
+                Self::file_filter(&path).then(|| FileButton::with_kind(path, dir, is_dir))
             })
             .collect();
         buttons.sort_by(|a, b| match (a.is_dir, b.is_dir) {
@@ -1548,18 +1454,16 @@ impl FileSelector {
                 container(
                     text(error)
                         .size(11)
-                        .style(|_theme: &theme::Theme| iced::widget::text::Style {
-                            color: Some(Color::from_rgb(0.95, 0.62, 0.62)),
-                        }),
+                        .style(modal_error_style),
                 )
                 .padding([6, 10])
                 .width(Length::Fill)
                 .style(|_theme| container::Style {
-                    background: Some(Color::from_rgb8(0xff, 0x66, 0x66).scale_alpha(0.12).into()),
+                    background: Some(UI_DANGER.scale_alpha(0.12).into()),
                     border: Border {
                         radius: 0.0.into(),
                         width: 1.0,
-                        color: Color::from_rgb8(0xff, 0x66, 0x66).scale_alpha(0.28),
+                        color: UI_DANGER.scale_alpha(0.28),
                     },
                     ..Default::default()
                 }),
@@ -1629,10 +1533,8 @@ impl FileButton {
         let label = path
             .strip_prefix(base_path)
             .ok()
-            .and_then(|relative| relative.file_name())
-            .or_else(|| path.file_name())
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.display().to_string());
+            .and_then(crate::path_util::file_name_lossy)
+            .unwrap_or_else(|| crate::path_util::file_label(&path));
         FileButton {
             file_path: path,
             label,
@@ -1706,21 +1608,7 @@ impl FileButton {
                     file_tree_button_style(theme, button_status, selected)
                 });
 
-            return file_tree_row(
-                ContextMenu::new(button, move || {
-                    file_context_menu(
-                        Message::FileCopyName(path.clone()),
-                        Message::FileCopyPath(path.clone()),
-                        Message::FileRevealInFileManager(path.clone()),
-                        None,
-                        None,
-                        None,
-                    )
-                })
-                .style(context_menu_style)
-                .into(),
-                selected,
-            );
+            return file_row_menu(button, path, false, search_enabled, None, selected);
         }
 
         let row_content = container(label)
@@ -1745,21 +1633,7 @@ impl FileButton {
                     file_tree_button_style(theme, button_status, selected)
                 });
 
-            return file_tree_row(
-                ContextMenu::new(button, move || {
-                    file_context_menu(
-                        Message::FileCopyName(path.clone()),
-                        Message::FileCopyPath(path.clone()),
-                        Message::FileRevealInFileManager(path.clone()),
-                        None,
-                        None,
-                        None,
-                    )
-                })
-                .style(context_menu_style)
-                .into(),
-                selected,
-            );
+            return file_row_menu(button, path, false, search_enabled, None, selected);
         }
 
         if multi_select {
@@ -1771,22 +1645,12 @@ impl FileButton {
                     file_tree_button_style(theme, button_status, selected)
                 });
 
-            return file_tree_row(
-                ContextMenu::new(button, move || {
-                    file_context_menu(
-                        Message::FileCopyName(path.clone()),
-                        Message::FileCopyPath(path.clone()),
-                        Message::FileRevealInFileManager(path.clone()),
-                        search_enabled.then(|| Message::OpenAutoTagFor(path.clone())),
-                        Some((
-                            favorite_label.clone(),
-                            Message::ToggleFavorite(path.clone()),
-                        )),
-                        Some(Message::OpenTagEditorFor(path.clone())),
-                    )
-                })
-                .style(context_menu_style)
-                .into(),
+            return file_row_menu(
+                button,
+                path,
+                true,
+                search_enabled,
+                Some(favorite_label),
                 selected,
             );
         }
@@ -1801,35 +1665,13 @@ impl FileButton {
             .on_exit(Message::FileRowLeave)
             .interaction(iced::mouse::Interaction::Grab);
 
-        file_tree_row(
-            ContextMenu::new(draggable, move || {
-                file_context_menu(
-                    Message::FileCopyName(path.clone()),
-                    Message::FileCopyPath(path.clone()),
-                    Message::FileRevealInFileManager(path.clone()),
-                    search_enabled.then(|| Message::OpenAutoTagFor(path.clone())),
-                    Some((
-                        favorite_label.clone(),
-                        Message::ToggleFavorite(path.clone()),
-                    )),
-                    Some(Message::OpenTagEditorFor(path.clone())),
-                )
-            })
-            .style(context_menu_style)
-            .into(),
+        file_row_menu(
+            draggable,
+            path,
+            true,
+            search_enabled,
+            Some(favorite_label),
             selected,
         )
-    }
-}
-
-impl PartialOrd for FileButton {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for FileButton {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.file_path.cmp(&other.file_path)
     }
 }
