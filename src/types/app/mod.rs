@@ -434,6 +434,66 @@ impl App {
             Subscription::none()
         };
 
+        let filter_tab_keys = if state.search_focused
+            && !(state.tag_search_focused
+                && tag_search_can_autocomplete(&state.file_selector.tag_search_value))
+        {
+            event::listen_with(|event, status, _window| {
+                if status != event::Status::Ignored {
+                    return None;
+                }
+                match event {
+                    Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                        key,
+                        modifiers,
+                        repeat,
+                        ..
+                    }) if !repeat
+                        && !modifiers.control()
+                        && !modifiers.logo()
+                        && !modifiers.alt()
+                        && !modifiers.shift()
+                        && key.as_ref()
+                            == Key::Named(iced::keyboard::key::Named::Tab) =>
+                    {
+                        Some(Message::TagSearchFocused(true))
+                    }
+                    _ => None,
+                }
+            })
+        } else if state.tag_search_focused
+            && !tag_search_can_autocomplete(&state.file_selector.tag_search_value)
+        {
+            event::listen_with(|event, status, _window| {
+                if status != event::Status::Ignored {
+                    return None;
+                }
+                match event {
+                    Event::Keyboard(iced::keyboard::Event::KeyPressed {
+                        key,
+                        modifiers,
+                        repeat,
+                        ..
+                    }) if !repeat
+                        && !modifiers.control()
+                        && !modifiers.logo()
+                        && !modifiers.alt()
+                        && key.as_ref()
+                            == Key::Named(iced::keyboard::key::Named::Tab) =>
+                    {
+                        if modifiers.shift() {
+                            Some(Message::SearchFocused(true))
+                        } else {
+                            Some(Message::TagSearchFocused(false))
+                        }
+                    }
+                    _ => None,
+                }
+            })
+        } else {
+            Subscription::none()
+        };
+
         let tag_autocomplete_keys = if state.tag_search_focused
             && tag_search_can_autocomplete(&state.file_selector.tag_search_value)
         {
@@ -498,6 +558,7 @@ impl App {
             playback_tick,
             waveform_keys,
             transport_keys,
+            filter_tab_keys,
             tag_autocomplete_keys,
             waveform_spring,
             sidebar_resize,
