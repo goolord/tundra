@@ -1,5 +1,3 @@
-//! App state, update loop, view, subscriptions.
-
 use super::*;
 use crate::auto_tag;
 use crate::bulk_auto_tag;
@@ -8,14 +6,17 @@ use crate::metadata::{
     control_bar_tags, file_search_debounce_ms, index_paths, instrument_tag, parse_tag_filter,
     refresh_cached_metadata, tag_field_best_match,
     tag_parse_message, write_auto_tags, write_manual_tags,
-    auto_tag_already_complete_message,
+    AUTO_TAG_ALREADY_COMPLETE, AUTO_TAG_INSTRUMENT_PRESENT,
     auto_tag_field_status,
-    PersistedCaches, TagFields, TagParseError, file_search_active,
+    PersistedCaches, TagParseError, file_search_active,
     TAG_SEARCH_DEBOUNCE_MS,
 };
 use super::auto_tag::{auto_tag_view, AutoTagState};
 use super::bulk_auto_tag::{bulk_auto_tag_view, BulkAutoTagPhase, BulkAutoTagState};
-use super::settings::{self, AddDirectoryResult, AllowedDirectories, FavoritesStore};
+use super::settings::{
+    self, AddDirectoryResult, AllowedDirectories, FavoritesStore, FILE_OUTSIDE_ALLOWED,
+    FOLDER_OUTSIDE_ALLOWED, SELECT_AUDIO_FIRST, UNSUPPORTED_AUDIO,
+};
 use super::tag_editor::{tag_editor_view, TagEditorState};
 use futures::channel::oneshot;
 use futures::future::{AbortHandle, Abortable};
@@ -51,8 +52,9 @@ use helpers::{
     FileDragPending, FileListScrollbarDrag, SidebarResize, TitleBarInteraction,
 };
 use prefs::{
-    AlwaysOnTopSettings, LoopSettings, SidebarSettings, VolumeSettings, FILE_DRAG_THRESHOLD,
-    MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH, SIDEBAR_RESIZER_HIT_WIDTH, SIDEBAR_RESIZER_LINE_WIDTH,
+    load_always_on_top, load_looping, load_sidebar_width, load_volume, persist_always_on_top,
+    persist_looping, persist_sidebar_width, persist_volume, MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH,
+    SIDEBAR_RESIZER_HIT_WIDTH, SIDEBAR_RESIZER_LINE_WIDTH,
     TITLE_DRAG_THRESHOLD, WINDOW_RESIZE_BORDER,
 };
 
@@ -110,7 +112,7 @@ pub struct App {
 
 
 pub fn app() {
-    let always_on_top = AlwaysOnTopSettings::load();
+    let always_on_top = load_always_on_top();
     iced::application(App::boot, App::update, App::view)
         .title(App::title)
         .antialiasing(true)
@@ -124,7 +126,7 @@ pub fn app() {
 }
 
 
-async fn run_blocking<T>(f: impl FnOnce() -> T + Send + 'static) -> T
+async fn run_blocking<T>(f: impl FnOnce() -> T + Send + 'static) -> Result<T, ()>
 where
     T: Send + 'static,
 {
@@ -132,11 +134,28 @@ where
     std::thread::spawn(move || {
         let _ = tx.send(f());
     });
-    rx.await.unwrap_or_else(|_| panic!("blocking task dropped"))
+    rx.await.map_err(|_| ())
 }
 
 async fn load_startup_caches_async(allowed: AllowedDirectories) -> PersistedCaches {
-    run_blocking(move || load_startup_caches(allowed)).await
+    run_blocking(move || load_startup_caches(allowed))
+        .await
+        .unwrap_or_else(|_| panic!("blocking task dropped"))
+}
+
+fn clipboard_name(path: &Path) -> Task<Message> {
+    crate::path_util::file_name_lossy(path)
+        .map(iced::clipboard::write)
+        .unwrap_or_else(Task::none)
+}
+
+fn clipboard_path(path: &Path) -> Task<Message> {
+    iced::clipboard::write(path.to_string_lossy().into_owned())
+}
+
+fn reveal_path(path: &Path) -> Task<Message> {
+    reveal_in_file_manager(path);
+    Task::none()
 }
 
 impl App {
@@ -160,7 +179,9 @@ impl App {
                 ),
                 Task::perform(
                     async move {
-                        run_blocking(move || PlayerWorker::spawn(is_playing, looping, volume)).await
+                        run_blocking(move || PlayerWorker::spawn(is_playing, looping, volume))
+                            .await
+                            .unwrap_or_else(|_| panic!("blocking task dropped"))
                     },
                     |(worker, receiver)| {
                         Message::PlayerWorkerReady(worker, Arc::new(receiver))
@@ -186,7 +207,7 @@ impl Default for App {
             .unwrap_or_else(startup_directory);
         let file_selector = FileSelector::new(&current_dir);
         let menu = MainMenu::new();
-        let player = Player::new(VolumeSettings::load(), LoopSettings::load());
+        let player = Player::new(load_volume(), load_looping());
         let search_thread = AbortHandle::new_pair().0;
         let dir_cache = DirCache::new();
         let metadata_cache = MetadataCache::new();
@@ -208,7 +229,7 @@ impl Default for App {
             settings_open,
             settings_first_run,
             settings_error: None,
-            always_on_top: AlwaysOnTopSettings::load(),
+            always_on_top: load_always_on_top(),
             auto_tag_open: false,
             auto_tag: AutoTagState::default(),
             tag_editor_open: false,
@@ -226,7 +247,7 @@ impl Default for App {
             file_list_focused: false,
             search_focused: false,
             tag_search_focused: false,
-            sidebar_width: SidebarSettings::load(),
+            sidebar_width: load_sidebar_width(),
             sidebar_resize: None,
             title_bar: TitleBarInteraction {
                 drag_armed: false,
@@ -254,73 +275,6 @@ mod always_on_top_tests {
     fn window_level_follows_flag() {
         assert_eq!(window_level(true), window::Level::AlwaysOnTop);
         assert_eq!(window_level(false), window::Level::Normal);
-    }
-
-    #[test]
-    fn cached_paths_for_root_uses_subtree_caches() {
-        let root = PathBuf::from(r"F:\Samples");
-        let sub = PathBuf::from(r"F:\Samples\ADM Samples - Copy");
-        let mut cache = HashMap::new();
-        cache.insert(
-            sub.clone(),
-            vec![
-                sub.join("Snare").join("01_Snare.flac"),
-                sub.join("Snare").join("02_Snare.flac"),
-            ],
-        );
-
-        let (paths, found) = cached_paths_for_root(&cache, &root);
-        assert!(found);
-        assert_eq!(paths.len(), 2);
-        assert!(paths.iter().any(|p| p.ends_with("01_Snare.flac")));
-    }
-
-    #[test]
-    fn cached_paths_for_root_unions_stale_parent_and_verbatim_root() {
-        let root = PathBuf::from(r"\\?\F:\Samples");
-        let child = PathBuf::from(r"F:\Samples\ADM Samples - Copy");
-        let mut cache = HashMap::new();
-        cache.insert(
-            root.clone(),
-            vec![PathBuf::from(r"\\?\F:\Samples\Old\kick.wav")],
-        );
-        cache.insert(
-            child.clone(),
-            vec![child.join("Snare").join("01_Snare.flac")],
-        );
-
-        let (paths, found) = cached_paths_for_root(&cache, &root);
-        assert!(found);
-        assert!(
-            paths.iter().any(|p| p.ends_with("01_Snare.flac")),
-            "stale parent listing must not hide a later child cache"
-        );
-        assert!(paths.iter().any(|p| p.ends_with("kick.wav")));
-    }
-
-    #[test]
-    fn cached_paths_for_root_keeps_one_listing_per_cache_key() {
-        let root = PathBuf::from(r"F:\Samples");
-        let verbatim = PathBuf::from(r"\\?\F:\Samples");
-        let mut cache = HashMap::new();
-        cache.insert(
-            root.clone(),
-            vec![
-                PathBuf::from(r"F:\Samples\a.wav"),
-                PathBuf::from(r"F:\Samples\b.wav"),
-            ],
-        );
-        cache.insert(
-            verbatim,
-            vec![PathBuf::from(r"\\?\F:\Samples\stale.wav")],
-        );
-
-        let (paths, found) = cached_paths_for_root(&cache, &root);
-        assert!(found);
-        assert_eq!(paths.len(), 2, "same directory under two spellings must not union");
-        assert!(paths.iter().any(|p| p.ends_with("a.wav")));
-        assert!(paths.iter().any(|p| p.ends_with("b.wav")));
-        assert!(paths.iter().all(|p| !p.ends_with("stale.wav")));
     }
 }
 
@@ -646,16 +600,9 @@ impl App {
     fn play_audio(&mut self, file_path: &Path) -> Task<Message> {
         match self.player.play_file(file_path) {
             Ok(()) => {
-                if let Some(cached) = refresh_cached_metadata(file_path) {
-                    self.metadata_cache.merge_path(file_path, cached);
-                }
+                self.merge_path_metadata(file_path);
                 self.file_selector.sync_selection_for_path(file_path);
-                let search = if self.file_selector.search_active() {
-                    self.start_file_search()
-                } else {
-                    Task::none()
-                };
-                Task::batch([search, self.ensure_player_events()])
+                Task::batch([self.refresh_search_if_active(), self.ensure_player_events()])
             }
             Err(err) => {
                 self.show_error(err);
@@ -757,28 +704,55 @@ impl App {
         window_title(active_file.as_deref())
     }
 
-    fn open_tag_editor_for(&mut self, path: PathBuf) -> Task<Message> {
+    fn prepare_feature_modal(&mut self) {
         self.dialog = None;
         self.cancel_bulk_scan();
-        self.auto_tag_open = false;
-        self.tag_editor_open = true;
-        if !is_audio(&path) {
-            self.tag_editor = TagEditorState::default();
-            self.tag_editor.error = Some("Choose a supported audio file.".into());
-            return Task::none();
-        }
-        if !self.allowed_directories.contains_path(&path) {
-            self.tag_editor = TagEditorState::default();
-            self.tag_editor.error = Some("File must be inside allowed directories.".into());
-            return Task::none();
-        }
-        let fields = self.tag_fields_for_path(&path);
-        self.tag_editor.reset_for_path(path, fields);
-        Task::none()
     }
 
-    fn tag_fields_for_path(&self, path: &Path) -> TagFields {
-        self.metadata_cache.tag_fields_for(path)
+    fn allowed_audio_error(&self, path: &Path) -> Option<&'static str> {
+        if !is_audio(path) {
+            Some(UNSUPPORTED_AUDIO)
+        } else if !self.allowed_directories.contains_path(path) {
+            Some(FILE_OUTSIDE_ALLOWED)
+        } else {
+            None
+        }
+    }
+
+    fn with_current_file(&self, f: impl FnOnce(&Path) -> Task<Message>) -> Task<Message> {
+        self.player
+            .current_file
+            .as_deref()
+            .map(f)
+            .unwrap_or_else(Task::none)
+    }
+
+    fn merge_path_metadata(&mut self, path: &Path) {
+        if let Some(cached) = refresh_cached_metadata(path) {
+            self.metadata_cache.merge_path(path, cached);
+        }
+    }
+
+    fn refresh_search_if_active(&mut self) -> Task<Message> {
+        if self.file_selector.search_active() {
+            self.start_file_search()
+        } else {
+            Task::none()
+        }
+    }
+
+    fn open_tag_editor_for(&mut self, path: PathBuf) -> Task<Message> {
+        self.prepare_feature_modal();
+        self.auto_tag_open = false;
+        self.tag_editor_open = true;
+        if let Some(err) = self.allowed_audio_error(&path) {
+            self.tag_editor = TagEditorState::default();
+            self.tag_editor.set_error(err);
+            return Task::none();
+        }
+        let fields = self.metadata_cache.tag_fields_for(&path);
+        self.tag_editor.reset_for_path(path, fields);
+        Task::none()
     }
 
     fn reset_file_list(&mut self) {
@@ -797,18 +771,10 @@ impl App {
             .favorites
             .paths()
             .iter()
-            .filter(|path| path.is_file() && is_audio(path))
-            .filter(|path| self.allowed_directories.contains_path(path))
+            .filter(|path| path.is_file() && self.allowed_audio_error(path).is_none())
             .map(|path| {
-                let label = path
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| path.display().to_string());
-                FileButton {
-                    file_path: path.clone(),
-                    label,
-                    is_dir: false,
-                }
+                let base = path.parent().unwrap_or(path);
+                FileButton::with_kind(path.clone(), base, false)
             })
             .collect();
         buttons.sort_by(|a, b| a.label.to_lowercase().cmp(&b.label.to_lowercase()));
@@ -984,7 +950,7 @@ impl App {
         }
         if !self.allowed_directories.contains_path(&root) {
             self.bulk_auto_tag
-                .set_error("Folder must be inside allowed directories.");
+                .set_error(FOLDER_OUTSIDE_ALLOWED);
             return Task::none();
         }
 
@@ -1175,9 +1141,8 @@ impl App {
             }
 
             Message::OpenSettings => {
-                self.dialog = None;
+                self.prepare_feature_modal();
                 self.auto_tag_open = false;
-                self.cancel_bulk_scan();
                 self.settings_open = true;
                 self.settings_error = None;
                 Task::none()
@@ -1185,7 +1150,7 @@ impl App {
 
             Message::SetAlwaysOnTop(always_on_top) => {
                 self.always_on_top = always_on_top;
-                AlwaysOnTopSettings::persist(always_on_top);
+                persist_always_on_top(always_on_top);
                 set_window_level(always_on_top)
             }
 
@@ -1200,11 +1165,7 @@ impl App {
                 self.settings_error = None;
                 self.prune_caches();
                 let warm = self.warm_allowed_caches();
-                let search = if self.file_selector.search_active() {
-                    self.start_file_search()
-                } else {
-                    Task::none()
-                };
+                let search = self.refresh_search_if_active();
                 let launch = self.maybe_open_pending_launch();
                 if let Some(task) = launch {
                     return Task::batch([task, warm, search]);
@@ -1243,11 +1204,7 @@ impl App {
                             self.allowed_directories.persist();
                             self.settings_error = None;
                             if self.dir_cache.contains_key(&resolved) {
-                                return if self.file_selector.search_active() {
-                                    self.start_file_search()
-                                } else {
-                                    Task::none()
-                                };
+                                return self.refresh_search_if_active();
                             }
                             let walker = future::lazy(move |_| {
                                 let children = walk_directory(&resolved);
@@ -1270,11 +1227,7 @@ impl App {
                 self.allowed_directories.remove(&path);
                 self.allowed_directories.persist();
                 self.prune_caches();
-                if self.file_selector.search_active() {
-                    self.start_file_search()
-                } else {
-                    Task::none()
-                }
+                self.refresh_search_if_active()
             }
 
             Message::ChangeDirectory(parent_dir) => self.navigate_directory(parent_dir),
@@ -1312,10 +1265,7 @@ impl App {
             }
 
             Message::ToggleFavorite(path) => {
-                if !is_audio(&path) {
-                    return Task::none();
-                }
-                if !self.allowed_directories.contains_path(&path) {
+                if self.allowed_audio_error(&path).is_some() {
                     return Task::none();
                 }
                 self.favorites.toggle(path);
@@ -1324,8 +1274,7 @@ impl App {
             }
 
             Message::OpenAutoTag => {
-                self.dialog = None;
-                self.cancel_bulk_scan();
+                self.prepare_feature_modal();
                 self.tag_editor_open = false;
                 self.auto_tag_open = true;
                 let target = self.file_selector.selected_audio_path();
@@ -1335,19 +1284,12 @@ impl App {
             }
 
             Message::OpenAutoTagFor(path) => {
-                self.dialog = None;
-                self.cancel_bulk_scan();
+                self.prepare_feature_modal();
                 self.tag_editor_open = false;
                 self.auto_tag_open = true;
-                if !is_audio(&path) {
+                if let Some(err) = self.allowed_audio_error(&path) {
                     self.auto_tag.reset_for_target(None, None);
-                    self.auto_tag.set_error("Choose a supported audio file.");
-                    return Task::none();
-                }
-                if !self.allowed_directories.contains_path(&path) {
-                    self.auto_tag.reset_for_target(None, None);
-                    self.auto_tag
-                        .set_error("File must be inside allowed directories.");
+                    self.auto_tag.set_error(err);
                     return Task::none();
                 }
                 let existing = instrument_tag(&path);
@@ -1375,31 +1317,23 @@ impl App {
 
             Message::TagEditorSave => {
                 let Some(path) = self.tag_editor.target.clone() else {
-                    self.tag_editor.error = Some("Select an audio file first.".into());
+                    self.tag_editor.set_error(SELECT_AUDIO_FIRST);
                     return Task::none();
                 };
-                if !self.allowed_directories.contains_path(&path) {
-                    self.tag_editor
-                        .error = Some("File must be inside allowed directories.".into());
+                if let Some(err) = self.allowed_audio_error(&path) {
+                    self.tag_editor.set_error(err);
                     return Task::none();
                 }
-                let edits = self.tag_editor.edits();
+                let edits = self.tag_editor.edits.clone();
                 match write_manual_tags(&path, &edits) {
                     Ok(()) => {
-                        if let Some(cached) = refresh_cached_metadata(&path) {
-                            self.metadata_cache.merge_path(&path, cached);
-                        }
+                        self.merge_path_metadata(&path);
                         self.tag_editor.error = None;
                         self.tag_editor.status = Some("Tags saved.".into());
-                        if self.file_selector.search_active() {
-                            self.start_file_search()
-                        } else {
-                            Task::none()
-                        }
+                        self.refresh_search_if_active()
                     }
                     Err(err) => {
-                        self.tag_editor.error = Some(err);
-                        self.tag_editor.status = None;
+                        self.tag_editor.set_error(err);
                         Task::none()
                     }
                 }
@@ -1416,81 +1350,52 @@ impl App {
             }
 
             Message::AutoTagFilePicked(path) => {
-                match path {
-                    Some(candidate) if is_audio(&candidate) => {
-                        if !self.allowed_directories.contains_path(&candidate) {
-                            self.auto_tag
-                                .set_error("File must be inside allowed directories.");
-                        } else {
-                            let existing = instrument_tag(&candidate);
-                            self.auto_tag.reset_for_target(Some(candidate), existing);
-                        }
+                if let Some(candidate) = path {
+                    if let Some(err) = self.allowed_audio_error(&candidate) {
+                        self.auto_tag.set_error(err);
+                    } else {
+                        let existing = instrument_tag(&candidate);
+                        self.auto_tag.reset_for_target(Some(candidate), existing);
                     }
-                    Some(_) => {
-                        self.auto_tag.set_error("Choose a supported audio file.");
-                    }
-                    None => {}
                 }
                 Task::none()
             }
 
             Message::AutoTagRun => {
                 let Some(path) = self.auto_tag.target.clone() else {
-                    self.auto_tag.set_error("Select an audio file first.");
+                    self.auto_tag.set_error(SELECT_AUDIO_FIRST);
                     return Task::none();
                 };
-                if !self.allowed_directories.contains_path(&path) {
-                    self.auto_tag
-                        .set_error("File must be inside allowed directories.");
+                if let Some(err) = self.allowed_audio_error(&path) {
+                    self.auto_tag.set_error(err);
                     return Task::none();
                 }
                 if let Some(existing) = instrument_tag(&path) {
                     self.auto_tag.existing_instrument = Some(existing);
                 }
                 if auto_tag_field_status(&path).is_some_and(|status| !status.allows_instrument_work()) {
-                    self.auto_tag.error = None;
-                    self.auto_tag.error_details = None;
-                    self.auto_tag.status =
-                        "Instrument tag already present. Apply to fill any missing artist or comment tags."
-                            .into();
+                    self.auto_tag.clear_error();
+                    self.auto_tag.status = AUTO_TAG_INSTRUMENT_PRESENT.into();
                     return Task::none();
                 }
-                self.auto_tag.running = true;
-                self.auto_tag.error = None;
-                self.auto_tag.error_details = None;
-                self.auto_tag.result = None;
-                self.auto_tag.applied = false;
+                self.auto_tag.begin_run();
                 Task::perform(
                     async move {
-                        let (tx, rx) = futures::channel::oneshot::channel();
-                        std::thread::spawn(move || {
-                            let _ = tx.send(auto_tag::classify_file_blocking(path));
-                        });
-                        rx.await.unwrap_or_else(|_| {
-                            Err(auto_tag::ClassifyError {
-                                message: "Couldn't analyze this file.".into(),
-                                details: "Classifier thread stopped unexpectedly.".into(),
+                        run_blocking(move || auto_tag::classify_file(&path))
+                            .await
+                            .unwrap_or_else(|_| {
+                                Err(auto_tag::ClassifyError::new(
+                                    "Couldn't analyze this file.",
+                                    "Classifier thread stopped unexpectedly.",
+                                ))
                             })
-                        })
                     },
                     Message::AutoTagCompleted,
                 )
             }
 
             Message::AutoTagCompleted(result) => {
-                self.auto_tag.running = false;
-                match result {
-                    Ok(classification) => {
-                        self.auto_tag.error = None;
-                        self.auto_tag.error_details = None;
-                        self.auto_tag.result = Some(classification);
-                    }
-                    Err(err) => {
-                        self.auto_tag.result = None;
-                        self.auto_tag.error = Some(err.message);
-                        self.auto_tag.error_details = Some(err.details);
-                    }
-                }
+                self.auto_tag.finish_run(result);
                 Task::none()
             }
 
@@ -1501,18 +1406,17 @@ impl App {
 
             Message::AutoTagApply => {
                 let Some(path) = self.auto_tag.target.clone() else {
-                    self.auto_tag.set_error("Select an audio file first.");
+                    self.auto_tag.set_error(SELECT_AUDIO_FIRST);
                     return Task::none();
                 };
-                if !self.allowed_directories.contains_path(&path) {
-                    self.auto_tag
-                        .set_error("File must be inside allowed directories.");
+                if let Some(err) = self.allowed_audio_error(&path) {
+                    self.auto_tag.set_error(err);
                     return Task::none();
                 }
                 let needs = auto_tag_field_status(&path);
                 if needs.is_none_or(|status| status.is_complete()) {
                     self.auto_tag
-                        .set_error(auto_tag_already_complete_message());
+                        .set_error(AUTO_TAG_ALREADY_COMPLETE);
                     return Task::none();
                 }
                 let instrument = if needs.is_some_and(|status| status.needs_instrument) {
@@ -1538,21 +1442,18 @@ impl App {
                             self.auto_tag.existing_instrument = Some(existing);
                         }
                         if written {
-                            if let Some(cached) = refresh_cached_metadata(&path) {
-                                self.metadata_cache.merge_path(&path, cached);
-                            }
+                            self.merge_path_metadata(&path);
                         }
                         self.auto_tag.applied = true;
                         self.auto_tag.result = None;
-                        self.auto_tag.error_details = None;
+                        self.auto_tag.clear_error();
                         self.auto_tag.status = if !written {
-                            auto_tag_already_complete_message().into()
+                            AUTO_TAG_ALREADY_COMPLETE.into()
                         } else if instrument.is_empty() {
                             "Applied missing tags.".into()
                         } else {
                             format!("Applied tags (instrument: {instrument}).")
                         };
-                        self.auto_tag.error = None;
                         if written {
                             self.start_file_search()
                         } else {
@@ -1611,7 +1512,7 @@ impl App {
                         self.bulk_auto_tag.error = None;
                     } else {
                         self.bulk_auto_tag
-                            .set_error("Folder must be inside allowed directories.");
+                            .set_error(FOLDER_OUTSIDE_ALLOWED);
                     }
                 }
                 Task::none()
@@ -1692,12 +1593,12 @@ impl App {
             }
 
             Message::BulkAutoTagCheckSelected => {
-                self.bulk_auto_tag.check_selected();
+                self.bulk_auto_tag.set_selected_accepted(true);
                 Task::none()
             }
 
             Message::BulkAutoTagUncheckSelected => {
-                self.bulk_auto_tag.uncheck_selected();
+                self.bulk_auto_tag.set_selected_accepted(false);
                 Task::none()
             }
 
@@ -1761,9 +1662,7 @@ impl App {
             Message::BulkAutoTagApplyCompleted { generation, summary } => {
                 self.bulk_scan_progress = None;
                 for path in &summary.written_paths {
-                    if let Some(cached) = refresh_cached_metadata(path) {
-                        self.metadata_cache.merge_path(path, cached);
-                    }
+                    self.merge_path_metadata(path);
                 }
                 if self.bulk_apply_active != Some(generation) {
                     return Task::none();
@@ -1772,11 +1671,7 @@ impl App {
                 if self.bulk_auto_tag.is_open() {
                     self.bulk_auto_tag.finish_apply(summary);
                 }
-                if self.file_selector.search_active() {
-                    self.start_file_search()
-                } else {
-                    Task::none()
-                }
+                self.refresh_search_if_active()
             }
 
             Message::SearchFocused(focused) => {
@@ -1912,7 +1807,7 @@ impl App {
 
             Message::ToggleLoop => {
                 self.player.toggle_loop();
-                LoopSettings::persist(
+                persist_looping(
                     self.player
                         .controls
                         .looping
@@ -1931,11 +1826,7 @@ impl App {
                 self.metadata_cache = MetadataCache::from_map(caches.metadata);
                 self.caches_ready = true;
                 let warm = self.warm_allowed_caches();
-                let search = if self.file_selector.search_active() {
-                    self.start_file_search()
-                } else {
-                    Task::none()
-                };
+                let search = self.refresh_search_if_active();
                 Task::batch([
                     warm,
                     search,
@@ -1969,11 +1860,7 @@ impl App {
 
             Message::MetadataIndexed(new_metadata) => {
                 self.metadata_cache.merge(new_metadata);
-                if self.file_selector.search_active() {
-                    self.start_file_search()
-                } else {
-                    Task::none()
-                }
+                self.refresh_search_if_active()
             }
 
             Message::InvalidateDircache => {
@@ -1983,11 +1870,7 @@ impl App {
                 self.metadata_cache.persist();
                 auto_tag::clear_classify_cache();
                 let warm = self.warm_allowed_caches();
-                let search = if self.file_selector.search_active() {
-                    self.start_file_search()
-                } else {
-                    Task::none()
-                };
+                let search = self.refresh_search_if_active();
                 Task::batch([warm, search])
             }
 
@@ -2387,7 +2270,7 @@ impl App {
             }
 
             Message::VolumeCommit => {
-                VolumeSettings::persist(self.player.controls.volume);
+                persist_volume(self.player.controls.volume);
                 Task::none()
             }
 
@@ -2450,58 +2333,21 @@ impl App {
                 Task::none()
             }
 
-            Message::WaveformCopyName => {
-                if let Some(path) = &self.player.current_file
-                    && let Some(name) = crate::path_util::file_name_lossy(path)
-                {
-                    return iced::clipboard::write(name);
-                }
-                Task::none()
-            }
+            Message::WaveformCopyName => self.with_current_file(clipboard_name),
+            Message::WaveformCopyPath => self.with_current_file(clipboard_path),
+            Message::WaveformRevealInFileManager => self.with_current_file(reveal_path),
+            Message::WaveformOpenAutoTag => match self.player.current_file.clone() {
+                Some(path) => self.update(Message::OpenAutoTagFor(path)),
+                None => Task::none(),
+            },
+            Message::WaveformEditTags => match self.player.current_file.clone() {
+                Some(path) => self.open_tag_editor_for(path),
+                None => Task::none(),
+            },
 
-            Message::WaveformCopyPath => {
-                if let Some(path) = &self.player.current_file {
-                    return iced::clipboard::write(path.to_string_lossy().into_owned());
-                }
-                Task::none()
-            }
-
-            Message::WaveformRevealInFileManager => {
-                if let Some(path) = &self.player.current_file {
-                    reveal_in_file_manager(path);
-                }
-                Task::none()
-            }
-
-            Message::WaveformOpenAutoTag => {
-                if let Some(path) = self.player.current_file.clone() {
-                    return self.update(Message::OpenAutoTagFor(path));
-                }
-                Task::none()
-            }
-
-            Message::WaveformEditTags => {
-                if let Some(path) = self.player.current_file.clone() {
-                    return self.open_tag_editor_for(path);
-                }
-                Task::none()
-            }
-
-            Message::FileCopyName(path) => {
-                if let Some(name) = crate::path_util::file_name_lossy(&path) {
-                    return iced::clipboard::write(name);
-                }
-                Task::none()
-            }
-
-            Message::FileCopyPath(path) => {
-                iced::clipboard::write(path.to_string_lossy().into_owned())
-            }
-
-            Message::FileRevealInFileManager(path) => {
-                reveal_in_file_manager(&path);
-                Task::none()
-            }
+            Message::FileCopyName(path) => clipboard_name(&path),
+            Message::FileCopyPath(path) => clipboard_path(&path),
+            Message::FileRevealInFileManager(path) => reveal_path(&path),
 
             Message::SidebarResizeStart => {
                 self.sidebar_resize = Some(SidebarResize {
@@ -2528,7 +2374,7 @@ impl App {
 
             Message::SidebarResizeEnd => {
                 self.sidebar_resize = None;
-                SidebarSettings::persist(self.sidebar_width);
+                persist_sidebar_width(self.sidebar_width);
                 Task::none()
             }
         }
@@ -2696,35 +2542,28 @@ impl App {
         .into()
     }
 
+    fn dialog_table_header(label: &'static str) -> Element<'static, Message> {
+        text(label)
+            .size(10)
+            .width(Length::FillPortion(1))
+            .style(|theme: &Theme| iced::widget::text::Style {
+                color: Some(
+                    theme
+                        .extended_palette()
+                        .background
+                        .base
+                        .text
+                        .scale_alpha(0.62),
+                ),
+            })
+            .into()
+    }
+
     fn dialog_control_table(rows: &[(String, String)]) -> Element<'static, Message> {
         let header = container(
             row![
-                text("Input")
-                    .size(10)
-                    .width(Length::FillPortion(1))
-                    .style(|theme: &Theme| iced::widget::text::Style {
-                        color: Some(
-                            theme
-                                .extended_palette()
-                                .background
-                                .base
-                                .text
-                                .scale_alpha(0.62),
-                        ),
-                    }),
-                text("Action")
-                    .size(10)
-                    .width(Length::FillPortion(1))
-                    .style(|theme: &Theme| iced::widget::text::Style {
-                        color: Some(
-                            theme
-                                .extended_palette()
-                                .background
-                                .base
-                                .text
-                                .scale_alpha(0.62),
-                        ),
-                    }),
+                Self::dialog_table_header("Input"),
+                Self::dialog_table_header("Action"),
             ]
             .spacing(12)
             .align_y(iced::Alignment::Center)
@@ -2836,85 +2675,20 @@ impl App {
         )
     }
 
-    fn with_settings<'a>(
+    fn dim_scrim(_theme: &Theme) -> container::Style {
+        container::Style {
+            background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.55).into()),
+            ..Default::default()
+        }
+    }
+
+    fn with_dim_overlay<'a>(
         base: Element<'a, Message>,
-        allowed: &[PathBuf],
-        first_run: bool,
-        error: Option<String>,
+        overlay: Element<'a, Message>,
     ) -> Element<'a, Message> {
         stack![
             base,
-            opaque(
-                container(center(settings::settings_view(
-                    allowed,
-                    first_run,
-                    error,
-                ))).style(
-                    |_theme| container::Style {
-                        background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.55).into()),
-                        ..Default::default()
-                    },
-                ),
-            ),
-        ]
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
-    }
-
-    fn with_bulk_auto_tag<'a>(
-        base: Element<'a, Message>,
-        state: &'a BulkAutoTagState,
-        modifiers: Modifiers,
-    ) -> Element<'a, Message> {
-        stack![
-            base,
-            opaque(
-                container(center(bulk_auto_tag_view(state, modifiers))).style(|_theme| {
-                    container::Style {
-                        background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.55).into()),
-                        ..Default::default()
-                    }
-                }),
-            ),
-        ]
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
-    }
-
-    fn with_tag_editor<'a>(base: Element<'a, Message>, state: &'a TagEditorState) -> Element<'a, Message> {
-        stack![
-            base,
-            opaque(
-                container(center(tag_editor_view(state))).style(|_theme| {
-                    container::Style {
-                        background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.55).into()),
-                        ..Default::default()
-                    }
-                }),
-            ),
-        ]
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
-    }
-
-    fn with_auto_tag<'a>(base: Element<'a, Message>, state: &'a AutoTagState) -> Element<'a, Message> {
-        let path_status = state
-            .target
-            .as_ref()
-            .and_then(|path| auto_tag_field_status(path));
-        stack![
-            base,
-            opaque(
-                container(center(auto_tag_view(state, path_status))).style(|_theme| {
-                    container::Style {
-                        background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.55).into()),
-                        ..Default::default()
-                    }
-                }),
-            ),
+            opaque(container(center(overlay)).style(Self::dim_scrim)),
         ]
         .width(Length::Fill)
         .height(Length::Fill)
@@ -2925,13 +2699,8 @@ impl App {
         stack![
             base,
             opaque(
-                mouse_area(
-                    center(Self::dialog_view(dialog)).style(|_theme| container::Style {
-                        background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.55).into()),
-                        ..Default::default()
-                    }),
-                )
-                .on_press(Message::DismissDialog)
+                mouse_area(center(Self::dialog_view(dialog)).style(Self::dim_scrim))
+                    .on_press(Message::DismissDialog)
             )
         ]
         .width(Length::Fill)
@@ -3018,18 +2787,31 @@ impl App {
         .height(Length::Fill);
 
         let workspace: Element<_> = if self.settings_open {
-            Self::with_settings(
+            Self::with_dim_overlay(
                 workspace.into(),
-                self.allowed_directories.roots(),
-                self.settings_first_run,
-                self.settings_error.clone(),
+                settings::settings_view(
+                    self.allowed_directories.roots(),
+                    self.settings_first_run,
+                    self.settings_error.clone(),
+                ),
             )
         } else if self.bulk_auto_tag.is_open() {
-            Self::with_bulk_auto_tag(workspace.into(), &self.bulk_auto_tag, self.modifiers)
+            Self::with_dim_overlay(
+                workspace.into(),
+                bulk_auto_tag_view(&self.bulk_auto_tag, self.modifiers),
+            )
         } else if self.tag_editor_open {
-            Self::with_tag_editor(workspace.into(), &self.tag_editor)
+            Self::with_dim_overlay(workspace.into(), tag_editor_view(&self.tag_editor))
         } else if self.auto_tag_open {
-            Self::with_auto_tag(workspace.into(), &self.auto_tag)
+            let path_status = self
+                .auto_tag
+                .target
+                .as_ref()
+                .and_then(|path| auto_tag_field_status(path));
+            Self::with_dim_overlay(
+                workspace.into(),
+                auto_tag_view(&self.auto_tag, path_status),
+            )
         } else if let Some(dialog) = &self.dialog {
             Self::with_dialog(workspace.into(), dialog)
         } else {

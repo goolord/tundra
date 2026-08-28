@@ -290,10 +290,12 @@ fn setup_classifiers(skip_dl: bool) -> Result<()> {
     Ok(())
 }
 
+fn windows_target(target: Option<&str>) -> bool {
+    target.is_some_and(|triple| triple.contains("windows")) || (target.is_none() && cfg!(windows))
+}
+
 fn apply_release_link_flags(cmd: &mut Command, target: Option<&str>) {
-    let windows_release = target.is_some_and(|triple| triple.contains("windows"))
-        || target.is_none() && cfg!(windows);
-    if !windows_release {
+    if !windows_target(target) {
         return;
     }
     const FLAG: &str = "-C target-feature=+crt-static";
@@ -526,8 +528,7 @@ fn release_dir(target: Option<&str>) -> PathBuf {
 }
 
 fn release_binary_name(target: Option<&str>) -> &'static str {
-    if target.is_some_and(|triple| triple.contains("windows")) || (target.is_none() && cfg!(windows))
-    {
+    if windows_target(target) {
         "tundra.exe"
     } else {
         "tundra"
@@ -535,9 +536,7 @@ fn release_binary_name(target: Option<&str>) -> &'static str {
 }
 
 fn classifier_python_for_target(target: Option<&str>) -> &'static str {
-    if target.is_some_and(|triple| triple.contains("windows"))
-        || (target.is_none() && cfg!(windows))
-    {
+    if windows_target(target) {
         "3.12"
     } else {
         UV_PYTHON

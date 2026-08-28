@@ -1,6 +1,10 @@
-use super::common::{modal_button_style, truncate_path, ui_muted_text, Message};
-use crate::metadata::auto_tag_already_complete_message;
-use crate::auto_tag::ClassificationResult;
+use super::common::{
+    modal_button_style, modal_error_style, modal_info_row, modal_ok_style, modal_shell,
+    modal_warn_style, truncate_path, ui_muted_text, Message,
+};
+use crate::metadata::{AUTO_TAG_ALREADY_COMPLETE, AUTO_TAG_INSTRUMENT_PRESENT};
+use super::settings::NO_AUDIO_SELECTED;
+use crate::auto_tag::{ClassificationResult, ClassifyError};
 use iced::widget::{button, container, row, text, Column, Space};
 use iced::widget::button::{Status as ButtonStatus, Style as ButtonStyle};
 use iced::{Alignment, Border, Color, Element, Length, Shadow, Theme, theme};
@@ -41,6 +45,33 @@ impl AutoTagState {
         self.error_details = None;
     }
 
+    pub fn clear_error(&mut self) {
+        self.error = None;
+        self.error_details = None;
+    }
+
+    pub fn begin_run(&mut self) {
+        self.running = true;
+        self.clear_error();
+        self.result = None;
+        self.applied = false;
+    }
+
+    pub fn finish_run(&mut self, result: Result<ClassificationResult, ClassifyError>) {
+        self.running = false;
+        match result {
+            Ok(classification) => {
+                self.clear_error();
+                self.result = Some(classification);
+            }
+            Err(err) => {
+                self.result = None;
+                self.error = Some(err.message);
+                self.error_details = Some(err.details);
+            }
+        }
+    }
+
     fn has_technical_details(&self) -> bool {
         self.result.is_some() || self.error_details.is_some()
     }
@@ -72,41 +103,6 @@ fn text_toggle_style(theme: &theme::Theme, status: ButtonStatus) -> ButtonStyle 
     style
 }
 
-fn info_panel<'a>(label: &'a str, value: impl Into<std::borrow::Cow<'a, str>>) -> Element<'a, Message> {
-    let value = value.into();
-    container(
-        row![
-            text(label)
-                .size(11)
-                .width(Length::Fixed(88.0))
-                .style(|theme: &Theme| iced::widget::text::Style {
-                    color: Some(theme.extended_palette().background.base.text.scale_alpha(0.65)),
-                }),
-            text(value)
-                .size(12)
-                .width(Length::Fill),
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center)
-        .width(Length::Fill),
-    )
-    .padding([6, 8])
-    .width(Length::Fill)
-    .style(|theme: &Theme| {
-        let palette = theme.extended_palette();
-        container::Style {
-            background: Some(palette.background.weak.color.scale_alpha(0.35).into()),
-            border: Border {
-                radius: 0.0.into(),
-                width: 1.0,
-                color: palette.background.strong.color.scale_alpha(0.22),
-            },
-            ..Default::default()
-        }
-    })
-    .into()
-}
-
 fn muted_text(content: &str) -> Element<'_, Message> {
     text(content)
         .size(11)
@@ -122,10 +118,10 @@ fn technical_details_panel<'a>(state: &'a AutoTagState) -> Element<'a, Message> 
 
     if let Some(result) = &state.result {
         details = details
-            .push(info_panel("Tier", format!("{}", result.tier)))
-            .push(info_panel("Pipeline", &result.summary));
+            .push(modal_info_row("Tier", format!("{}", result.tier)))
+            .push(modal_info_row("Pipeline", &result.summary));
         if let Some(zcr) = result.zcr {
-            details = details.push(info_panel("ZCR", format!("{zcr:.4}")));
+            details = details.push(modal_info_row("ZCR", format!("{zcr:.4}")));
         }
     }
 
@@ -195,39 +191,33 @@ pub fn auto_tag_view<'a>(
         .target
         .as_ref()
         .map(|path| truncate_path(path, 56))
-        .unwrap_or_else(|| "No audio file selected".to_string());
-    body = body.push(info_panel("File", target_label));
+        .unwrap_or_else(|| NO_AUDIO_SELECTED.to_string());
+    body = body.push(modal_info_row("File", target_label));
 
     let instrument_label = state
         .existing_instrument
         .as_deref()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or("(none)");
-    body = body.push(info_panel("Current tag", instrument_label));
+    body = body.push(modal_info_row("Current tag", instrument_label));
 
     if !needs_any && !allows_instrument_work && state.target.is_some() {
         body = body.push(
-            text(auto_tag_already_complete_message())
+            text(AUTO_TAG_ALREADY_COMPLETE)
                 .size(12)
-                .style(|_theme: &Theme| iced::widget::text::Style {
-                    color: Some(Color::from_rgb(0.88, 0.78, 0.52)),
-                }),
+                .style(modal_warn_style),
         );
     } else if !allows_instrument_work && state.target.is_some() {
         body = body.push(
-            text("Instrument tag already present. Apply to fill any missing artist or comment tags.")
+            text(AUTO_TAG_INSTRUMENT_PRESENT)
                 .size(12)
-                .style(|_theme: &Theme| iced::widget::text::Style {
-                    color: Some(Color::from_rgb(0.88, 0.78, 0.52)),
-                }),
+                .style(modal_warn_style),
         );
     } else if path_status.is_some_and(|status| status.can_retag_instrument) && state.target.is_some() {
         body = body.push(
             text("This file has an older Tundra tag. Detect again to upgrade it.")
                 .size(12)
-                .style(|_theme: &Theme| iced::widget::text::Style {
-                    color: Some(Color::from_rgb(0.88, 0.78, 0.52)),
-                }),
+                .style(modal_warn_style),
         );
     }
 
@@ -237,9 +227,7 @@ pub fn auto_tag_view<'a>(
         body = body.push(
             text(error)
                 .size(12)
-                .style(|_theme: &Theme| iced::widget::text::Style {
-                    color: Some(Color::from_rgb(0.95, 0.62, 0.62)),
-                }),
+                .style(modal_error_style),
         );
     } else if state.applied {
         let applied_message = if state.status.is_empty() {
@@ -250,16 +238,14 @@ pub fn auto_tag_view<'a>(
         body = body.push(
             text(applied_message)
                 .size(12)
-                .style(|_theme: &Theme| iced::widget::text::Style {
-                    color: Some(Color::from_rgb(0.62, 0.88, 0.68)),
-                }),
+                .style(modal_ok_style),
         );
     } else if let Some(result) = &state.result {
-        body = body.push(info_panel("Suggested", &result.instrument));
+        body = body.push(modal_info_row("Suggested", &result.instrument));
         if let Some(confidence) = result.confidence {
-            body = body.push(info_panel(
+            body = body.push(modal_info_row(
                 "Confidence",
-                format!("{confidence:.0}%", confidence = confidence * 100.0),
+                crate::auto_tag::confidence_percent(Some(confidence)),
             ));
         }
     } else if !state.status.is_empty() {
@@ -281,9 +267,7 @@ pub fn auto_tag_view<'a>(
         body = body.push(
             text("Apply writes missing tags permanently. There is no undo. Files with other metadata keep their existing values.")
                 .size(11)
-                .style(|_theme: &Theme| iced::widget::text::Style {
-                    color: Some(Color::from_rgb(0.88, 0.78, 0.52)),
-                })
+                .style(modal_warn_style)
                 .width(Length::Fill),
         );
     }
@@ -325,24 +309,5 @@ pub fn auto_tag_view<'a>(
         .width(Length::Fill),
     );
 
-    container(body.padding(18))
-        .width(Length::Fixed(560.0))
-        .style(|theme: &Theme| {
-            let palette = theme.extended_palette();
-            container::Style {
-                background: Some(palette.background.base.color.into()),
-                border: Border {
-                    width: 1.0,
-                    color: palette.background.strong.color,
-                    radius: 0.0.into(),
-                },
-                shadow: Shadow {
-                    color: palette.background.base.text.scale_alpha(0.25),
-                    offset: iced::Vector::new(0.0, 4.0),
-                    blur_radius: 16.0,
-                },
-                ..Default::default()
-            }
-        })
-        .into()
+    modal_shell(body.padding(18), 560.0).into()
 }

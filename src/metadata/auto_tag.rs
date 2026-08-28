@@ -55,9 +55,10 @@ impl AutoTagFieldStatus {
     }
 }
 
-pub fn auto_tag_already_complete_message() -> &'static str {
-    "This file already has the tags Tundra would add."
-}
+pub const AUTO_TAG_ALREADY_COMPLETE: &str =
+    "This file already has the tags Tundra would add.";
+pub const AUTO_TAG_INSTRUMENT_PRESENT: &str =
+    "Instrument tag already present. Apply to fill any missing artist or comment tags.";
 
 pub fn auto_tag_field_status(path: &Path) -> Option<AutoTagFieldStatus> {
     if !is_audio(path) {

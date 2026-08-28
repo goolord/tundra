@@ -9,13 +9,15 @@ use rodio::{Decoder, Source};
 
 use super::arc_samples::PlaybackPosition;
 
-/// Opens a decoder and returns stream metadata without loading sample data.
-pub fn probe_decoder(path: &Path) -> Result<StreamInfo, String> {
+fn open_decoder(path: &Path) -> Result<Decoder<BufReader<File>>, String> {
     let file = File::open(path)
         .map_err(|err| format!("Cannot open {}: {err}", path.display()))?;
-    let decoder = Decoder::try_from(file)
-        .map_err(|err| format!("Cannot decode {}: {err}", path.display()))?;
-    stream_info_from_decoder(&decoder)
+    Decoder::try_from(file)
+        .map_err(|err| format!("Cannot decode {}: {err}", path.display()))
+}
+
+pub fn probe_decoder(path: &Path) -> Result<StreamInfo, String> {
+    stream_info_from_decoder(&open_decoder(path)?)
 }
 
 pub struct StreamInfo {
@@ -63,10 +65,7 @@ impl StreamSource {
         total_frames: u64,
         position: Option<Arc<PlaybackPosition>>,
     ) -> Result<Self, String> {
-        let file = File::open(path)
-            .map_err(|err| format!("Cannot open {}: {err}", path.display()))?;
-        let mut decoder = Decoder::try_from(file)
-            .map_err(|err| format!("Cannot decode {}: {err}", path.display()))?;
+        let mut decoder = open_decoder(path)?;
         let channels = decoder.channels() as usize;
         let sample_rate = decoder.sample_rate();
         if channels == 0 || sample_rate == 0 {

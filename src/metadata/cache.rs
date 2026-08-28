@@ -15,7 +15,6 @@ pub struct CachedMetadata {
     pub fields: TagFields,
 }
 
-/// Disk-backed caches loaded off the UI thread during startup.
 #[derive(Debug, Clone, Default)]
 pub struct PersistedCaches {
     pub dirs: HashMap<PathBuf, Vec<PathBuf>>,

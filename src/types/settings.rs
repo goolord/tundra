@@ -1,9 +1,19 @@
-use super::common::{modal_button_style, truncate_path, Message};
-use crate::path_util::{cache_key, canonical_path};
+use super::common::{
+    modal_button_style, modal_error_style, modal_panel_style, modal_shell, truncate_path, Message,
+};
+use crate::path_util::{
+    cache_file, cache_key, canonical_path, config_file, read_bincode_or_default, write_bincode,
+};
 use iced::widget::{button, container, row, scrollable, text, Column, Space};
-use iced::{Alignment, Border, Color, Element, Length, Shadow, Theme};
+use iced::{Alignment, Border, Element, Length, Theme};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+
+pub const FILE_OUTSIDE_ALLOWED: &str = "File must be inside allowed directories.";
+pub const FOLDER_OUTSIDE_ALLOWED: &str = "Folder must be inside allowed directories.";
+pub const UNSUPPORTED_AUDIO: &str = "Choose a supported audio file.";
+pub const SELECT_AUDIO_FIRST: &str = "Select an audio file first.";
+pub const NO_AUDIO_SELECTED: &str = "No audio file selected";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AllowedDirectories {
@@ -22,36 +32,14 @@ impl AllowedDirectories {
         let Some(path) = settings_file_path() else {
             return Self::default();
         };
-        match std::fs::read(&path) {
-            Ok(bytes) => match bincode::deserialize(&bytes) {
-                Ok(settings) => settings,
-                Err(err) => {
-                    eprintln!(
-                        "Failed to deserialize allowed directories ({}): {err}",
-                        path.display()
-                    );
-                    Self::default()
-                }
-            },
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Self::default(),
-            Err(err) => {
-                eprintln!("Failed to read allowed directories ({}): {err}", path.display());
-                Self::default()
-            }
-        }
+        read_bincode_or_default(&path, "allowed directories")
     }
 
     pub fn persist(&self) {
         let Some(path) = settings_file_path() else {
             return;
         };
-        let Ok(bytes) = bincode::serialize(self) else {
-            eprintln!("Failed to serialize allowed directories");
-            return;
-        };
-        if let Err(err) = crate::path_util::write_atomic(&path, &bytes) {
-            eprintln!("Failed to write allowed directories: {err}");
-        }
+        write_bincode(&path, self, "allowed directories");
     }
 
     pub fn is_empty(&self) -> bool {
@@ -80,7 +68,9 @@ impl AllowedDirectories {
 
     pub fn contains_path(&self, path: &Path) -> bool {
         let path = try_resolve_path(path).unwrap_or_else(|| path.to_path_buf());
-        self.roots.iter().any(|root| path.starts_with(root))
+        self.roots
+            .iter()
+            .any(|root| crate::path_util::is_under(&path, root))
     }
 
     pub fn startup_directory(&self) -> Option<PathBuf> {
@@ -98,36 +88,14 @@ impl FavoritesStore {
         let Some(path) = favorites_file_path() else {
             return Self::default();
         };
-        match std::fs::read(&path) {
-            Ok(bytes) => match bincode::deserialize(&bytes) {
-                Ok(store) => store,
-                Err(err) => {
-                    eprintln!(
-                        "Failed to deserialize favorites ({}): {err}",
-                        path.display()
-                    );
-                    Self::default()
-                }
-            },
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Self::default(),
-            Err(err) => {
-                eprintln!("Failed to read favorites ({}): {err}", path.display());
-                Self::default()
-            }
-        }
+        read_bincode_or_default(&path, "favorites")
     }
 
     pub fn persist(&self) {
         let Some(path) = favorites_file_path() else {
             return;
         };
-        let Ok(bytes) = bincode::serialize(self) else {
-            eprintln!("Failed to serialize favorites");
-            return;
-        };
-        if let Err(err) = crate::path_util::write_atomic(&path, &bytes) {
-            eprintln!("Failed to write favorites: {err}");
-        }
+        write_bincode(&path, self, "favorites");
     }
 
     pub fn paths(&self) -> &[PathBuf] {
@@ -145,7 +113,6 @@ impl FavoritesStore {
         self.paths.iter().any(|stored| *stored == key)
     }
 
-    /// Returns `true` when the path was added, `false` when removed.
     pub fn toggle(&mut self, path: PathBuf) -> bool {
         let key = Self::stored_key(&path);
         if let Some(index) = self.paths.iter().position(|stored| *stored == key) {
@@ -167,11 +134,7 @@ impl FavoritesStore {
 }
 
 fn favorites_file_path() -> Option<PathBuf> {
-    let mut config_dir = dirs::config_dir()?;
-    config_dir.push("tundra");
-    let _ = std::fs::create_dir_all(&config_dir);
-    config_dir.push("favorites.bin");
-    Some(config_dir)
+    config_file("favorites.bin")
 }
 
 fn try_resolve_path(path: &Path) -> Option<PathBuf> {
@@ -183,23 +146,18 @@ fn settings_file_path() -> Option<PathBuf> {
     if let Some(path) = test_settings_path() {
         return Some(path);
     }
-    let mut config_dir = dirs::config_dir()?;
-    config_dir.push("tundra");
-    let _ = std::fs::create_dir_all(&config_dir);
-    config_dir.push("allowed_directories.bin");
-    migrate_settings_from_cache(&config_dir);
-    Some(config_dir)
+    let path = config_file("allowed_directories.bin")?;
+    migrate_settings_from_cache(&path);
+    Some(path)
 }
 
 fn migrate_settings_from_cache(config_path: &Path) {
     if config_path.exists() {
         return;
     }
-    let Some(mut cache_path) = dirs::cache_dir() else {
+    let Some(cache_path) = cache_file("allowed_directories.bin") else {
         return;
     };
-    cache_path.push("tundra");
-    cache_path.push("allowed_directories.bin");
     if cache_path.exists() && std::fs::copy(&cache_path, config_path).is_ok() {
         let _ = std::fs::remove_file(cache_path);
     }
@@ -273,18 +231,7 @@ pub fn settings_view(
             )
             .padding([8, 10])
             .width(Length::Fill)
-            .style(|theme: &Theme| {
-                let palette = theme.extended_palette();
-                container::Style {
-                    background: Some(palette.background.weak.color.scale_alpha(0.35).into()),
-                    border: Border {
-                        radius: 0.0.into(),
-                        width: 1.0,
-                        color: palette.background.strong.color.scale_alpha(0.28),
-                    },
-                    ..Default::default()
-                }
-            }),
+            .style(modal_panel_style),
         );
     } else {
         let rows: Vec<Element<Message>> = allowed.iter().cloned().map(directory_row).collect();
@@ -299,9 +246,7 @@ pub fn settings_view(
         body = body.push(
             text(error)
                 .size(12)
-                .style(|_theme: &Theme| iced::widget::text::Style {
-                    color: Some(Color::from_rgb(0.95, 0.62, 0.62)),
-                }),
+                .style(modal_error_style),
         );
     }
 
@@ -323,26 +268,7 @@ pub fn settings_view(
         .width(Length::Fill),
     );
 
-    container(body.padding(18))
-        .width(Length::Fixed(520.0))
-        .style(|theme: &Theme| {
-            let palette = theme.extended_palette();
-            container::Style {
-                background: Some(palette.background.base.color.into()),
-                border: Border {
-                    width: 1.0,
-                    color: palette.background.strong.color,
-                    radius: 0.0.into(),
-                },
-                shadow: Shadow {
-                    color: palette.background.base.text.scale_alpha(0.25),
-                    offset: iced::Vector::new(0.0, 4.0),
-                    blur_radius: 16.0,
-                },
-                ..Default::default()
-            }
-        })
-        .into()
+    modal_shell(body.padding(18), 520.0).into()
 }
 
 #[cfg(test)]

@@ -82,13 +82,8 @@ pub fn build_peaks(path: &Path, sample_count_hint: usize) -> WaveformPeaks {
         return WaveformPeaks::new(0);
     }
 
-    let file = match File::open(path) {
-        Ok(file) => file,
-        Err(_) => return WaveformPeaks::new(0),
-    };
-    let decoder = match Decoder::try_from(file) {
-        Ok(decoder) => decoder,
-        Err(_) => return WaveformPeaks::new(0),
+    let Some(decoder) = open_decoder(path) else {
+        return WaveformPeaks::new(0);
     };
 
     let channels = decoder.channels().max(1) as usize;
@@ -149,17 +144,16 @@ fn skipped_peaks(sample_count_hint: usize) -> WaveformPeaks {
     }
 }
 
+fn open_decoder(path: &Path) -> Option<Decoder<std::io::BufReader<File>>> {
+    Decoder::try_from(File::open(path).ok()?).ok()
+}
+
 fn count_frames(path: &Path) -> usize {
     if file_too_large_for_peaks(path) {
         return 0;
     }
-    let file = match File::open(path) {
-        Ok(file) => file,
-        Err(_) => return 0,
-    };
-    let decoder = match Decoder::try_from(file) {
-        Ok(decoder) => decoder,
-        Err(_) => return 0,
+    let Some(decoder) = open_decoder(path) else {
+        return 0;
     };
     let channels = decoder.channels().max(1) as usize;
     let mut frame = 0usize;
