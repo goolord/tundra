@@ -354,12 +354,18 @@ fn tag_match_score(
     path: &Path,
     filters: &[TagFilter],
     lookup: &mut MetadataLookup,
-    allow_disk_read: bool,
+    allow_disk: bool,
 ) -> i64 {
     if filters.is_empty() || !is_audio(path) {
         return 0;
     }
-    let fields = lookup.tag_fields_for_search(path, allow_disk_read);
+    let fields = if let Some(indexed) = lookup.indexed_tag_fields(path) {
+        indexed.clone()
+    } else if allow_disk && path.exists() {
+        lookup.tag_fields(path)
+    } else {
+        return 0;
+    };
     let mut scores = Vec::with_capacity(filters.len());
     for filter in filters {
         let Some(score) = tag_field_score(matcher, &fields, filter) else {
@@ -374,20 +380,13 @@ pub(crate) fn collect_tag_matches(
     paths: &[PathBuf],
     tag_filters: &[TagFilter],
     metadata: Arc<HashMap<PathBuf, CachedMetadata>>,
-    allow_disk_read: bool,
 ) -> SearchResult {
     let tag_matcher = tag_search_matcher();
     let mut lookup = MetadataLookup::new(metadata);
     let mut matches = Vec::new();
 
     for path in paths.iter().filter(|path| is_audio(path)) {
-        let tag_score = tag_match_score(
-            &tag_matcher,
-            path,
-            tag_filters,
-            &mut lookup,
-            allow_disk_read,
-        );
+        let tag_score = tag_match_score(&tag_matcher, path, tag_filters, &mut lookup, false);
         if tag_score > 0 {
             matches.push(SearchRank::for_tag_search(path.clone(), tag_score));
         }
@@ -403,22 +402,12 @@ pub(crate) fn collect_tag_matches(
 }
 
 #[cfg(test)]
-pub fn tag_search_paths(
+pub(crate) fn tag_search_paths(
     paths: &[PathBuf],
     tag_filters: &[TagFilter],
     metadata: Arc<HashMap<PathBuf, CachedMetadata>>,
 ) -> SearchResult {
-    collect_tag_matches(paths, tag_filters, metadata, true)
-}
-
-/// Tag-only search over the metadata index. Unindexed files are skipped so a
-/// library-wide `instrument:` query does not re-parse every audio file.
-pub fn tag_search_cached_paths(
-    paths: &[PathBuf],
-    tag_filters: &[TagFilter],
-    metadata: Arc<HashMap<PathBuf, CachedMetadata>>,
-) -> SearchResult {
-    collect_tag_matches(paths, tag_filters, metadata, false)
+    collect_tag_matches(paths, tag_filters, metadata)
 }
 
 pub fn search_paths(
@@ -432,7 +421,7 @@ pub fn search_paths(
     let trimmed = file_query.trim();
     let tag_active = !tag_filters.is_empty();
     if tag_active && trimmed.is_empty() {
-        return collect_tag_matches(paths, tag_filters, metadata, true);
+        return collect_tag_matches(paths, tag_filters, metadata);
     }
 
     collect_file_matches(

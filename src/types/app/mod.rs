@@ -95,8 +95,7 @@ pub struct App {
     controls_hovered: bool,
     file_list_hovered: bool,
     file_list_focused: bool,
-    search_focused: bool,
-    tag_search_focused: bool,
+    filter_focus: FilterFocus,
     sidebar_width: f32,
     sidebar_resize: Option<SidebarResize>,
     title_bar: TitleBarInteraction,
@@ -106,6 +105,7 @@ pub struct App {
     native_drag: NativeDrag,
     drag_ready: bool,
     caches_ready: bool,
+    search_pending: bool,
     last_cursor: Point,
     modifiers: Modifiers,
 }
@@ -245,8 +245,7 @@ impl Default for App {
             controls_hovered: false,
             file_list_hovered: false,
             file_list_focused: false,
-            search_focused: false,
-            tag_search_focused: false,
+            filter_focus: FilterFocus::None,
             sidebar_width: load_sidebar_width(),
             sidebar_resize: None,
             title_bar: TitleBarInteraction {
@@ -261,6 +260,7 @@ impl Default for App {
             native_drag: NativeDrag::new(),
             drag_ready: cfg!(any(windows, target_os = "macos")),
             caches_ready: false,
+            search_pending: false,
             last_cursor: Point::ORIGIN,
             modifiers: Modifiers::default(),
         }
@@ -308,8 +308,8 @@ impl App {
             && !state.auto_tag_open
             && !state.tag_editor_open
             && !state.bulk_auto_tag.is_open()
-            && !state.search_focused
-            && (!state.tag_search_focused || state.file_list_focused)
+            && state.filter_focus != FilterFocus::FileSearch
+            && (state.filter_focus != FilterFocus::TagSearch || state.file_list_focused)
         {
             event::listen_with(|event, status, _window| {
                 if status != event::Status::Ignored {
@@ -434,8 +434,8 @@ impl App {
             Subscription::none()
         };
 
-        let filter_tab_keys = if state.search_focused
-            && !(state.tag_search_focused
+        let filter_tab_keys = if state.filter_focus != FilterFocus::None
+            && !(state.filter_focus == FilterFocus::TagSearch
                 && tag_search_can_autocomplete(&state.file_selector.tag_search_value))
         {
             event::listen_with(|event, status, _window| {
@@ -452,40 +452,10 @@ impl App {
                         && !modifiers.control()
                         && !modifiers.logo()
                         && !modifiers.alt()
-                        && !modifiers.shift()
                         && key.as_ref()
                             == Key::Named(iced::keyboard::key::Named::Tab) =>
                     {
-                        Some(Message::TagSearchFocused(true))
-                    }
-                    _ => None,
-                }
-            })
-        } else if state.tag_search_focused
-            && !tag_search_can_autocomplete(&state.file_selector.tag_search_value)
-        {
-            event::listen_with(|event, status, _window| {
-                if status != event::Status::Ignored {
-                    return None;
-                }
-                match event {
-                    Event::Keyboard(iced::keyboard::Event::KeyPressed {
-                        key,
-                        modifiers,
-                        repeat,
-                        ..
-                    }) if !repeat
-                        && !modifiers.control()
-                        && !modifiers.logo()
-                        && !modifiers.alt()
-                        && key.as_ref()
-                            == Key::Named(iced::keyboard::key::Named::Tab) =>
-                    {
-                        if modifiers.shift() {
-                            Some(Message::SearchFocused(true))
-                        } else {
-                            Some(Message::TagSearchFocused(false))
-                        }
+                        Some(Message::FilterTab(modifiers.shift()))
                     }
                     _ => None,
                 }
@@ -494,7 +464,7 @@ impl App {
             Subscription::none()
         };
 
-        let tag_autocomplete_keys = if state.tag_search_focused
+        let tag_autocomplete_keys = if state.filter_focus == FilterFocus::TagSearch
             && tag_search_can_autocomplete(&state.file_selector.tag_search_value)
         {
             event::listen_with(|event, status, _window| {
@@ -577,6 +547,7 @@ impl App {
             return Task::none();
         }
         if let Some(field) = tag_field_best_match(&input) {
+            self.filter_focus = FilterFocus::TagSearch;
             self.file_selector.tag_search_error = None;
             self.file_selector.tag_search_value = format!("{}:", field.as_str());
             operation::focus(Id::new(TAG_SEARCH_INPUT_ID))
@@ -586,17 +557,21 @@ impl App {
     }
 
     fn release_filter_focus(&mut self) -> Task<Message> {
-        self.search_focused = false;
-        self.tag_search_focused = false;
+        self.filter_focus = FilterFocus::None;
         operation::focus(Id::new(FILE_LIST_SCROLL_ID))
     }
 
     fn open_path(&mut self, path: &Path) -> Task<Message> {
-        let path = if path.exists() {
-            crate::path_util::canonical_path(path).unwrap_or_else(|_| path.to_path_buf())
-        } else {
-            crate::path_util::normalize_path(path.to_path_buf())
-        };
+        let known: Vec<PathBuf> = self
+            .dir_cache
+            .share()
+            .read()
+            .unwrap()
+            .values()
+            .flatten()
+            .cloned()
+            .collect();
+        let path = crate::path_util::resolve_open_path(path, known.iter().map(|p| p.as_path()));
         let defocus = self.release_filter_focus();
         if path.is_dir() {
             return Task::batch([defocus, self.navigate_directory(path)]);
@@ -609,11 +584,9 @@ impl App {
 
     fn open_audio_at(&mut self, path: PathBuf) -> Task<Message> {
         if let Some(parent) = path.parent().filter(|dir| dir.is_dir()) {
-            self.search_focused = false;
-            self.tag_search_focused = false;
+            self.filter_focus = FilterFocus::None;
             if !self.file_selector.favorites_only {
                 self.file_selector.reload_directory(parent);
-                self.search_thread.abort();
             }
         }
         self.play_audio(&path)
@@ -636,8 +609,7 @@ impl App {
     }
 
     fn navigate_directory(&mut self, dir: PathBuf) -> Task<Message> {
-        self.search_focused = false;
-        self.tag_search_focused = false;
+        self.filter_focus = FilterFocus::None;
         self.file_selector.reload_directory(&dir);
         if self.file_selector.favorites_only {
             self.reset_file_list();
@@ -945,9 +917,13 @@ impl App {
             return Task::none();
         }
 
+        // `StartupCachesReady` re-runs the active search, so bailing here only defers it.
+        // Running early would race `warm_allowed_caches` into walking the same roots twice.
         if !self.caches_ready {
+            self.search_pending = true;
             return Task::none();
         }
+        self.search_pending = false;
 
         let debounce_ms = if tag_only {
             TAG_SEARCH_DEBOUNCE_MS
@@ -1077,8 +1053,7 @@ impl App {
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::FileListSelect { index, shift, control } => {
-                self.search_focused = false;
-                self.tag_search_focused = false;
+                self.filter_focus = FilterFocus::None;
                 self.file_list_focused = true;
                 self.file_selector.select_row(index, shift, control);
                 if shift || control {
@@ -1314,8 +1289,8 @@ impl App {
             Message::ChangeDirectory(parent_dir) => self.navigate_directory(parent_dir),
 
             Message::Search(search_str) => {
-                self.search_focused = true;
-                self.tag_search_focused = false;
+                self.filter_focus = FilterFocus::FileSearch;
+                self.file_list_focused = false;
                 self.file_selector.search_value = search_str;
                 Task::batch([
                     self.start_file_search(),
@@ -1756,27 +1731,45 @@ impl App {
             }
 
             Message::SearchFocused(focused) => {
-                self.search_focused = focused;
                 if focused {
-                    self.tag_search_focused = false;
+                    self.filter_focus = FilterFocus::FileSearch;
                     self.file_list_focused = false;
                     return operation::focus(Id::new(FILE_SEARCH_INPUT_ID));
                 }
                 Task::none()
             }
 
+            // Tab walks file search -> tag search -> file list; Shift+Tab walks back up.
+            Message::FilterTab(shift) => {
+                operation::is_focused(Id::new(TAG_SEARCH_INPUT_ID)).map(move |on_tag| {
+                    match (on_tag, shift) {
+                        (false, false) => Message::TagSearchFocused(true),
+                        (true, false) => Message::TagSearchFocused(false),
+                        (true, true) => Message::SearchFocused(true),
+                        // Already at the top of the cycle; hold focus rather than fall through.
+                        (false, true) => Message::SearchFocused(true),
+                    }
+                })
+            }
+
             Message::TagSearchInput(input) => {
-                self.tag_search_focused = true;
-                self.search_focused = false;
+                self.filter_focus = FilterFocus::TagSearch;
+                self.file_list_focused = false;
                 self.file_selector.tag_search_error = None;
                 self.file_selector.tag_search_value = input;
                 operation::focus(Id::new(TAG_SEARCH_INPUT_ID))
             }
 
             Message::TagSearchSubmit => {
-                self.tag_search_focused = true;
-                self.search_focused = false;
+                self.filter_focus = FilterFocus::TagSearch;
+                self.file_list_focused = false;
                 let input = self.file_selector.tag_search_value.clone();
+                if input.trim().is_empty() {
+                    if self.file_selector.tag_filters.is_empty() {
+                        return operation::focus(Id::new(TAG_SEARCH_INPUT_ID));
+                    }
+                    return self.start_file_search();
+                }
                 if !input.contains(':') {
                     let trimmed = input.trim();
                     if !trimmed.is_empty() {
@@ -1807,19 +1800,18 @@ impl App {
             }
 
             Message::TagSearchAutocomplete => {
-                self.tag_search_focused = true;
-                self.search_focused = false;
+                self.filter_focus = FilterFocus::TagSearch;
                 self.autocomplete_tag_field()
             }
 
             Message::TagSearchFocused(focused) => {
-                self.tag_search_focused = focused;
                 if focused {
-                    self.search_focused = false;
+                    self.filter_focus = FilterFocus::TagSearch;
                     self.file_list_focused = false;
                     return operation::focus(Id::new(TAG_SEARCH_INPUT_ID));
                 }
-                Task::none()
+                // FilterTab(tag -> list) is the only sender; leave the file list focused.
+                self.release_filter_focus()
             }
 
             Message::TagFilterRemove(field) => {
@@ -1830,8 +1822,7 @@ impl App {
             }
 
             Message::TagSuggestionSelect(field) => {
-                self.tag_search_focused = true;
-                self.search_focused = false;
+                self.filter_focus = FilterFocus::TagSearch;
                 self.file_selector.tag_search_error = None;
                 self.file_selector.tag_search_value = format!("{}:", field.as_str());
                 operation::focus(Id::new(TAG_SEARCH_INPUT_ID))
@@ -1855,6 +1846,7 @@ impl App {
                     if cache_updated {
                         self.dir_cache.persist();
                     }
+                    self.metadata_cache.merge(result.new_metadata);
                     // Search paths are pre-filtered to directories and audio files,
                     // so dir-ness follows from the extension; avoids one stat per result.
                     self.file_selector.file_list = result
@@ -1870,7 +1862,6 @@ impl App {
                         .collect();
                     self.file_selector.list_error = None;
                     self.file_selector.clear_selection();
-                    self.metadata_cache.merge(result.new_metadata);
                 }
                 Task::none()
             }
@@ -1910,7 +1901,12 @@ impl App {
                 self.metadata_cache = MetadataCache::from_map(caches.metadata);
                 self.caches_ready = true;
                 let warm = self.warm_allowed_caches();
-                let search = self.refresh_search_if_active();
+                let search = if self.search_pending {
+                    self.search_pending = false;
+                    self.start_file_search()
+                } else {
+                    self.refresh_search_if_active()
+                };
                 Task::batch([
                     warm,
                     search,
@@ -2047,10 +2043,6 @@ impl App {
 
             Message::WaveformHoverChanged(hovered) => {
                 self.waveform_hovered = hovered;
-                if hovered {
-                    self.search_focused = false;
-                    self.tag_search_focused = false;
-                }
                 Task::none()
             }
 
@@ -2061,10 +2053,7 @@ impl App {
 
             Message::FileListHoverChanged(hovered) => {
                 self.file_list_hovered = hovered;
-                if hovered {
-                    self.search_focused = false;
-                    self.tag_search_focused = false;
-                } else {
+                if !hovered {
                     self.file_list_focused = false;
                 }
                 Task::none()
@@ -2098,8 +2087,7 @@ impl App {
                 from_file_list,
             } => {
                 if from_file_list {
-                    self.search_focused = false;
-                    self.tag_search_focused = false;
+                    self.filter_focus = FilterFocus::None;
                     self.file_list_focused = true;
                 }
                 if from_file_list && self.modifiers.shift() {
@@ -2283,7 +2271,7 @@ impl App {
             }
 
             Message::FileRowHover(index) => {
-                self.search_focused = false;
+                self.filter_focus = FilterFocus::None;
                 self.file_selector.hovered_file = Some(index);
                 Task::none()
             }
@@ -2803,7 +2791,12 @@ impl App {
 
         let file_selector = container(
             self.file_selector
-                .view(self.search_enabled(), &self.favorites, self.modifiers),
+                .view(
+                    self.search_enabled(),
+                    &self.favorites,
+                    self.modifiers,
+                    self.filter_focus,
+                ),
         )
             .width(Length::Fixed(self.sidebar_width))
             .height(Length::Fill)

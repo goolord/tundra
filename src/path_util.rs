@@ -41,6 +41,57 @@ pub fn cache_lookup_keys(path: &Path) -> Vec<PathBuf> {
     }
 }
 
+/// Turn a cache key or stale spelling into a path the filesystem will open.
+///
+/// Metadata and search caches store lowercase `cache_key` paths. Those are fine for
+/// lookups, but playback needs the spelling the directory walk recorded (or whatever
+/// variant actually exists on disk).
+pub fn resolve_open_path<'a>(
+    path: &Path,
+    known_paths: impl IntoIterator<Item = &'a Path>,
+) -> PathBuf {
+    let path = repair_windows_drive_path(path);
+
+    for key in cache_lookup_keys(&path) {
+        if key.exists() {
+            return canonical_path(&key).unwrap_or_else(|_| normalize_path(key));
+        }
+    }
+
+    let target = cache_key(path.clone());
+    for candidate in known_paths {
+        if cache_key(candidate.to_path_buf()) == target && candidate.exists() {
+            return canonical_path(candidate).unwrap_or_else(|_| candidate.to_path_buf());
+        }
+    }
+
+    normalize_path(path)
+}
+
+/// Windows paths missing the separator after the drive letter (`F:Samples\...`) fail
+/// to open. Some cached spellings also carry a stray `|` there from older data.
+#[cfg(windows)]
+fn repair_windows_drive_path(path: &Path) -> PathBuf {
+    let rendered = path.to_string_lossy();
+    let bytes = rendered.as_bytes();
+    if rendered.len() <= 2 || bytes[1] != b':' {
+        return path.to_path_buf();
+    }
+    if rendered.len() == 2 {
+        return path.to_path_buf();
+    }
+    match bytes[2] {
+        b'\\' | b'/' => path.to_path_buf(),
+        b'|' => PathBuf::from(format!(r"{}\{}", &rendered[..2], &rendered[3..])),
+        _ => PathBuf::from(format!(r"{}\{}", &rendered[..2], &rendered[2..])),
+    }
+}
+
+#[cfg(not(windows))]
+fn repair_windows_drive_path(path: &Path) -> PathBuf {
+    path.to_path_buf()
+}
+
 /// True when `path` is `root` or a descendant, ignoring `\\?\` and case.
 pub fn is_under(path: &Path, root: &Path) -> bool {
     let path = cache_key(path.to_path_buf());
@@ -548,6 +599,33 @@ mod tests {
         let keys = cache_lookup_keys(&path);
         assert!(keys.contains(&path));
         assert!(keys.contains(&cache_key(path)));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn repair_windows_drive_path_fixes_missing_separator_and_pipe() {
+        assert_eq!(
+            repair_windows_drive_path(Path::new(r"F:Samples\kick.wav")),
+            PathBuf::from(r"F:\Samples\kick.wav")
+        );
+        assert_eq!(
+            repair_windows_drive_path(Path::new(r"F:|Samples\kick.wav")),
+            PathBuf::from(r"F:\Samples\kick.wav")
+        );
+    }
+
+    #[test]
+    fn resolve_open_path_prefers_a_walked_spelling() {
+        let dir = ScratchDir::new("resolve-open-path");
+        let nested = dir.path().join("Drums");
+        fs::create_dir_all(&nested).unwrap();
+        let audio = nested.join("kick.wav");
+        fs::write(&audio, b"RIFF").unwrap();
+
+        let cache_key_path = cache_key(audio.clone());
+        let resolved = resolve_open_path(&cache_key_path, [audio.as_path()]);
+        assert!(resolved.exists());
+        assert_eq!(cache_key(resolved), cache_key_path);
     }
 
     #[test]

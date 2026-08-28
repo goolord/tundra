@@ -881,8 +881,22 @@ impl Player {
 
     pub fn seek(&mut self, p: f64) {
         let resume = self.controls.is_playing.load(Ordering::SeqCst);
+        let p = p.clamp(0.0, 1.0);
         if let Some(state) = &mut self.controls.playback_progress {
             state.progress = p;
+        }
+        // Move the shared position now instead of waiting for the audio thread to drain the
+        // command queue. The playhead reads this atomic directly, so leaving it stale would snap
+        // the head back to the old spot for a frame or two before the seek lands. Only safe once
+        // the audio thread exists; otherwise the command sits in `pending_commands` and the head
+        // would advertise a frame playback never reaches.
+        if self.audio_ready()
+            && let Some(position) = &self.controls.playback_position
+        {
+            let total = position.total_frames();
+            if total > 0 {
+                position.set_frame((p * total as f64).round() as u64);
+            }
         }
         if let Some(waveform) = &mut self.waveform {
             waveform.set_scrub_progress(None);
@@ -1254,6 +1268,46 @@ mod tests {
         let position = PlaybackPosition::new(44100);
         position.set_frame(position.total_frames());
         assert_eq!(position.progress(), 1.0);
+    }
+
+    fn player_with_position(total_frames: u64) -> (Player, sync::Arc<PlaybackPosition>) {
+        let mut player = Player::new(1.0, false);
+        let position = PlaybackPosition::new(total_frames);
+        player.controls.playback_position = Some(sync::Arc::clone(&position));
+        player.controls.playback_progress = Some(PlaybackProgress { progress: 0.0 });
+        (player, position)
+    }
+
+    #[test]
+    fn seek_moves_the_shared_position_before_the_audio_thread_runs() {
+        let (mut player, position) = player_with_position(1_000);
+        // Nothing drains the receiver, so this stands in for the gap between releasing the
+        // scrub and the audio thread handling `Seek`.
+        let (tx, _rx) = futures::channel::mpsc::unbounded();
+        player.cmd_sender = Some(tx);
+        position.set_frame(900);
+
+        player.seek(0.25);
+
+        assert!(
+            (position.progress() - 0.25).abs() < 1e-9,
+            "playhead should already read the seek target, got {}",
+            position.progress()
+        );
+    }
+
+    #[test]
+    fn seek_leaves_the_position_alone_until_a_worker_is_attached() {
+        let (mut player, position) = player_with_position(1_000);
+        position.set_frame(900);
+
+        player.seek(0.25);
+
+        assert_eq!(
+            position.progress(),
+            0.9,
+            "a queued seek must not advertise a frame playback never reached"
+        );
     }
 
     #[test]
