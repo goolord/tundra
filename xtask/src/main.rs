@@ -4,17 +4,17 @@ use std::path::PathBuf;
 use std::process::{Command, ExitStatus, Stdio};
 use std::time::Duration;
 
-const UV_PYTHON: &str = if cfg!(windows) { "3.12" } else { "3.14" };
+const UV_PYTHON: &str = "3.12";
 const MODEL_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
 
 const MODELS: [(&str, &str); 3] = [
     (
-        "discogs-effnet-bs64-1.pb",
-        "https://essentia.upf.edu/models/feature-extractors/discogs-effnet/discogs-effnet-bs64-1.pb",
+        "discogs-effnet-bsdynamic-1.onnx",
+        "https://essentia.upf.edu/models/feature-extractors/discogs-effnet/discogs-effnet-bsdynamic-1.onnx",
     ),
     (
-        "mtg_jamendo_instrument-discogs-effnet-1.pb",
-        "https://essentia.upf.edu/models/classification-heads/mtg_jamendo_instrument/mtg_jamendo_instrument-discogs-effnet-1.pb",
+        "mtg_jamendo_instrument-discogs-effnet-1.onnx",
+        "https://essentia.upf.edu/models/classification-heads/mtg_jamendo_instrument/mtg_jamendo_instrument-discogs-effnet-1.onnx",
     ),
     (
         "mtg_jamendo_instrument-discogs-effnet-1.json",
@@ -36,15 +36,15 @@ enum Commands {
         /// Skip `git lfs pull`
         #[arg(long)]
         skip_lfs: bool,
-        /// Skip Essentia DL Python env (Python 3.14 + `--group dl`)
+        /// Skip ONNX DL Python env (`--group dl`)
         #[arg(long)]
         skip_dl: bool,
     },
-    /// Download bundled Essentia models into `resources/models/`.
+    /// Download bundled ONNX models into `resources/models/`.
     Models,
     /// Install Python classifier dependencies with uv.
     Classifiers {
-        /// Skip Essentia DL Python env (Python 3.14 + `--group dl`)
+        /// Skip ONNX DL Python env (`--group dl`)
         #[arg(long)]
         skip_dl: bool,
     },
@@ -265,18 +265,14 @@ fn setup_classifiers(skip_dl: bool) -> Result<()> {
         &format!("uv python install {UV_PYTHON}"),
     )?;
 
-    if skip_dl || cfg!(windows) {
+    if skip_dl {
         run_command(
             Command::new("uv")
                 .args(["sync", "--python", UV_PYTHON])
                 .current_dir(&scripts),
             "uv sync (librosa tier)",
         )?;
-        if cfg!(windows) {
-            println!("classifiers: skipped Essentia DL env (TensorFlow tier unavailable on Windows)");
-        } else {
-            println!("classifiers: skipped Essentia DL env (--skip-dl)");
-        }
+        println!("classifiers: skipped ONNX DL env (--skip-dl)");
         return Ok(());
     }
 

@@ -15,7 +15,7 @@ struct WorkerReady {
     ready: bool,
     error: Option<String>,
     #[serde(default)]
-    tensorflow: bool,
+    onnx: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -142,9 +142,9 @@ impl Worker {
                         parsed.error.unwrap_or_else(|| "unknown worker error".into()),
                     ));
                 }
-                if !parsed.tensorflow {
+                if !parsed.onnx {
                     eprintln!(
-                        "classifier worker: TensorFlow unavailable; grey-zone files use librosa tier 2"
+                        "classifier worker: ONNX unavailable; grey-zone files use librosa tier 2"
                     );
                 }
                 return Ok(());

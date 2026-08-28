@@ -2,7 +2,11 @@
 """Tier 2 classification library — models loaded once, reused by CLI and worker.
 
 Grey-zone tier 1 passes ZCR from Rust (`src/auto_tag/tier1.rs`, 22050 Hz decode).
-Tier 2 audio analysis here uses 16 kHz (Essentia/librosa).
+Tier 2 audio analysis here uses 16 kHz (librosa mel + ONNX).
+
+Uses MTG's official ONNX exports: ``discogs-effnet-bsdynamic-1.onnx`` (dynamic
+batch; same EffNet family as the retired ``discogs-effnet-bs64-1.pb`` TensorFlow
+graph) plus ``mtg_jamendo_instrument-discogs-effnet-1.onnx``.
 """
 
 from __future__ import annotations
@@ -10,15 +14,26 @@ from __future__ import annotations
 import json
 import os
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
+
+import numpy as np
 
 SAMPLE_RATE = 16000
 ANALYSIS_SECONDS = 30.0
 
-EFFNET_MODEL = "discogs-effnet-bs64-1.pb"
-INSTRUMENT_MODEL = "mtg_jamendo_instrument-discogs-effnet-1.pb"
+# Official MTG ONNX weights (see essentia.upf.edu/models).
+EFFNET_MODEL = "discogs-effnet-bsdynamic-1.onnx"
+INSTRUMENT_MODEL = "mtg_jamendo_instrument-discogs-effnet-1.onnx"
 INSTRUMENT_LABELS = "mtg_jamendo_instrument-discogs-effnet-1.json"
+
+PATCH_SIZE = 128
+PATCH_HOP = 62
+MEL_BINS = 96
+FRAME_SIZE = 512
+HOP_LENGTH = 256
+EMBEDDING_DIM = 1280
 
 JAMENDO_CLASS_MAP = {
     "drums": "Kick",
@@ -63,23 +78,7 @@ JAMENDO_CLASS_MAP = {
     "orchestra": "Orchestra",
 }
 
-_TENSORFLOW_MODELS: dict[str, Any] | None = None
-_ESSENTIA_LOGS_CONFIGURED = False
-
-
-def _import_essentia():
-    """Import essentia.standard with INFO logs suppressed."""
-    global _ESSENTIA_LOGS_CONFIGURED
-    configure_tensorflow_runtime()
-    import essentia
-
-    if not _ESSENTIA_LOGS_CONFIGURED:
-        essentia.log.infoActive = False
-        _ESSENTIA_LOGS_CONFIGURED = True
-
-    import essentia.standard as es
-
-    return es
+_ONNX_MODELS: dict[str, Any] | None = None
 
 
 def map_jamendo_class(raw_class: str) -> str:
@@ -90,31 +89,27 @@ def map_jamendo_class(raw_class: str) -> str:
     return cleaned[:1].upper() + cleaned[1:] if cleaned else "One-Shot"
 
 
+def _env_truthy(*names: str) -> bool:
+    for name in names:
+        if os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}:
+            return True
+    return False
+
+
 def dl_enabled() -> bool:
-    if sys.platform == "win32":
-        return False
-    return os.environ.get("TUNDRA_ESSENTIA_DL", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-
-
-def configure_tensorflow_runtime() -> None:
-    os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
-    os.environ.setdefault("CUDA_VISIBLE_DEVICES", "-1")
+    return _env_truthy("TUNDRA_ONNX_DL", "TUNDRA_ESSENTIA_DL")
 
 
 def bundled_model_dir() -> Path | None:
     candidates: list[Path] = []
-    if env := os.environ.get("ESSENTIA_MODELS"):
-        candidates.append(Path(env))
+    for env_name in ("TUNDRA_MODELS", "ESSENTIA_MODELS"):
+        if env := os.environ.get(env_name):
+            candidates.append(Path(env))
     script_dir = Path(__file__).resolve().parent
     project = script_dir.parent
     candidates.append(project / "resources" / "models")
     target_root = project / "target"
-    for profile in ("debug", "release"):
+    for profile in ("debug", "release", "release-fast"):
         candidates.append(target_root / profile / "models")
         if target_root.is_dir():
             for child in target_root.iterdir():
@@ -133,67 +128,135 @@ def required_models_present(root: Path) -> bool:
     )
 
 
-def load_audio_essentia(path: str):
-    es = _import_essentia()
+def load_audio(path: str):
+    import librosa
 
-    loader = es.MonoLoader(filename=path, sampleRate=SAMPLE_RATE, downmix="mix")
-    audio = loader()
+    audio, _sample_rate = librosa.load(
+        path,
+        sr=SAMPLE_RATE,
+        mono=True,
+        duration=ANALYSIS_SECONDS,
+    )
     if audio.size == 0:
-        raise ValueError("Essentia loader returned empty audio")
-    max_samples = int(SAMPLE_RATE * ANALYSIS_SECONDS)
-    return audio[:max_samples]
+        raise ValueError("librosa loader returned empty audio")
+    return audio
+
+
+def compute_mel_spectrogram(audio) -> np.ndarray:
+    """Librosa mel matching Essentia ``TensorflowInputMusiCNN`` (see MTG/essentia#1471)."""
+    import librosa
+
+    mel = librosa.feature.melspectrogram(
+        y=audio,
+        sr=SAMPLE_RATE,
+        n_fft=FRAME_SIZE,
+        hop_length=HOP_LENGTH,
+        n_mels=MEL_BINS,
+        power=2.0,
+        htk=False,
+        center=True,
+    )
+    mel = np.log10(10000 * mel + 1)
+    return mel.T.astype(np.float32)
+
+
+def mel_patches(mel: np.ndarray) -> np.ndarray:
+    if mel.shape[0] == 0:
+        return np.zeros((0, PATCH_SIZE, MEL_BINS), dtype=np.float32)
+    if mel.shape[0] < PATCH_SIZE:
+        # Essentia lastPatchMode=repeat: pad short clips so one-shots still infer.
+        pad = np.repeat(mel[-1:, :], PATCH_SIZE - mel.shape[0], axis=0)
+        mel = np.concatenate([mel, pad], axis=0)
+    patches = []
+    start = 0
+    while start + PATCH_SIZE <= mel.shape[0]:
+        patches.append(mel[start : start + PATCH_SIZE])
+        start += PATCH_HOP
+    return np.stack(patches, axis=0)
+
+
+def _session_io_name(session, *, output: bool, trailing: int | None = None) -> str:
+    items = session.get_outputs() if output else session.get_inputs()
+    if trailing is not None:
+        for item in items:
+            shape = item.shape
+            if shape and shape[-1] == trailing:
+                return item.name
+    if output and len(items) > 1:
+        return items[1].name
+    return items[0].name
 
 
 def warm() -> bool:
-    """Load TensorFlow models once. Returns True when TF inference is available."""
-    global _TENSORFLOW_MODELS
-    if _TENSORFLOW_MODELS is not None:
-        return bool(_TENSORFLOW_MODELS)
+    """Load ONNX models once. Returns True when DL inference is available."""
+    global _ONNX_MODELS
+    if _ONNX_MODELS is not None:
+        return bool(_ONNX_MODELS)
     if not dl_enabled():
-        _TENSORFLOW_MODELS = {}
+        _ONNX_MODELS = {}
         return False
 
-    configure_tensorflow_runtime()
     model_dir = bundled_model_dir()
     if model_dir is None:
-        _TENSORFLOW_MODELS = {}
+        _ONNX_MODELS = {}
         return False
 
     try:
-        es = _import_essentia()
+        import onnxruntime as ort
 
+        options = ort.SessionOptions()
+        options.log_severity_level = 3
+        providers = ["CPUExecutionProvider"]
+
+        effnet = ort.InferenceSession(
+            str(model_dir / EFFNET_MODEL),
+            sess_options=options,
+            providers=providers,
+        )
+        instrument = ort.InferenceSession(
+            str(model_dir / INSTRUMENT_MODEL),
+            sess_options=options,
+            providers=providers,
+        )
         labels_meta = json.loads((model_dir / INSTRUMENT_LABELS).read_text(encoding="utf-8"))
-        embedding_model = es.TensorflowPredictEffnetDiscogs(
-            graphFilename=str(model_dir / EFFNET_MODEL),
-            output="PartitionedCall:1",
-        )
-        instrument_model = es.TensorflowPredict2D(
-            graphFilename=str(model_dir / INSTRUMENT_MODEL),
-        )
-        _TENSORFLOW_MODELS = {
+        class_count = len(labels_meta["classes"])
+        _ONNX_MODELS = {
             "classes": labels_meta["classes"],
-            "embedding_model": embedding_model,
-            "instrument_model": instrument_model,
+            "effnet": effnet,
+            "effnet_input": _session_io_name(effnet, output=False),
+            "effnet_embeddings": _session_io_name(effnet, output=True, trailing=EMBEDDING_DIM),
+            "instrument": instrument,
+            "instrument_input": _session_io_name(instrument, output=False, trailing=EMBEDDING_DIM),
+            "instrument_output": _session_io_name(instrument, output=True, trailing=class_count),
         }
         return True
     except Exception as err:
-        print(f"tier2: failed to warm TensorFlow models: {err}", file=sys.stderr, flush=True)
-        _TENSORFLOW_MODELS = {}
+        print(f"tier2: failed to warm ONNX models: {err}", file=sys.stderr, flush=True)
+        _ONNX_MODELS = {}
         return False
 
 
-def classify_with_tensorflow(path: str) -> tuple[str, float] | None:
+def classify_with_onnx(path: str) -> tuple[str, float] | None:
     warm()
-    if not _TENSORFLOW_MODELS:
+    if not _ONNX_MODELS:
         return None
 
     try:
-        import numpy as np
+        audio = load_audio(path)
+        mel = compute_mel_spectrogram(audio)
+        patches = mel_patches(mel)
+        if patches.shape[0] == 0:
+            return None
 
-        audio = load_audio_essentia(path)
-        classes = _TENSORFLOW_MODELS["classes"]
-        embeddings = _TENSORFLOW_MODELS["embedding_model"](audio)
-        predictions = _TENSORFLOW_MODELS["instrument_model"](embeddings)
+        classes = _ONNX_MODELS["classes"]
+        embeddings = _ONNX_MODELS["effnet"].run(
+            [_ONNX_MODELS["effnet_embeddings"]],
+            {_ONNX_MODELS["effnet_input"]: patches},
+        )[0]
+        predictions = _ONNX_MODELS["instrument"].run(
+            [_ONNX_MODELS["instrument_output"]],
+            {_ONNX_MODELS["instrument_input"]: embeddings},
+        )[0]
         scores = np.mean(predictions, axis=0)
         top_idx = int(np.argmax(scores))
         raw_class = classes[top_idx] if top_idx < len(classes) else "sampler"
@@ -201,13 +264,12 @@ def classify_with_tensorflow(path: str) -> tuple[str, float] | None:
         instrument = map_jamendo_class(raw_class)
         return instrument, min(0.98, max(0.55, confidence))
     except Exception as err:
-        print(f"tier2: TensorFlow classifier failed: {err}", file=sys.stderr, flush=True)
+        print(f"tier2: ONNX classifier failed: {err}", file=sys.stderr, flush=True)
         return None
 
 
 def classify_with_librosa(path: str, tier1_zcr: float | None = None) -> tuple[str, float, float]:
     import librosa
-    import numpy as np
 
     audio, sample_rate = librosa.load(
         path,
@@ -245,7 +307,7 @@ def classify_path(path: str, tier1_zcr: float | None = None) -> dict[str, Any]:
     if not Path(path).is_file():
         raise FileNotFoundError(f"file not found: {path}")
 
-    dl = classify_with_tensorflow(path)
+    dl = classify_with_onnx(path)
     if dl is not None:
         instrument, confidence = dl
         return {
@@ -254,7 +316,7 @@ def classify_path(path: str, tier1_zcr: float | None = None) -> dict[str, Any]:
             "instrument": instrument,
             "confidence": confidence,
             "zcr": tier1_zcr,
-            "engine": "tensorflow",
+            "engine": "onnx",
         }
 
     instrument, confidence, zcr = classify_with_librosa(path, tier1_zcr)
@@ -266,3 +328,51 @@ def classify_path(path: str, tier1_zcr: float | None = None) -> dict[str, Any]:
         "zcr": zcr,
         "engine": "librosa-spectral",
     }
+
+
+def _self_test() -> None:
+    mel = np.zeros((200, MEL_BINS), dtype=np.float32)
+    patches = mel_patches(mel)
+    assert patches.shape == (2, PATCH_SIZE, MEL_BINS), patches.shape
+    short = mel_patches(np.ones((10, MEL_BINS), dtype=np.float32))
+    assert short.shape == (1, PATCH_SIZE, MEL_BINS), short.shape
+    assert mel_patches(np.zeros((0, MEL_BINS), dtype=np.float32)).shape[0] == 0
+
+
+def _smoke_test_onnx() -> None:
+    import soundfile as sf
+
+    global _ONNX_MODELS
+    _ONNX_MODELS = None
+    os.environ.setdefault("TUNDRA_ONNX_DL", "1")
+    if bundled_model_dir() is None:
+        print("tier2_lib smoke: skipped (ONNX models not present)")
+        return
+    assert warm(), "ONNX warm failed with bundled models"
+
+    path = tempfile.NamedTemporaryFile(suffix=".wav", delete=False).name
+    seconds = 5
+    t = np.linspace(0, seconds, SAMPLE_RATE * seconds, endpoint=False)
+    sf.write(path, (0.3 * np.sin(2 * np.pi * 440 * t)).astype(np.float32), SAMPLE_RATE)
+    try:
+        result = classify_path(path)
+        assert result["engine"] == "onnx", result
+        confidence = result["confidence"]
+        assert confidence is not None and 0.55 <= confidence <= 0.98
+        assert isinstance(result["instrument"], str) and result["instrument"]
+    finally:
+        Path(path).unlink(missing_ok=True)
+        _ONNX_MODELS = None
+
+
+def run_tests() -> None:
+    _self_test()
+    try:
+        _smoke_test_onnx()
+    except ImportError as err:
+        print(f"tier2_lib smoke: skipped ({err})")
+    print("tier2_lib tests ok")
+
+
+if __name__ == "__main__":
+    run_tests()

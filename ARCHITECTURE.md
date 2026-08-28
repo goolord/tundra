@@ -64,7 +64,7 @@ Use `crate::metadata::*`; submodules are internal.
 | File | Role |
 |------|------|
 | `tier1.rs` | ZCR heuristic |
-| `classifier_pool.rs` | Python workers (librosa / Essentia) |
+| `classifier_pool.rs` | Python workers (librosa / ONNX) |
 | `classify_cache.rs` | Persisted classification results |
 | `mod.rs` | Orchestration |
 

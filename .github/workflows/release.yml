@@ -44,7 +44,7 @@ jobs:
             libxi-dev libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev \
             libvulkan-dev pkg-config
 
-      - name: Download Essentia models
+      - name: Download ONNX models
         run: cargo xtask models
 
       - name: Build release package

@@ -155,7 +155,8 @@ fn classify_tier2(
 
 fn engine_label(engine: &str) -> &'static str {
     match engine {
-        "tensorflow" => "Essentia TensorFlow",
+        "onnx" => "ONNX",
+        "tensorflow" => "TensorFlow (legacy)",
         "essentia-spectral" => "Essentia spectral",
         "librosa-spectral" | "librosa-fallback" => "Librosa spectral",
         _ => "Essentia",
@@ -252,8 +253,8 @@ pub fn scripts_dir() -> PathBuf {
 }
 
 pub fn bundled_models_dir() -> Option<PathBuf> {
-    const EFFNET: &str = "discogs-effnet-bs64-1.pb";
-    const INSTRUMENT: &str = "mtg_jamendo_instrument-discogs-effnet-1.pb";
+    const EFFNET: &str = "discogs-effnet-bsdynamic-1.onnx";
+    const INSTRUMENT: &str = "mtg_jamendo_instrument-discogs-effnet-1.onnx";
     const LABELS: &str = "mtg_jamendo_instrument-discogs-effnet-1.json";
 
     crate::path_util::find_beside(&["models", "resources/models"], |dir| {
@@ -272,13 +273,14 @@ pub fn configure_classifier_command(command: &mut Command) {
         ("MKL_NUM_THREADS", "1"),
         ("VECLIB_MAXIMUM_THREADS", "1"),
         ("NUMEXPR_NUM_THREADS", "1"),
-        ("TF_CPP_MIN_LOG_LEVEL", "3"),
         ("CUDA_VISIBLE_DEVICES", "-1"),
     ] {
         command.env(key, value);
     }
     if let Some(models) = bundled_models_dir() {
+        command.env("TUNDRA_MODELS", &models);
         command.env("ESSENTIA_MODELS", &models);
+        command.env("TUNDRA_ONNX_DL", "1");
         command.env("TUNDRA_ESSENTIA_DL", "1");
     }
     crate::path_util::hide_console(command);

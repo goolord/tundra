@@ -10,9 +10,8 @@ dependencies = [
 ]
 
 [dependency-groups]
-# Linux/macOS wheels only (incl. cp314 macosx_15 arm64). No win32 wheels.
 dl = [
-    "essentia-tensorflow>=2.1b6.dev1389; sys_platform != 'win32' and python_full_version >= '3.14'",
+    "onnxruntime>=1.16",
 ]
 
 [tool.uv]

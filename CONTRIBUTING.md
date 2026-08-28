@@ -14,17 +14,19 @@
 | Tier | Engine | Platforms |
 |------|--------|-----------|
 | 1 | Rust ZCR | All |
-| 2 (grey-zone) | Essentia TensorFlow | Linux, macOS (Python 3.14 + `cargo xtask setup`) |
-| 2 (fallback) | Librosa spectral | All (default on Windows) |
+| 2 (grey-zone) | ONNX (MTG Jamendo) | All (`onnxruntime` via `cargo xtask setup`) |
+| 2 (fallback) | Librosa spectral | All when ONNX/models unavailable |
 
-On Windows, setup skips the TensorFlow env automatically; tier 2 uses librosa.
+Classifier Python is pinned to **3.12** on all platforms (`xtask` / `uv sync`).
+
+Bundled ONNX weights live in `resources/models/` (Git LFS). `cargo xtask setup` also runs `cargo xtask models` to refresh them.
 
 ## Build & run
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for module layout.
 
 ```bash
-cargo xtask setup      # LFS assets, Essentia models, Python envs
+cargo xtask setup      # LFS assets, ONNX models, Python envs
 cargo xtask build --release
 cargo xtask run --release
 ```
@@ -47,7 +49,7 @@ cargo xtask run --release -- ~/Desktop/hat.ogg
 | Command | What it does |
 |---------|----------------|
 | `cargo xtask setup` | `git lfs pull`, download models, `uv sync` + DL env |
-| `cargo xtask models` | Download bundled Essentia models to `resources/models/` |
+| `cargo xtask models` | Download bundled ONNX models to `resources/models/` |
 | `cargo xtask classifiers` | Install Python deps (`uv sync`, optional DL on 3.14) |
 | `cargo xtask build` | Setup + `cargo build` |
 | `cargo xtask run` | Setup + `cargo run` |
@@ -58,7 +60,7 @@ cargo xtask run --release -- ~/Desktop/hat.ogg
 Flags:
 
 - `--skip-lfs`: skip `git lfs pull` during setup
-- `--skip-dl`: skip Essentia TensorFlow env (tier 2 falls back to librosa)
+- `--skip-dl`: skip ONNX runtime install (tier 2 falls back to librosa)
 - `--no-setup`: skip setup before build/run
 - `--release`: optimized build (`build`: full release + static CRT on Windows; `run`: fast `release-fast` profile)
 - `--target TRIPLE`: cross-compile (requires `--cross` when OS/arch differs; see Cross-compilation below)
