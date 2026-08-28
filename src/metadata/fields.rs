@@ -110,10 +110,6 @@ impl TagField {
     }
 }
 
-pub fn tag_field_match_score(field: TagField, input: &str) -> i32 {
-    field.match_score(&input.trim().to_ascii_lowercase())
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TagFilter {
     pub field: TagField,
@@ -278,7 +274,12 @@ pub fn tag_field_best_match(input: &str) -> Option<TagField> {
     TagField::ALL
         .iter()
         .filter(|field| field.matches_query(&needle))
-        .max_by_key(|field| field.match_score(&needle))
+        .max_by(|a, b| {
+            match a.match_score(&needle).cmp(&b.match_score(&needle)) {
+                std::cmp::Ordering::Equal => b.label().cmp(a.label()),
+                other => other,
+            }
+        })
         .copied()
 }
 

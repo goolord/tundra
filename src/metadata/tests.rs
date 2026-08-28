@@ -383,6 +383,11 @@ fn instrument_hint(path: &Path) -> Option<(String, HintSource)> {
     }
 
     #[test]
+    fn tag_field_best_match_breaks_score_ties_by_label() {
+        assert_eq!(tag_field_best_match("a"), Some(TagField::Album));
+    }
+
+    #[test]
     fn file_search_active_requires_two_chars_without_tags() {
         assert!(!file_search_active("2", &[]));
         assert!(!file_search_active(" ", &[]));

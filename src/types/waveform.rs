@@ -326,7 +326,7 @@ impl WaveFormView {
             return 1;
         }
         let columns = self.column_count(width, visible_samples);
-        visible_samples.div_ceil(columns).max(1)
+        visible_samples.div_ceil(columns).next_power_of_two().max(1)
     }
 
     fn waveform_layout(&self, width: f32, visible_count: usize) -> WaveformLayout {
@@ -816,18 +816,19 @@ impl WaveForm {
         sum as f32
     }
 
-    /// Lanczos-3 at mono frame index `t` using peak midpoints.
+    /// Lanczos-3 at mono frame index `t` using peak midpoints in bucket space.
     fn interpolate_peak_at(peaks: &WaveformPeaks, t: f64) -> f32 {
         if peaks.sample_count == 0 || !t.is_finite() {
             return 0.0;
         }
         let n_buckets = crate::waveform_peaks::PEAK_BUCKET_COUNT;
+        let last_bucket = peaks.sample_count.saturating_sub(1) * n_buckets / peaks.sample_count;
         let bucket_t = t * n_buckets as f64 / peaks.sample_count as f64;
         let a = i64::from(LANCZOS_A);
-        let bucket_t = bucket_t.clamp(-a as f64, n_buckets as f64 + a as f64);
+        let bucket_t = bucket_t.clamp(-a as f64, last_bucket as f64 + a as f64);
         let center = bucket_t.floor() as i64;
         let first = (center - a + 1).max(0);
-        let last = (center + a).min(n_buckets as i64 - 1);
+        let last = (center + a).min(last_bucket as i64);
         if first > last {
             return 0.0;
         }
@@ -2288,6 +2289,26 @@ mod envelope_tests {
         assert!(
             (value - expected).abs() < 1e-5,
             "bucket {bucket} at sample {sample_index}: got {value}, want {expected}"
+        );
+    }
+
+    #[test]
+    fn interpolate_peak_at_ignores_buckets_beyond_file_end() {
+        let sample_count = 1_000_000;
+        let n_buckets = crate::waveform_peaks::PEAK_BUCKET_COUNT;
+        let mut peaks = WaveformPeaks::new(sample_count);
+        let last_bucket = (sample_count - 1) * n_buckets / sample_count;
+        peaks.min[last_bucket] = 0.5;
+        peaks.max[last_bucket] = 0.5;
+        if last_bucket + 1 < n_buckets {
+            peaks.min[last_bucket + 1] = 1.0;
+            peaks.max[last_bucket + 1] = 1.0;
+        }
+        let sample_index = last_bucket as f64 * sample_count as f64 / n_buckets as f64;
+        let value = WaveForm::interpolate_peak_at(&peaks, sample_index);
+        assert!(
+            (value - 0.5).abs() < 0.05,
+            "bucket {last_bucket} must not pull from trailing bucket: got {value}"
         );
     }
 

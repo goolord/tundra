@@ -1,12 +1,12 @@
 pub use super::common::*;
-use crate::metadata::{tag_field_match_score, tag_field_suggestions, TagField, TagFilter};
+use crate::metadata::{tag_field_best_match, tag_field_suggestions, TagField, TagFilter};
 use super::settings::FavoritesStore;
 use iced::widget::button::{Status as ButtonStatus, Style as ButtonStyle};
 use iced::widget::canvas::{self, Action, Event, Frame, Program};
 use iced::widget::canvas::Path as CanvasPath;
 use iced::widget::scrollable::{self, Scrollbar, Status as ScrollableStatus};
 use iced::widget::text::Wrapping;
-use iced::widget::{button, container, mouse_area, row, scrollable as scrollable_widget, stack, text, Button, Column, Row, Space, TextInput};
+use iced::widget::{button, container, mouse_area, row, scrollable as scrollable_widget, text, Button, Column, Row, Space, TextInput};
 use iced::widget::Id;
 use iced::{Alignment, Background, Border, Color, Element, Length, Rectangle, Shadow, theme};
 use iced::keyboard::Modifiers;
@@ -1014,6 +1014,7 @@ fn filter_input_with_clear(
     input: Element<'_, Message>,
     show_clear: bool,
     on_clear: Message,
+    on_focus: Message,
 ) -> Element<'_, Message> {
     let clear_slot: Element<'_, Message> = if show_clear {
         filter_clear_button(on_clear)
@@ -1024,54 +1025,54 @@ fn filter_input_with_clear(
             .into()
     };
 
-    let clear_overlay = row![Space::new().width(Length::Fill), clear_slot]
-        .align_y(Alignment::Center)
-        .width(Length::Fill)
-        .height(Length::Fill);
-
-    container(stack![input, clear_overlay].width(Length::Fill))
-        .width(Length::Fill)
-        .into()
+    row![
+        container(mouse_area(input).on_press(on_focus))
+            .width(Length::Fill),
+        clear_slot,
+    ]
+    .align_y(Alignment::Center)
+    .width(Length::Fill)
+    .into()
 }
 
 fn filter_input_padding() -> iced::Padding {
-    iced::Padding::from([8.0, 10.0]).right(filter_clear_inset())
+    iced::Padding::from([8.0, 10.0])
 }
 
 fn file_search_input(search_value: &str) -> Element<'_, Message> {
     let show_clear = !search_value.is_empty();
 
-    let input = mouse_area(
-        TextInput::new("Search files…", search_value)
-            .id(Id::new(FILE_SEARCH_INPUT_ID))
-            .on_input(Message::Search)
-            .size(13)
-            .padding(filter_input_padding())
-            .width(Length::Fill),
-    )
-    .on_press(Message::SearchFocused(true));
+    let input = TextInput::new("Search files…", search_value)
+        .id(Id::new(FILE_SEARCH_INPUT_ID))
+        .on_input(Message::Search)
+        .size(13)
+        .padding(filter_input_padding())
+        .width(Length::Fill);
 
-    filter_input_with_clear(input.into(), show_clear, Message::Search(String::new()))
+    filter_input_with_clear(
+        input.into(),
+        show_clear,
+        Message::Search(String::new()),
+        Message::SearchFocused(true),
+    )
 }
 
 fn tag_search_input(tag_search_value: &str) -> Element<'_, Message> {
     let show_clear = !tag_search_value.is_empty();
 
-    let input = mouse_area(
-        TextInput::new("title:value — Enter or Tab", tag_search_value)
-            .id(Id::new(TAG_SEARCH_INPUT_ID))
-            .on_input(Message::TagSearchInput)
-            .on_submit(Message::TagSearchSubmit)
-            .size(12)
-            .padding(filter_input_padding())
-            .width(Length::Fill),
-    )
-    .on_press(Message::TagSearchFocused(true));
+    let input = TextInput::new("title:value — Enter or Tab", tag_search_value)
+        .id(Id::new(TAG_SEARCH_INPUT_ID))
+        .on_input(Message::TagSearchInput)
+        .on_submit(Message::TagSearchSubmit)
+        .size(12)
+        .padding(filter_input_padding())
+        .width(Length::Fill);
 
     filter_input_with_clear(
         input.into(),
         show_clear,
         Message::TagSearchInput(String::new()),
+        Message::TagSearchFocused(true),
     )
 }
 
@@ -1307,18 +1308,11 @@ impl FileSelector {
     }
 
     fn tag_suggestions(&self) -> Vec<Element<'static, Message>> {
-        let suggestions = tag_field_suggestions(&self.tag_search_value);
-        let best_score = suggestions
-            .iter()
-            .map(|field| tag_field_match_score(*field, &self.tag_search_value))
-            .max()
-            .unwrap_or(0);
-        suggestions
+        let best_match = tag_field_best_match(&self.tag_search_value);
+        tag_field_suggestions(&self.tag_search_value)
             .into_iter()
             .map(|field| {
-                let highlighted =
-                    best_score > 0 && tag_field_match_score(field, &self.tag_search_value) == best_score;
-                tag_suggestion_row(field, highlighted)
+                tag_suggestion_row(field, best_match == Some(field))
             })
             .collect()
     }
@@ -1409,9 +1403,7 @@ impl FileSelector {
         .on_enter(Message::FileListHoverChanged(true))
         .on_exit(Message::FileListHoverChanged(false));
 
-        let trimmed = self.search_value.trim();
-        let file_search_active = trimmed.len() >= crate::metadata::FILE_SEARCH_MIN_QUERY_LEN
-            || (!self.tag_filters.is_empty() && !trimmed.is_empty());
+        let file_search_active = self.search_active();
 
         let mut filter_body = Column::new()
             .spacing(0)
