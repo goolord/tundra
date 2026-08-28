@@ -326,7 +326,7 @@ impl WaveFormView {
             return 1;
         }
         let columns = self.column_count(width, visible_samples);
-        visible_samples.div_ceil(columns).next_power_of_two().max(1)
+        visible_samples.div_ceil(columns).max(1)
     }
 
     fn waveform_layout(&self, width: f32, visible_count: usize) -> WaveformLayout {
@@ -821,19 +821,20 @@ impl WaveForm {
         if peaks.sample_count == 0 || !t.is_finite() {
             return 0.0;
         }
-        let n = peaks.sample_count;
+        let n_buckets = crate::waveform_peaks::PEAK_BUCKET_COUNT;
+        let bucket_t = t * n_buckets as f64 / peaks.sample_count as f64;
         let a = i64::from(LANCZOS_A);
-        let t = t.clamp(-a as f64, n as f64 + a as f64);
-        let center = t.floor() as i64;
+        let bucket_t = bucket_t.clamp(-a as f64, n_buckets as f64 + a as f64);
+        let center = bucket_t.floor() as i64;
         let first = (center - a + 1).max(0);
-        let last = (center + a).min(n as i64 - 1);
+        let last = (center + a).min(n_buckets as i64 - 1);
         if first > last {
             return 0.0;
         }
         let mut sum = 0.0;
         for i in first..=last {
-            let sample = peaks.midpoint_at(i as usize) as f64;
-            sum += sample * Self::lanczos3(t - i as f64);
+            let sample = peaks.bucket_midpoint(i as usize) as f64;
+            sum += sample * Self::lanczos3(bucket_t - i as f64);
         }
         sum as f32
     }
@@ -1746,6 +1747,17 @@ impl Program<Message> for WaveForm {
             state.scrub_active = false;
         }
 
+        if let Event::Mouse(mouse::Event::CursorEntered) = event {
+            return Some(
+                Action::publish(Message::WaveformHoverChanged(true)).and_capture(),
+            );
+        }
+        if let Event::Mouse(mouse::Event::CursorLeft) = event {
+            return Some(
+                Action::publish(Message::WaveformHoverChanged(false)).and_capture(),
+            );
+        }
+
         if let Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) = event {
             state.file_drag_armed = false;
             state.file_drag_origin = None;
@@ -2028,6 +2040,7 @@ mod time_marker_tests {
 #[cfg(test)]
 mod envelope_tests {
     use super::{max_zoom, ColumnSample, WaveForm, WaveFormView};
+    use crate::waveform_peaks::WaveformPeaks;
     use iced::Color;
     use iced::widget::canvas::Gradient;
     use iced::Theme;
@@ -2259,6 +2272,23 @@ mod envelope_tests {
                 "t={index}: got {value}, want {sample}"
             );
         }
+    }
+
+    #[test]
+    fn interpolate_peak_at_follows_bucket_centers() {
+        let bucket = 10;
+        let sample_count = 1_000_000;
+        let sample_index =
+            bucket as f64 * sample_count as f64 / crate::waveform_peaks::PEAK_BUCKET_COUNT as f64;
+        let mut peaks = WaveformPeaks::new(sample_count);
+        peaks.min[bucket] = -0.4;
+        peaks.max[bucket] = 0.6;
+        let expected = peaks.bucket_midpoint(bucket);
+        let value = WaveForm::interpolate_peak_at(&peaks, sample_index);
+        assert!(
+            (value - expected).abs() < 1e-5,
+            "bucket {bucket} at sample {sample_index}: got {value}, want {expected}"
+        );
     }
 
     #[test]

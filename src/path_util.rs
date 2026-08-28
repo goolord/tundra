@@ -85,6 +85,12 @@ pub fn config_file(name: &str) -> Option<PathBuf> {
     })
 }
 
+pub(crate) fn favorite_lookup_key(path: &Path) -> PathBuf {
+    canonical_path(path)
+        .map(cache_key)
+        .unwrap_or_else(|_| cache_key(path.to_path_buf()))
+}
+
 pub fn read_bincode<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
     bincode::deserialize(&std::fs::read(path).ok()?).ok()
 }
@@ -542,6 +548,17 @@ mod tests {
         let keys = cache_lookup_keys(&path);
         assert!(keys.contains(&path));
         assert!(keys.contains(&cache_key(path)));
+    }
+
+    #[test]
+    fn favorite_lookup_key_matches_verbatim_and_canonical_paths() {
+        let dir = ScratchDir::new("favorite-lookup-key");
+        let file = dir.path().join("kick.wav");
+        fs::write(&file, b"wav").unwrap();
+        let stored = favorite_lookup_key(&file);
+        let verbatim = PathBuf::from(format!(r"\\?\{}", file.display()));
+        assert_eq!(favorite_lookup_key(&verbatim), stored);
+        assert_eq!(favorite_lookup_key(&stored), stored);
     }
 
     #[test]

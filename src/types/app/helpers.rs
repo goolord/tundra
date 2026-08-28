@@ -168,7 +168,7 @@ pub(crate) async fn execute_file_search(
     };
     if favorites_only {
         result.paths.retain(|path| {
-            favorite_keys.contains(&crate::path_util::cache_key(path.clone()))
+            favorite_keys.contains(&crate::path_util::favorite_lookup_key(path))
         });
     }
     result.new_metadata.extend(preindexed);

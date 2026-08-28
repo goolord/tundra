@@ -61,6 +61,10 @@ impl WaveformPeaks {
         }
         let bucket = (sample_index.min(self.sample_count.saturating_sub(1)) * PEAK_BUCKET_COUNT)
             / self.sample_count;
+        self.bucket_midpoint(bucket)
+    }
+
+    pub fn bucket_midpoint(&self, bucket: usize) -> f32 {
         let bucket = bucket.min(PEAK_BUCKET_COUNT - 1);
         (self.min[bucket] + self.max[bucket]) * 0.5
     }

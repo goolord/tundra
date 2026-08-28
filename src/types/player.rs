@@ -739,13 +739,9 @@ impl Player {
             let underlay = Column::new()
                 .push(toolbar)
                 .push(
-                    mouse_area(
-                        Canvas::new(wf)
-                            .width(Length::Fill)
-                            .height(Length::Fill),
-                    )
-                    .on_enter(Message::WaveformHoverChanged(true))
-                    .on_exit(Message::WaveformHoverChanged(false)),
+                    Canvas::new(wf)
+                        .width(Length::Fill)
+                        .height(Length::Fill),
                 )
                 .spacing(4);
 

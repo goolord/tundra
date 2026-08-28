@@ -755,8 +755,25 @@ impl App {
         Task::none()
     }
 
+    fn prune_stale_favorites(&mut self) {
+        let before = self.favorites.paths().len();
+        let allowed = self.allowed_directories.clone();
+        self.favorites.retain(|stored| {
+            let Ok(path) = crate::path_util::canonical_path(stored) else {
+                return false;
+            };
+            path.is_file()
+                && is_audio(&path)
+                && allowed.contains_path(&path)
+        });
+        if self.favorites.paths().len() != before {
+            self.favorites.persist();
+        }
+    }
+
     fn reset_file_list(&mut self) {
         if self.file_selector.favorites_only {
+            self.prune_stale_favorites();
             self.file_selector.file_list = self.favorite_file_buttons();
             self.file_selector.list_error = None;
             return;
@@ -771,10 +788,17 @@ impl App {
             .favorites
             .paths()
             .iter()
-            .filter(|path| path.is_file() && self.allowed_audio_error(path).is_none())
-            .map(|path| {
-                let base = path.parent().unwrap_or(path);
-                FileButton::with_kind(path.clone(), base, false)
+            .filter_map(|stored| {
+                let path = crate::path_util::canonical_path(stored)
+                    .unwrap_or_else(|_| stored.clone());
+                if !path.is_file() || self.allowed_audio_error(&path).is_some() {
+                    return None;
+                }
+                let base = path
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| path.clone());
+                Some(FileButton::with_kind(path, &base, false))
             })
             .collect();
         buttons.sort_by(|a, b| a.label.to_lowercase().cmp(&b.label.to_lowercase()));
@@ -782,11 +806,7 @@ impl App {
     }
 
     fn favorite_key_set(&self) -> HashSet<PathBuf> {
-        self.favorites
-            .paths()
-            .iter()
-            .map(|path| crate::path_util::cache_key(path.clone()))
-            .collect()
+        self.favorites.paths().iter().cloned().collect()
     }
 
     fn refresh_after_favorites_change(&mut self) -> Task<Message> {
@@ -1679,6 +1699,7 @@ impl App {
                 if focused {
                     self.tag_search_focused = false;
                     self.file_list_focused = false;
+                    return operation::focus(Id::new(FILE_SEARCH_INPUT_ID));
                 }
                 Task::none()
             }
@@ -1734,6 +1755,8 @@ impl App {
                 self.tag_search_focused = focused;
                 if focused {
                     self.search_focused = false;
+                    self.file_list_focused = false;
+                    return operation::focus(Id::new(TAG_SEARCH_INPUT_ID));
                 }
                 Task::none()
             }
@@ -1965,6 +1988,7 @@ impl App {
                 self.waveform_hovered = hovered;
                 if hovered {
                     self.search_focused = false;
+                    self.tag_search_focused = false;
                 }
                 Task::none()
             }

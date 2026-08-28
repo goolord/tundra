@@ -2,7 +2,7 @@ use super::common::{
     modal_button_style, modal_error_style, modal_panel_style, modal_shell, truncate_path, Message,
 };
 use crate::path_util::{
-    cache_file, cache_key, canonical_path, config_file, read_bincode_or_default, write_bincode,
+    cache_file, canonical_path, config_file, read_bincode_or_default, write_bincode,
 };
 use iced::widget::{button, container, row, scrollable, text, Column, Space};
 use iced::{Alignment, Border, Element, Length, Theme};
@@ -103,9 +103,7 @@ impl FavoritesStore {
     }
 
     fn stored_key(path: &Path) -> PathBuf {
-        canonical_path(path)
-            .map(cache_key)
-            .unwrap_or_else(|_| cache_key(path.to_path_buf()))
+        crate::path_util::favorite_lookup_key(path)
     }
 
     pub fn contains(&self, path: &Path) -> bool {
