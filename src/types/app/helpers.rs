@@ -46,18 +46,20 @@ pub(crate) struct TitleBarInteraction {
 }
 
 pub(crate) fn walk_directory(dir: &Path) -> Vec<PathBuf> {
-    crate::path_util::reclaim_write_sidecars_tree(dir);
-    WalkDir::new(dir)
+    let mut sweep = crate::path_util::SidecarSweep::default();
+    let mut paths: Vec<PathBuf> = WalkDir::new(dir)
         .max_depth(100)
         .max_open(100)
         .follow_links(true)
         .into_iter()
-        .filter_entry(|e| FileList::file_filter(e.path()))
-        .filter_map(|e| match e {
-            Ok(e) => Some(e.path().to_path_buf()),
-            Err(_) => None,
+        .filter_entry(|entry| {
+            sweep.note(entry.path());
+            FileList::keeps_entry(entry.path(), entry.file_type().is_dir())
         })
-        .collect()
+        .filter_map(|entry| entry.ok().map(walkdir::DirEntry::into_path))
+        .collect();
+    paths.extend(sweep.finish().into_iter().filter(|path| is_audio(path)));
+    paths
 }
 
 /// Paths indexed for `root`: the exact listing plus every cached subtree.
@@ -263,11 +265,39 @@ pub(crate) fn tag_search_can_autocomplete(input: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{cached_paths_for_root, execute_file_search};
+    use super::{cached_paths_for_root, execute_file_search, walk_directory};
     use crate::metadata::{file_mtime_secs, CachedMetadata, TagField, TagFields, TagFilter};
     use std::collections::{HashMap, HashSet};
     use std::path::PathBuf;
     use std::sync::{Arc, RwLock};
+
+    #[test]
+    fn walk_lists_audio_reclaims_sidecars_and_skips_hidden_dirs() {
+        use crate::path_util::{sidecar, REPLACE_OLD_SUFFIX};
+        use crate::test_fixtures::{dead_pid_tag_tmp, ScratchDir};
+
+        let dir = ScratchDir::new("walk-directory");
+        let drums = dir.path().join("Drums");
+        let hidden = dir.path().join(".git");
+        std::fs::create_dir_all(&drums).unwrap();
+        std::fs::create_dir_all(&hidden).unwrap();
+        let kick = drums.join("kick.wav");
+        std::fs::write(&kick, b"RIFF").unwrap();
+        std::fs::write(dead_pid_tag_tmp(&kick), b"stale").unwrap();
+        let snare = drums.join("snare.wav");
+        std::fs::write(sidecar(&snare, REPLACE_OLD_SUFFIX), b"aside").unwrap();
+        std::fs::write(hidden.join("hat.wav"), b"RIFF").unwrap();
+        std::fs::write(drums.join("notes.txt"), b"text").unwrap();
+
+        let walked: HashSet<PathBuf> = walk_directory(dir.path()).into_iter().collect();
+
+        assert!(walked.contains(&kick));
+        assert!(walked.contains(&snare), "restored file must be listed");
+        assert!(!walked.iter().any(|path| path.starts_with(&hidden)));
+        assert!(!walked.iter().any(|path| path.ends_with("notes.txt")));
+        assert_eq!(dir.sidecar_count(), 0);
+        assert_eq!(crate::test_fixtures::count_tundra_sidecars(&drums), 0);
+    }
 
     fn library_with_tagged_kick() -> (PathBuf, PathBuf, Arc<RwLock<HashMap<PathBuf, CachedMetadata>>>)
     {

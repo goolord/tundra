@@ -321,8 +321,7 @@ fn collect_audio_paths(
 ) -> Result<Vec<PathBuf>, String> {
     let mut paths = Vec::new();
     let mut seen = 0usize;
-
-    crate::path_util::reclaim_write_sidecars_tree(root);
+    let mut sweep = crate::path_util::SidecarSweep::default();
 
     for entry in WalkDir::new(root)
         .follow_links(false)
@@ -333,6 +332,7 @@ fn collect_audio_paths(
         if scan_cancelled(cancel) {
             return Err("Scan cancelled.".into());
         }
+        sweep.note(entry.path());
         if !entry.file_type().is_file() {
             continue;
         }
@@ -349,6 +349,7 @@ fn collect_audio_paths(
         }
         paths.push(path);
     }
+    paths.extend(sweep.finish().into_iter().filter(|path| is_audio(path)));
 
     paths.sort();
     Ok(paths)

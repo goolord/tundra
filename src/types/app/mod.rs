@@ -788,25 +788,8 @@ impl App {
         Task::none()
     }
 
-    fn prune_stale_favorites(&mut self) {
-        let before = self.favorites.paths().len();
-        let allowed = self.allowed_directories.clone();
-        self.favorites.retain(|stored| {
-            let Ok(path) = crate::path_util::canonical_path(stored) else {
-                return false;
-            };
-            path.is_file()
-                && is_audio(&path)
-                && allowed.contains_path(&path)
-        });
-        if self.favorites.paths().len() != before {
-            self.favorites.persist();
-        }
-    }
-
     fn reset_file_list(&mut self) {
         if self.file_selector.favorites_only {
-            self.prune_stale_favorites();
             self.file_selector.file_list = self.favorite_file_buttons();
             self.file_selector.list_error = None;
             return;
@@ -851,28 +834,21 @@ impl App {
         }
     }
 
+    /// Drop cache entries outside the allowed folders. Caches only; favorites
+    /// are user data and are filtered at display time instead.
     fn prune_caches(&mut self) {
         let allowed = self.allowed_directories.clone();
-        if self
-            .dir_cache
-            .retain(|path| allowed.contains_path(path))
-        {
+        if allowed.is_empty() {
+            return;
+        }
+        if self.dir_cache.retain(|path| allowed.contains_cached_path(path)) {
             self.dir_cache.persist();
         }
         if self
             .metadata_cache
-            .retain(|path| allowed.contains_path(path))
+            .retain(|path| allowed.contains_cached_path(path))
         {
             self.metadata_cache.persist();
-        }
-        let favorites_changed = {
-            let before = self.favorites.paths().len();
-            self.favorites
-                .retain(|path| allowed.contains_path(path));
-            before != self.favorites.paths().len()
-        };
-        if favorites_changed {
-            self.favorites.persist();
         }
     }
 
@@ -1282,7 +1258,6 @@ impl App {
             Message::RemoveAllowedDirectory(path) => {
                 self.allowed_directories.remove(&path);
                 self.allowed_directories.persist();
-                self.prune_caches();
                 self.refresh_search_if_active()
             }
 

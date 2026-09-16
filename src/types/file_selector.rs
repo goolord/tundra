@@ -13,7 +13,6 @@ use iced::keyboard::Modifiers;
 use iced::mouse::{self, Cursor};
 use iced_aw::ContextMenu;
 
-use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -1170,12 +1169,17 @@ impl DirUp {
 }
 
 impl FileList {
-    pub fn file_filter(x: &Path) -> bool {
-        (x.is_dir() && !is_hidden(x)) || is_audio(x)
+    /// Folders that are not hidden, and audio files. `is_dir` comes from the
+    /// directory listing so files cost no extra `stat`.
+    pub fn keeps_entry(path: &Path, is_dir: bool) -> bool {
+        if is_dir {
+            !is_hidden(path)
+        } else {
+            is_audio(path)
+        }
     }
 
     pub fn list_buttons(dir: &Path) -> (Vec<FileButton>, Option<String>) {
-        crate::path_util::reclaim_write_sidecars(dir);
         let entries = match fs::read_dir(dir) {
             Ok(entries) => entries,
             Err(err) => {
@@ -1186,24 +1190,29 @@ impl FileList {
             }
         };
 
+        let mut sweep = crate::path_util::SidecarSweep::default();
         let mut buttons: Vec<FileButton> = entries
             .filter_map(|entry| {
                 let entry = entry.ok()?;
                 let file_type = entry.file_type().ok()?;
                 let path = entry.path();
+                sweep.note(&path);
                 let is_dir = if file_type.is_symlink() {
                     path.is_dir()
                 } else {
                     file_type.is_dir()
                 };
-                Self::file_filter(&path).then(|| FileButton::with_kind(path, dir, is_dir))
+                Self::keeps_entry(&path, is_dir).then(|| FileButton::with_kind(path, dir, is_dir))
             })
             .collect();
-        buttons.sort_by(|a, b| match (a.is_dir, b.is_dir) {
-            (true, false) => Ordering::Less,
-            (false, true) => Ordering::Greater,
-            _ => a.label.to_lowercase().cmp(&b.label.to_lowercase()),
-        });
+        buttons.extend(
+            sweep
+                .finish()
+                .into_iter()
+                .filter(|path| is_audio(path))
+                .map(|path| FileButton::with_kind(path, dir, false)),
+        );
+        buttons.sort_by_cached_key(|button| (!button.is_dir, button.label.to_lowercase()));
         (buttons, None)
     }
 }

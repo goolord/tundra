@@ -73,6 +73,14 @@ impl AllowedDirectories {
             .any(|root| crate::path_util::is_under(&path, root))
     }
 
+    /// Like `contains_path` for keys that are already canonical (cache entries),
+    /// skipping a filesystem lookup per key.
+    pub fn contains_cached_path(&self, path: &Path) -> bool {
+        self.roots
+            .iter()
+            .any(|root| crate::path_util::is_under(path, root))
+    }
+
     pub fn startup_directory(&self) -> Option<PathBuf> {
         self.roots.first().cloned()
     }
@@ -123,12 +131,6 @@ impl FavoritesStore {
         }
     }
 
-    pub fn retain<F>(&mut self, keep: F)
-    where
-        F: Fn(&Path) -> bool,
-    {
-        self.paths.retain(|path| keep(path));
-    }
 }
 
 fn favorites_file_path() -> Option<PathBuf> {
@@ -153,11 +155,8 @@ fn migrate_settings_from_cache(config_path: &Path) {
     if config_path.exists() {
         return;
     }
-    let Some(cache_path) = cache_file("allowed_directories.bin") else {
-        return;
-    };
-    if cache_path.exists() && std::fs::copy(&cache_path, config_path).is_ok() {
-        let _ = std::fs::remove_file(cache_path);
+    if let Some(cache_path) = cache_file("allowed_directories.bin") {
+        crate::path_util::migrate_file(&cache_path, config_path);
     }
 }
 
@@ -335,5 +334,45 @@ mod tests {
 
         with_test_settings_path(path, || allowed.persist());
         assert_eq!(dir.sidecar_count(), 0);
+    }
+
+    #[test]
+    fn unreadable_settings_are_moved_aside_not_overwritten() {
+        let dir = ScratchDir::new("settings-corrupt");
+        let path = dir.path().join("allowed_directories.bin");
+        std::fs::write(&path, b"\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFFnot bincode").expect("corrupt");
+
+        let loaded = with_test_settings_path(path.clone(), AllowedDirectories::load);
+        assert!(loaded.is_empty());
+        assert!(!path.exists(), "unreadable file must not stay where a save would replace it");
+
+        with_test_settings_path(path.clone(), || loaded.persist());
+        let kept: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("list")
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".unreadable-"))
+            .collect();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(
+            std::fs::read(kept[0].path()).expect("backup"),
+            b"\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFFnot bincode"
+        );
+    }
+
+    #[test]
+    fn migrate_file_moves_once_and_never_overwrites() {
+        let dir = ScratchDir::new("settings-migrate");
+        let src = dir.path().join("cache").join("allowed_directories.bin");
+        let dest = dir.path().join("config").join("allowed_directories.bin");
+        std::fs::create_dir_all(src.parent().unwrap()).expect("cache dir");
+        std::fs::write(&src, b"old").expect("src");
+
+        crate::path_util::migrate_file(&src, &dest);
+        assert_eq!(std::fs::read(&dest).expect("dest"), b"old");
+        assert!(!src.exists());
+
+        std::fs::write(&src, b"stale").expect("src again");
+        crate::path_util::migrate_file(&src, &dest);
+        assert_eq!(std::fs::read(&dest).expect("dest"), b"old");
     }
 }

@@ -146,26 +146,56 @@ pub fn read_bincode<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
     bincode::deserialize(&std::fs::read(path).ok()?).ok()
 }
 
+/// Load user data such as settings or favorites. A file that exists but cannot
+/// be read or decoded is moved aside rather than left for the next save to
+/// overwrite, so the user's only copy is never destroyed by a bad load.
 pub fn read_bincode_or_default<T: Default + serde::de::DeserializeOwned>(
     path: &Path,
     label: &str,
 ) -> T {
-    match std::fs::read(path) {
+    let err = match std::fs::read(path) {
         Ok(bytes) => match bincode::deserialize(&bytes) {
-            Ok(value) => value,
-            Err(err) => {
-                eprintln!(
-                    "Failed to deserialize {label} ({}): {err}",
-                    path.display()
-                );
-                T::default()
-            }
+            Ok(value) => return value,
+            Err(err) => err.to_string(),
         },
-        Err(err) if err.kind() == io::ErrorKind::NotFound => T::default(),
-        Err(err) => {
-            eprintln!("Failed to read {label} ({}): {err}", path.display());
-            T::default()
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return T::default(),
+        Err(err) => err.to_string(),
+    };
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or_default();
+    let backup = sidecar(path, &format!(".unreadable-{stamp}"));
+    match std::fs::rename(path, &backup) {
+        Ok(()) => eprintln!(
+            "Failed to load {label} ({}): {err}. Kept the file as {}",
+            path.display(),
+            backup.display()
+        ),
+        Err(move_err) => eprintln!(
+            "Failed to load {label} ({}): {err}; could not move it aside: {move_err}",
+            path.display()
+        ),
+    }
+    T::default()
+}
+
+/// Move a file from an old location once, atomically, keeping the source
+/// until the copy is durable.
+pub fn migrate_file(src: &Path, dest: &Path) {
+    if dest.exists() || !src.exists() {
+        return;
+    }
+    let moved = std::fs::read(src).and_then(|bytes| write_atomic(dest, &bytes));
+    match moved {
+        Ok(()) => {
+            let _ = std::fs::remove_file(src);
         }
+        Err(err) => eprintln!(
+            "Failed to move {} to {}: {err}",
+            src.display(),
+            dest.display()
+        ),
     }
 }
 
@@ -302,16 +332,27 @@ fn parse_write_sidecar(name: &str) -> Option<(&str, WriteSidecarKind, Option<u32
     if let Some(dest) = name.strip_suffix(TAG_TMP_SUFFIX) {
         return (!dest.is_empty()).then_some((dest, WriteSidecarKind::Tmp, None));
     }
+    // `unique_sidecar` names: `<dest>.tundra-<kind>-<pid>-<seq>.tmp`.
     let rest = name.strip_suffix(".tmp")?;
-    let marker = ".tundra-tag-";
-    let index = rest.rfind(marker)?;
-    let dest = &rest[..index];
-    if dest.is_empty() {
-        return None;
+    for marker in [".tundra-tag-", ".tundra-atomic-"] {
+        let Some(index) = rest.rfind(marker) else {
+            continue;
+        };
+        let dest = &rest[..index];
+        if dest.is_empty() {
+            return None;
+        }
+        let pid = rest[index + marker.len()..].split('-').next()?.parse().ok();
+        return Some((dest, WriteSidecarKind::Tmp, pid));
     }
-    let meta = &rest[index + marker.len()..];
-    let pid = meta.split('-').next()?.parse().ok();
-    Some((dest, WriteSidecarKind::Tmp, pid))
+    None
+}
+
+/// True for temp and recovery files Tundra's writers leave beside a file.
+pub fn is_write_sidecar(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| parse_write_sidecar(name).is_some())
 }
 
 fn pid_is_alive(pid: u32) -> bool {
@@ -475,9 +516,11 @@ pub fn sync_parent_dir(path: &Path) -> io::Result<()> {
 /// Keep a tmp only when its PID is still live. Delete dest-less legacy
 /// `.tundra-tag.tmp` only after dest exists. Never resurrect dest from
 /// `.bak`/`.tmp` (user may have deleted the audio).
-pub fn reclaim_write_sidecars(dir: &Path) {
+///
+/// Returns the files restored from a crash-aside copy.
+pub fn reclaim_write_sidecars(dir: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
+        return Vec::new();
     };
 
     let mut groups: std::collections::HashMap<
@@ -496,16 +539,18 @@ pub fn reclaim_write_sidecars(dir: &Path) {
         groups.entry(dest).or_default().push((path, kind, pid));
     }
 
+    let mut restored = Vec::new();
     for (dest, sidecars) in groups {
         if !dest.exists() {
             if let Some((source, _, _)) = sidecars
                 .iter()
                 .find(|(_, kind, _)| *kind == WriteSidecarKind::ReplaceOld)
             {
-                if std::fs::rename(source, &dest).is_err() {
-                    if std::fs::copy(source, &dest).is_ok() {
-                        let _ = std::fs::remove_file(source);
-                    }
+                if std::fs::rename(source, &dest).is_err() && std::fs::copy(source, &dest).is_ok() {
+                    let _ = std::fs::remove_file(source);
+                }
+                if dest.exists() {
+                    restored.push(dest.clone());
                 }
             }
         }
@@ -530,31 +575,33 @@ pub fn reclaim_write_sidecars(dir: &Path) {
             }
         }
     }
+    restored
 }
 
-/// Reclaim each directory before a later WalkDir lists its children.
-pub fn reclaim_write_sidecars_tree(root: &Path) {
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        reclaim_write_sidecars(&dir);
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let Ok(meta) = std::fs::symlink_metadata(&path) else {
-                continue;
-            };
-            if meta.file_type().is_symlink() {
-                if path.is_dir() {
-                    stack.push(path);
-                }
-                continue;
-            }
-            if meta.is_dir() {
-                stack.push(path);
+/// Notes directories holding write sidecars while a walk is already listing
+/// them, so recovery costs no second pass over the tree and never follows a
+/// link the walk itself would not.
+#[derive(Default)]
+pub struct SidecarSweep {
+    dirs: std::collections::HashSet<PathBuf>,
+}
+
+impl SidecarSweep {
+    pub fn note(&mut self, path: &Path) {
+        if is_write_sidecar(path) {
+            if let Some(parent) = path.parent() {
+                self.dirs.insert(parent.to_path_buf());
             }
         }
+    }
+
+    /// Reclaim every noted directory. Returns files restored from a
+    /// crash-aside copy, which the walk could not have listed.
+    pub fn finish(self) -> Vec<PathBuf> {
+        self.dirs
+            .iter()
+            .flat_map(|dir| reclaim_write_sidecars(dir))
+            .collect()
     }
 }
 
@@ -760,31 +807,44 @@ mod tests {
     }
 
     #[test]
-    fn reclaim_tree_restores_nested_replace_old() {
+    fn sweep_restores_only_noted_directories() {
         let dir = ScratchDir::new("path-util");
         let nested = dir.path().join("drums");
         fs::create_dir(&nested).unwrap();
         let dest = nested.join("kick.wav");
-        fs::write(sidecar(&dest, REPLACE_OLD_SUFFIX), b"aside").unwrap();
+        let aside = sidecar(&dest, REPLACE_OLD_SUFFIX);
+        fs::write(&aside, b"aside").unwrap();
 
-        reclaim_write_sidecars_tree(dir.path());
+        assert!(SidecarSweep::default().finish().is_empty());
+        assert!(!dest.exists());
 
+        let mut sweep = SidecarSweep::default();
+        sweep.note(&nested.join("snare.wav"));
+        sweep.note(&aside);
+        assert_eq!(sweep.finish(), vec![dest.clone()]);
         assert_eq!(fs::read(&dest).unwrap(), b"aside");
     }
 
-    #[cfg(unix)]
     #[test]
-    fn reclaim_tree_follows_symlink_directory() {
+    fn atomic_temps_are_recognised_and_reclaimed() {
         let dir = ScratchDir::new("path-util");
-        let real = dir.path().join("real");
-        fs::create_dir(&real).unwrap();
-        let dest = real.join("kick.wav");
-        fs::write(sidecar(&dest, REPLACE_OLD_SUFFIX), b"aside").unwrap();
-        std::os::unix::fs::symlink(&real, dir.path().join("link")).unwrap();
+        let dest = dir.path().join("favorites.bin");
+        fs::write(&dest, b"current").unwrap();
+        let live = unique_sidecar(&dest, "atomic");
+        let dead = sidecar(
+            &dest,
+            &format!(".tundra-atomic-{}-7.tmp", crate::test_fixtures::DEAD_PID),
+        );
+        fs::write(&live, b"in flight").unwrap();
+        fs::write(&dead, b"crashed").unwrap();
+        assert!(is_write_sidecar(&live) && is_write_sidecar(&dead));
+        assert!(!is_write_sidecar(&dest));
 
-        reclaim_write_sidecars_tree(dir.path());
+        reclaim_write_sidecars(dir.path());
 
-        assert_eq!(fs::read(&dest).unwrap(), b"aside");
+        assert!(live.exists());
+        assert!(!dead.exists());
+        assert_eq!(fs::read(&dest).unwrap(), b"current");
     }
 
     #[test]

@@ -196,17 +196,24 @@ fn retain_paths<V>(map: &mut HashMap<PathBuf, V>, mut keep: impl FnMut(&PathBuf)
 }
 
 pub(crate) fn load_startup_caches(allowed: AllowedDirectories) -> PersistedCaches {
+    // Temps from an atomic save that crashed; the live file is intact.
+    for dir in [crate::path_util::tundra_cache_dir(), crate::path_util::tundra_config_dir()]
+        .into_iter()
+        .flatten()
+    {
+        crate::path_util::reclaim_write_sidecars(&dir);
+    }
     let mut dirs = load_dir_cache_map();
     let mut metadata = load_metadata_cache_map();
     if !allowed.is_empty() {
         let allowed = allowed.clone();
         let before = dirs.len();
-        dirs.retain(|path, _| allowed.contains_path(path));
+        dirs.retain(|path, _| allowed.contains_cached_path(path));
         if dirs.len() != before {
             DirCache::persist_map(&dirs);
         }
         let before = metadata.len();
-        metadata.retain(|path, _| allowed.contains_path(path));
+        metadata.retain(|path, _| allowed.contains_cached_path(path));
         if metadata.len() != before {
             MetadataCache::persist_map(&metadata);
         }
