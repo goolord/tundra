@@ -818,57 +818,30 @@ impl WaveForm {
         }
     }
 
-    /// Lanczos-3 at sample index `t`; zero-extend outside `[0, samples.len())`.
-    #[cfg(test)]
-    fn interpolate_at(samples: &[f32], t: f64) -> f32 {
-        if samples.is_empty() || !t.is_finite() {
+    /// Lanczos-3 at index `t` over `len` samples read through `sample`;
+    /// zero-extended outside `[0, len)`.
+    fn lanczos_at(len: usize, t: f64, sample: impl Fn(usize) -> f32) -> f32 {
+        if len == 0 || !t.is_finite() {
             return 0.0;
         }
-        let n = samples.len();
         let a = i64::from(LANCZOS_A);
-        let t = t.clamp(-a as f64, n as f64 + a as f64);
+        let t = t.clamp(-a as f64, len as f64 + a as f64);
         let center = t.floor() as i64;
         let first = (center - a + 1).max(0);
-        let last = (center + a).min(n as i64 - 1);
-        if first > last {
-            return 0.0;
-        }
-        let mut sum = 0.0;
-        for i in first..=last {
-            let sample = samples[i as usize] as f64;
-            sum += sample * Self::lanczos3(t - i as f64);
-        }
-        sum as f32
+        let last = (center + a).min(len as i64 - 1);
+        (first..=last)
+            .map(|i| f64::from(sample(i as usize)) * Self::lanczos3(t - i as f64))
+            .sum::<f64>() as f32
+    }
+
+    #[cfg(test)]
+    fn interpolate_at(samples: &[f32], t: f64) -> f32 {
+        Self::lanczos_at(samples.len(), t, |i| samples[i])
     }
 
     /// Lanczos-3 at mono frame index `t` using peak midpoints.
     fn interpolate_peak_at(peaks: &WaveformPeaks, t: f64) -> f32 {
-        if peaks.sample_count == 0 || !t.is_finite() {
-            return 0.0;
-        }
-        let n = peaks.sample_count;
-        let a = i64::from(LANCZOS_A);
-        let t = t.clamp(-a as f64, n as f64 + a as f64);
-        let center = t.floor() as i64;
-        let first = (center - a + 1).max(0);
-        let last = (center + a).min(n as i64 - 1);
-        if first > last {
-            return 0.0;
-        }
-        let mut sum = 0.0;
-        for i in first..=last {
-            let sample = peaks.midpoint_at(i as usize) as f64;
-            sum += sample * Self::lanczos3(t - i as f64);
-        }
-        sum as f32
-    }
-
-    fn column_extents_from_peaks(
-        peaks: &WaveformPeaks,
-        chunk_start: usize,
-        chunk_end: usize,
-    ) -> (f32, f32) {
-        peaks.extents_for_range(chunk_start, chunk_end)
+        Self::lanczos_at(peaks.sample_count, t, |i| peaks.midpoint_at(i))
     }
 
     fn sample_index_at_x(x: f32, start: usize, phase: f32, px_per_sample: f32) -> f64 {
@@ -1154,11 +1127,8 @@ impl WaveForm {
                 break;
             }
             let chunk_end = (chunk_start + samples_per_col).min(visible_count);
-            let (min_sample, max_sample) = Self::column_extents_from_peaks(
-                &peaks,
-                start + chunk_start,
-                start + chunk_end,
-            );
+            let (min_sample, max_sample) =
+                peaks.extents_for_range(start + chunk_start, start + chunk_end);
             let x = (col as f32 + 0.5) * column_width + x_shift;
             out.push(ColumnSample {
                 x,

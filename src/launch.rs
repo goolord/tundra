@@ -10,8 +10,10 @@ pub fn paths_from_args() -> Vec<PathBuf> {
         .collect()
 }
 
+/// Flags the OS or a launcher adds (macOS `-psn_…`). A real file whose name
+/// starts with a dash is still opened.
 fn is_launch_noise(arg: &OsStr) -> bool {
-    arg.to_str().is_some_and(|value| value.starts_with('-'))
+    arg.to_str().is_some_and(|value| value.starts_with('-')) && !std::path::Path::new(arg).exists()
 }
 
 fn normalize_launch_path(path: PathBuf) -> Option<PathBuf> {
