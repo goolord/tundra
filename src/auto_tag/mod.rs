@@ -146,9 +146,9 @@ fn classify_file_inner(path: &Path) -> Result<ClassificationResult, ClassifyErro
             confidence = format_confidence(tier2.confidence),
         ),
     };
-    // Results from the librosa fallback (ONNX missing or failing) are not
+    // Results from the librosa fallback (YAMNet missing or failing) are not
     // remembered, so the real model reclassifies once it is available.
-    if let Some(stamp) = stamp.filter(|_| engine == "onnx") {
+    if let Some(stamp) = stamp.filter(|_| engine == "yamnet") {
         classify_cache::store_cached(path, stamp, &result);
     }
     Ok(with_path_hint(path, result))
@@ -156,7 +156,7 @@ fn classify_file_inner(path: &Path) -> Result<ClassificationResult, ClassifyErro
 
 fn engine_label(engine: &str) -> &'static str {
     match engine {
-        "onnx" => "ONNX",
+        "yamnet" => "YAMNet",
         _ => "Librosa spectral",
     }
 }
@@ -250,15 +250,10 @@ pub fn scripts_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("scripts"))
 }
 
+/// Directory holding the YAMNet model and its class map (see `tools/yamnet`).
 pub fn bundled_models_dir() -> Option<PathBuf> {
-    const EFFNET: &str = "discogs-effnet-bsdynamic-1.onnx";
-    const INSTRUMENT: &str = "mtg_jamendo_instrument-discogs-effnet-1.onnx";
-    const LABELS: &str = "mtg_jamendo_instrument-discogs-effnet-1.json";
-
     crate::path_util::find_beside(&["models", "resources/models"], |dir| {
-        dir.join(EFFNET).is_file()
-            && dir.join(INSTRUMENT).is_file()
-            && dir.join(LABELS).is_file()
+        dir.join("yamnet.onnx").is_file() && dir.join("yamnet_class_map.csv").is_file()
     })
 }
 

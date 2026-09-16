@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex, MutexGuard};
 use std::time::SystemTime;
 
-// v5: stamps include the file size.
-const CACHE_FILE: &str = "classify_cache_v5.bin";
+// v6: tier 2 is YAMNet; labels from earlier models are not reused.
+const CACHE_FILE: &str = "classify_cache_v6.bin";
 
 /// Identifies one version of a file. Size is included because copies and
 /// archive extraction often keep the original mtime (and exFAT has 2 s

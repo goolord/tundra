@@ -11,7 +11,8 @@ Tundra is one Rust binary. `main.rs` calls `types::app()`, the iced application.
 | `src/metadata/` | Tag read/write, search, path hints |
 | `src/auto_tag/` | Instrument classifier |
 | `src/source/` | Streaming playback source |
-| `scripts/` | Python tier-2 classifier worker |
+| `scripts/` | Python tier-2 classifier worker (YAMNet) |
+| `tools/yamnet/` | Builds and verifies `resources/models/yamnet.onnx` (not shipped) |
 | `xtask/` | Setup, packaging, releases (not in the binary) |
 
 Read `types/common.rs` first for `Message`, then `types/app/mod.rs` for routing, then `metadata/mod.rs` for tag I/O.
@@ -83,4 +84,4 @@ Other rules, covered by `data_safety_tests.rs` and module tests:
 - Stale temps are reclaimed during directory walks (`SidecarSweep`) and in the cache/config dirs at startup. A live process's temp is never touched, and a deleted audio file is never resurrected from a temp.
 - Favorites are never pruned automatically.
 - Auto-tag only marks files whose instrument it wrote; hand-set instruments are never replaced.
-- Bump `metadata_cache_v10` / `classify_cache_v5` / `TUNDRA_TAG_VERSION` when their layouts or meanings change.
+- Bump `metadata_cache_v10` / `classify_cache_v6` / `TUNDRA_TAG_VERSION` when their layouts or meanings change.

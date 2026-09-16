@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 const READY_TIMEOUT: Duration = Duration::from_secs(120);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
-/// Each worker holds the ONNX models in memory; release them when unused.
+/// Each worker holds the model in memory; release it when unused.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
 #[derive(Debug, Deserialize)]
@@ -135,7 +135,7 @@ impl Worker {
             ));
         }
         if !ready.onnx {
-            eprintln!("classifier worker: ONNX unavailable; grey-zone files use librosa tier 2");
+            eprintln!("classifier worker: YAMNet unavailable; grey-zone files use the spectral fallback");
         }
         Ok(())
     }
@@ -345,7 +345,7 @@ impl ClassifierPool {
     }
 }
 
-/// Cap at two workers: each loads the ONNX models and is memory-heavy.
+/// Cap at two workers: each loads the model and onnxruntime.
 pub fn worker_count() -> usize {
     std::thread::available_parallelism()
         .map(|count| (count.get() / 2).clamp(1, 2))

@@ -1,2 +1,5 @@
 resources/** filter=lfs diff=lfs merge=lfs -text
 *.svg filter=lfs diff=lfs merge=lfs -text
+# Small text files next to the models stay in plain git.
+resources/models/*.md -filter -diff -merge text
+resources/models/*.csv -filter -diff -merge text

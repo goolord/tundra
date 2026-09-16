@@ -48,4 +48,4 @@ Opening a file jumps to its folder, selects it, and starts playback.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-Some icons from [Font Awesome](https://fontawesome.com/license).
+Some icons from [Font Awesome](https://fontawesome.com/license). Auto-tag uses [YAMNet](https://github.com/tensorflow/models/tree/master/research/audioset/yamnet) (Apache-2.0) with class names from the [AudioSet ontology](https://research.google.com/audioset/ontology/index.html) (CC BY-SA 4.0); see `resources/models/NOTICE.md`.

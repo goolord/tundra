@@ -14,29 +14,39 @@ const MODEL_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
 const RUNTIME_SCRIPTS: [&str; 2] = ["classifier_worker.py", "tier2_lib.py"];
 const PACKAGE_DOCS: [&str; 3] = ["LICENSE", "EULA.md", "README.md"];
 
-struct Model {
-    name: &'static str,
-    url: &'static str,
-    sha256: &'static str,
+/// Where a bundled model file comes from.
+enum Source {
+    Download(&'static str),
+    /// Built from Google's YAMNet Keras weights by `tools/yamnet/convert.py`.
+    ConvertYamnet,
 }
 
-const MODELS: [Model; 3] = [
+struct Model {
+    name: &'static str,
+    sha256: &'static str,
+    source: Source,
+}
+
+const MODELS: [Model; 2] = [
     Model {
-        name: "discogs-effnet-bsdynamic-1.onnx",
-        url: "https://essentia.upf.edu/models/feature-extractors/discogs-effnet/discogs-effnet-bsdynamic-1.onnx",
-        sha256: "a280825b334797cf677939db8cd5762c0392aedd0ca6415dbc1cd083f045e43c",
+        name: "yamnet.onnx",
+        sha256: "ca1d489ec98848d73e8e7816003c72c960148f1e985fdb2b0cab0d2b10e250a4",
+        source: Source::ConvertYamnet,
     },
     Model {
-        name: "mtg_jamendo_instrument-discogs-effnet-1.onnx",
-        url: "https://essentia.upf.edu/models/classification-heads/mtg_jamendo_instrument/mtg_jamendo_instrument-discogs-effnet-1.onnx",
-        sha256: "9ae2d9e763d66bd8eed654d1ac3aa171e6539cb8a0e11f3dcd53df1428980802",
-    },
-    Model {
-        name: "mtg_jamendo_instrument-discogs-effnet-1.json",
-        url: "https://essentia.upf.edu/models/classification-heads/mtg_jamendo_instrument/mtg_jamendo_instrument-discogs-effnet-1.json",
-        sha256: "7d02204c6451b5615e2968ec6364bbae3b915c886e608f05f00d3a38dc5177c4",
+        name: "yamnet_class_map.csv",
+        sha256: "cdf24d193e196d9e95912a2667051ae203e92a2ba09449218ccb40ef787c6df2",
+        source: Source::Download(
+            "https://raw.githubusercontent.com/tensorflow/models/c14bf9ad91962cf189f9f58db2132c06247fcd53/research/audioset/yamnet/yamnet_class_map.csv",
+        ),
     },
 ];
+/// Licence and attribution notices shipped next to the models.
+const MODEL_NOTICE: &str = "NOTICE.md";
+const YAMNET_WEIGHTS_URL: &str = "https://storage.googleapis.com/audioset/yamnet.h5";
+const YAMNET_WEIGHTS_SHA256: &str = "13c3308955bbfaef262f175ac9c40e47b134573a93984f009220dd7cc12a1744";
+/// Pinned so the converted model is byte-identical to `MODELS`' hash.
+const YAMNET_CONVERT_DEPS: [&str; 3] = ["onnx==1.17.0", "h5py==3.12.1", "numpy==2.2.6"];
 
 #[derive(Parser)]
 #[command(name = "xtask", about = "Build and release tasks for Tundra")]
@@ -52,7 +62,7 @@ enum Commands {
         /// Skip `git lfs pull`
         #[arg(long)]
         skip_lfs: bool,
-        /// Skip the ONNX runtime (`--group dl`); tier 2 falls back to librosa
+        /// Skip the ONNX runtime (`--group dl`); tier 2 falls back to the spectral heuristic
         #[arg(long)]
         skip_dl: bool,
     },
@@ -259,9 +269,54 @@ fn sha256_file(path: &Path) -> Result<String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-/// Download any model that is missing, truncated, an LFS pointer, or otherwise
-/// does not match its pinned hash. Downloads land in a `.part` file and are
-/// only renamed into place once verified.
+/// Download `url` to `dest` through a `.part` file, keeping it only if its
+/// SHA-256 matches.
+fn fetch_verified(url: &str, sha256: &str, dest: &Path) -> Result<()> {
+    let part = PathBuf::from(format!("{}.part", dest.display()));
+    let response = ureq::get(url)
+        .timeout(MODEL_DOWNLOAD_TIMEOUT)
+        .call()
+        .with_context(|| format!("GET {url}"))?;
+    let mut file = std::fs::File::create(&part)?;
+    std::io::copy(&mut response.into_reader(), &mut file)
+        .with_context(|| format!("write {}", part.display()))?;
+    drop(file);
+    let actual = sha256_file(&part)?;
+    if actual != sha256 {
+        let _ = std::fs::remove_file(&part);
+        bail!("{url} has sha256 {actual}, expected {sha256}; refusing to use it");
+    }
+    std::fs::rename(&part, dest)?;
+    Ok(())
+}
+
+/// Rebuild `yamnet.onnx` from the official weights.
+fn convert_yamnet(dest: &Path) -> Result<()> {
+    let root = project_root();
+    let weights = root.join("target").join("yamnet").join("yamnet.h5");
+    std::fs::create_dir_all(weights.parent().expect("parent"))?;
+    if !weights.is_file() || sha256_file(&weights)? != YAMNET_WEIGHTS_SHA256 {
+        println!("models: downloading YAMNet weights");
+        fetch_verified(YAMNET_WEIGHTS_URL, YAMNET_WEIGHTS_SHA256, &weights)?;
+    }
+    let part = PathBuf::from(format!("{}.part", dest.display()));
+    let mut convert = Command::new("uv");
+    convert.args(["run", "--no-project", "--python", PYTHON_VERSION]);
+    for dependency in YAMNET_CONVERT_DEPS {
+        convert.args(["--with", dependency]);
+    }
+    run(convert
+        .arg("python")
+        .arg(root.join("tools/yamnet/convert.py"))
+        .arg(&weights)
+        .arg(&part)
+        .current_dir(&root))?;
+    std::fs::rename(&part, dest)?;
+    Ok(())
+}
+
+/// Fetch or rebuild any model that is missing, truncated, a Git LFS pointer,
+/// or otherwise does not match its pinned hash.
 fn download_models() -> Result<()> {
     let dir = models_dir();
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
@@ -271,31 +326,22 @@ fn download_models() -> Result<()> {
             println!("models: {} verified", model.name);
             continue;
         }
-        println!("models: downloading {}", model.name);
-        let part = dir.join(format!("{}.part", model.name));
-        let response = ureq::get(model.url)
-            .timeout(MODEL_DOWNLOAD_TIMEOUT)
-            .call()
-            .with_context(|| format!("GET {}", model.url))?;
-        let mut file = std::fs::File::create(&part)?;
-        std::io::copy(&mut response.into_reader(), &mut file)
-            .with_context(|| format!("write {}", part.display()))?;
-        drop(file);
-        let actual = sha256_file(&part)?;
-        if actual != model.sha256 {
-            let _ = std::fs::remove_file(&part);
-            bail!(
-                "{} has sha256 {actual}, expected {}; refusing to use it",
-                model.name,
-                model.sha256
-            );
+        match model.source {
+            Source::Download(url) => {
+                println!("models: downloading {}", model.name);
+                fetch_verified(url, model.sha256, &dest)?;
+            }
+            Source::ConvertYamnet => {
+                println!("models: building {}", model.name);
+                convert_yamnet(&dest)?;
+            }
         }
-        std::fs::rename(&part, &dest)?;
     }
-    Ok(())
+    verify_models()
 }
 
-fn verify_models() -> Result<()> {
+fn verify_models
+() -> Result<()> {
     for model in &MODELS {
         let path = models_dir().join(model.name);
         if !path.is_file() || sha256_file(&path)? != model.sha256 {
@@ -561,8 +607,8 @@ fn package_release(
     std::fs::create_dir_all(staging.join("scripts"))?;
 
     copy_file(&exe, &staging.join(bin_name))?;
-    for model in &MODELS {
-        copy_file(&models_dir().join(model.name), &staging.join("models").join(model.name))?;
+    for name in MODELS.iter().map(|model| model.name).chain([MODEL_NOTICE]) {
+        copy_file(&models_dir().join(name), &staging.join("models").join(name))?;
     }
     for script in RUNTIME_SCRIPTS {
         copy_file(&root.join("scripts").join(script), &staging.join("scripts").join(script))?;
