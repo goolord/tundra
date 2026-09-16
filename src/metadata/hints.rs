@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::path::Path;
+use std::sync::LazyLock;
 
 const INSTRUMENT_ALIAS_GROUPS: &[&[&str]] = &[
     &[
@@ -54,8 +55,17 @@ const INSTRUMENT_HINT_LABELS: &[&str] = &[
 ];
 
 const _: () = assert!(INSTRUMENT_ALIAS_GROUPS.len() == INSTRUMENT_HINT_LABELS.len());
+const _: () = assert!(INSTRUMENT_ALIAS_GROUPS.len() <= u32::BITS as usize);
 
 const MIN_INSTRUMENT_SUBSTRING_LEN: usize = 4;
+
+/// `INSTRUMENT_ALIAS_GROUPS`, normalized once.
+static NORMALIZED_ALIAS_GROUPS: LazyLock<Vec<Vec<String>>> = LazyLock::new(|| {
+    INSTRUMENT_ALIAS_GROUPS
+        .iter()
+        .map(|group| group.iter().map(|alias| normalize_instrument_term(alias)).collect())
+        .collect()
+});
 
 fn instrument_alias_matches(needle: &str, alias_norm: &str) -> bool {
     if needle.is_empty() || alias_norm.is_empty() {
@@ -77,49 +87,39 @@ fn is_simple_plural(plural: &str, singular: &str) -> bool {
 }
 
 fn normalize_instrument_term(term: &str) -> String {
-    term.to_ascii_lowercase()
-        .chars()
-        .filter(|ch| ch.is_ascii_alphanumeric())
+    term.chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|ch| ch.to_ascii_lowercase())
         .collect()
 }
 
-fn instrument_alias_groups_for(term: &str) -> Vec<&'static [&'static str]> {
+/// Bit `i` is set when `term` names an instrument in alias group `i`.
+pub(crate) fn instrument_group_mask(term: &str) -> u32 {
     let needle = normalize_instrument_term(term);
     if needle.is_empty() {
-        return Vec::new();
+        return 0;
     }
-    INSTRUMENT_ALIAS_GROUPS
+    NORMALIZED_ALIAS_GROUPS
         .iter()
-        .copied()
-        .filter(|group| {
-            group.iter().any(|alias| {
-                instrument_alias_matches(&needle, &normalize_instrument_term(alias))
-            })
-        })
-        .collect()
+        .enumerate()
+        .filter(|(_, group)| group.iter().any(|alias| instrument_alias_matches(&needle, alias)))
+        .fold(0, |mask, (index, _)| mask | 1 << index)
 }
 
 pub(crate) fn instrument_search_terms(query: &str) -> Vec<String> {
-    let mut terms = HashSet::new();
+    let mask = instrument_group_mask(query);
+    let mut terms: HashSet<String> = NORMALIZED_ALIAS_GROUPS
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| mask & 1 << index != 0)
+        .flat_map(|(_, group)| group.iter().cloned())
+        .collect();
     terms.insert(normalize_instrument_term(query));
-    for group in instrument_alias_groups_for(query) {
-        for alias in group {
-            terms.insert(normalize_instrument_term(alias));
-        }
-    }
     terms.into_iter().filter(|term| !term.is_empty()).collect()
 }
 
 pub fn instruments_related(left: &str, right: &str) -> bool {
-    instrument_terms_related(left, right)
-}
-
-pub(crate) fn instrument_terms_related(query: &str, value: &str) -> bool {
-    let query_groups = instrument_alias_groups_for(query);
-    let value_groups = instrument_alias_groups_for(value);
-    query_groups
-        .iter()
-        .any(|group| value_groups.iter().any(|other| std::ptr::eq(*group, *other)))
+    instrument_group_mask(left) & instrument_group_mask(right) != 0
 }
 
 pub fn instrument_hint_from_path(path: &Path) -> Option<String> {
@@ -265,14 +265,19 @@ pub fn artist_hint_from_path(path: &Path) -> Option<String> {
 }
 
 fn should_stop_artist_walk(path: &Path) -> bool {
-    if path.parent().is_none() {
-        return true;
-    }
-    std::env::temp_dir()
-        .canonicalize()
-        .ok()
-        .and_then(|temp| path.canonicalize().ok().map(|canonical| canonical == temp))
-        .unwrap_or(false)
+    // Both spellings of the temp dir, resolved once: this runs for every
+    // ancestor of every file read.
+    static TEMP_DIRS: LazyLock<Vec<std::path::PathBuf>> = LazyLock::new(|| {
+        let temp = std::env::temp_dir();
+        let canonical = crate::path_util::canonical_path(&temp).ok();
+        [Some(temp), canonical]
+            .into_iter()
+            .flatten()
+            .map(crate::path_util::cache_key)
+            .collect()
+    });
+    path.parent().is_none()
+        || TEMP_DIRS.contains(&crate::path_util::cache_key(path.to_path_buf()))
 }
 
 fn path_segment_is_ephemeral_temp(name: &str) -> bool {
@@ -282,13 +287,14 @@ fn path_segment_is_ephemeral_temp(name: &str) -> bool {
 }
 
 fn is_generic_path_segment(name: &str) -> bool {
+    static NORMALIZED: LazyLock<HashSet<String>> = LazyLock::new(|| {
+        GENERIC_PATH_SEGMENTS
+            .iter()
+            .map(|segment| normalize_instrument_term(segment))
+            .collect()
+    });
     let norm = normalize_instrument_term(name);
-    if norm.is_empty() {
-        return true;
-    }
-    GENERIC_PATH_SEGMENTS
-        .iter()
-        .any(|segment| norm == normalize_instrument_term(segment))
+    norm.is_empty() || NORMALIZED.contains(&norm)
 }
 
 fn path_segment_is_instrument_category(name: &str) -> bool {
@@ -334,17 +340,6 @@ pub(crate) fn hint_name_tokens(name: &str) -> Vec<String> {
 }
 
 pub(crate) fn hint_label_for_term(term: &str) -> Option<&'static str> {
-    let needle = normalize_instrument_term(term);
-    if needle.is_empty() {
-        return None;
-    }
-    INSTRUMENT_ALIAS_GROUPS
-        .iter()
-        .zip(INSTRUMENT_HINT_LABELS.iter())
-        .find(|(group, _)| {
-            group.iter().any(|alias| {
-                instrument_alias_matches(&needle, &normalize_instrument_term(alias))
-            })
-        })
-        .map(|(_, label)| *label)
+    let mask = instrument_group_mask(term);
+    (mask != 0).then(|| INSTRUMENT_HINT_LABELS[mask.trailing_zeros() as usize])
 }
