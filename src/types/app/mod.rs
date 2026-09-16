@@ -1320,17 +1320,30 @@ impl App {
                     return Task::none();
                 }
                 let edits = self.tag_editor.edits.clone();
-                match write_manual_tags(&path, &edits) {
-                    Ok(()) => {
-                        self.merge_path_metadata(&path);
-                        self.tag_editor.error = None;
-                        self.tag_editor.status = Some("Tags saved.".into());
-                        self.refresh_search_if_active()
-                    }
-                    Err(err) => {
-                        self.tag_editor.set_error(err);
-                        Task::none()
-                    }
+                self.tag_editor.begin_save();
+                Task::perform(
+                    run_blocking({
+                        let path = path.clone();
+                        move || write_manual_tags(&path, &edits)
+                    }),
+                    move |result| {
+                        let result = result
+                            .unwrap_or_else(|()| Err("Saving stopped unexpectedly.".into()));
+                        Message::TagEditorSaved(path.clone(), result)
+                    },
+                )
+            }
+
+            Message::TagEditorSaved(path, result) => {
+                // The file may have changed even if the editor moved on.
+                let changed = result.is_ok() && self.merge_path_metadata(&path);
+                if self.tag_editor.target.as_ref() == Some(&path) {
+                    self.tag_editor.finish_save(result);
+                }
+                if changed {
+                    self.refresh_search_if_active()
+                } else {
+                    Task::none()
                 }
             }
 
@@ -1415,7 +1428,7 @@ impl App {
                     self.auto_tag.set_error(err);
                     return Task::none();
                 }
-                let needs = auto_tag_field_status(&path);
+                let needs = self.auto_tag.path_status;
                 if needs.is_none_or(|status| status.is_complete()) {
                     self.auto_tag
                         .set_error(AUTO_TAG_ALREADY_COMPLETE);
@@ -1433,33 +1446,49 @@ impl App {
                 } else {
                     instrument_tag(&path).unwrap_or_default()
                 };
-                match write_auto_tags(&path, &instrument) {
-                    Ok(written) => {
-                        self.auto_tag.refresh_from_disk();
-                        if written {
-                            self.merge_path_metadata(&path);
+                self.auto_tag.applying = true;
+                self.auto_tag.clear_error();
+                Task::perform(
+                    run_blocking({
+                        let (path, instrument) = (path.clone(), instrument.clone());
+                        move || write_auto_tags(&path, &instrument)
+                    }),
+                    move |result| {
+                        let result = result
+                            .unwrap_or_else(|()| Err("Applying tags stopped unexpectedly.".into()));
+                        Message::AutoTagApplied(path.clone(), instrument.clone(), result)
+                    },
+                )
+            }
+
+            Message::AutoTagApplied(path, instrument, result) => {
+                let written = matches!(result, Ok(true));
+                let changed = written && self.merge_path_metadata(&path);
+                if self.auto_tag.target.as_ref() == Some(&path) {
+                    self.auto_tag.applying = false;
+                    self.auto_tag.refresh_from_disk();
+                    match result {
+                        Ok(written) => {
+                            self.auto_tag.applied = true;
+                            self.auto_tag.result = None;
+                            self.auto_tag.status = if !written {
+                                AUTO_TAG_ALREADY_COMPLETE.into()
+                            } else if instrument.is_empty() {
+                                "Applied missing tags.".into()
+                            } else {
+                                format!("Applied tags (instrument: {instrument}).")
+                            };
                         }
-                        self.auto_tag.applied = true;
-                        self.auto_tag.result = None;
-                        self.auto_tag.clear_error();
-                        self.auto_tag.status = if !written {
-                            AUTO_TAG_ALREADY_COMPLETE.into()
-                        } else if instrument.is_empty() {
-                            "Applied missing tags.".into()
-                        } else {
-                            format!("Applied tags (instrument: {instrument}).")
-                        };
-                        if written {
-                            self.start_file_search()
-                        } else {
-                            Task::none()
+                        Err(err) => {
+                            self.auto_tag.applied = false;
+                            self.auto_tag.set_error(err);
                         }
                     }
-                    Err(err) => {
-                        self.auto_tag.applied = false;
-                        self.auto_tag.set_error(err);
-                        Task::none()
-                    }
+                }
+                if changed {
+                    self.refresh_search_if_active()
+                } else {
+                    Task::none()
                 }
             }
 

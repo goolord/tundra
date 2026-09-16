@@ -14,6 +14,7 @@ pub struct TagEditorState {
     pub edits: ManualTagEdits,
     pub error: Option<String>,
     pub status: Option<String>,
+    pub saving: bool,
 }
 
 impl TagEditorState {
@@ -22,6 +23,24 @@ impl TagEditorState {
         self.edits = ManualTagEdits::from_tag_fields(&fields);
         self.error = None;
         self.status = None;
+        self.saving = false;
+    }
+
+    pub fn begin_save(&mut self) {
+        self.saving = true;
+        self.error = None;
+        self.status = Some("Saving…".into());
+    }
+
+    pub fn finish_save(&mut self, result: Result<(), String>) {
+        self.saving = false;
+        match result {
+            Ok(()) => {
+                self.error = None;
+                self.status = Some("Tags saved.".into());
+            }
+            Err(err) => self.set_error(err),
+        }
     }
 
     pub fn set_error(&mut self, message: impl Into<String>) {
@@ -99,7 +118,7 @@ pub fn tag_editor_view<'a>(state: &'a TagEditorState) -> Element<'a, Message> {
             Space::new().width(Length::Fill),
             button(text("Save").size(12))
                 .padding([6, 14])
-                .on_press(Message::TagEditorSave)
+                .on_press_maybe((!state.saving).then_some(Message::TagEditorSave))
                 .style(|theme, status| modal_button_style(theme, status, true)),
         ]
         .spacing(8)

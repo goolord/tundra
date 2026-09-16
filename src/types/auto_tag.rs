@@ -17,6 +17,7 @@ pub struct AutoTagState {
     /// Read when the target changes or is written, not on every frame.
     pub path_status: Option<crate::metadata::AutoTagFieldStatus>,
     pub running: bool,
+    pub applying: bool,
     pub status: String,
     pub result: Option<ClassificationResult>,
     pub error: Option<String>,
@@ -30,6 +31,7 @@ impl AutoTagState {
         self.target = target;
         self.refresh_from_disk();
         self.running = false;
+        self.applying = false;
         self.status = String::new();
         self.result = None;
         self.error = None;
@@ -264,6 +266,7 @@ pub fn auto_tag_view(state: &AutoTagState) -> Element<'_, Message> {
     let can_apply = state.target.is_some()
         && (needs_any || can_retag)
         && !state.running
+        && !state.applying
         && !state.applied
         && (!allows_instrument_work || state.result.is_some());
 
