@@ -216,7 +216,7 @@ pub enum Message {
     CloseTagEditor,
     TagEditorInput(crate::metadata::TagField, String),
     TagEditorSave,
-    TagEditorSaved(PathBuf, Result<(), String>),
+    TagEditorSaved(PathBuf, Result<crate::metadata::SavedTo, String>),
     OpenBulkAutoTag,
     CloseBulkAutoTag,
     BulkAutoTagPickDirectory,

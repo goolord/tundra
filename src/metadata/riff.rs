@@ -195,7 +195,8 @@ pub(crate) fn write_wav_tags(path: &std::path::Path, edit: &TagEdit) -> Result<(
     let needs_id3 = edit
         .manual
         .is_some_and(|manual| !manual.bpm.trim().is_empty() || !manual.key.trim().is_empty());
-    if id3_index.is_some() || needs_id3 {
+    // Instrument-only writes leave an existing ID3 chunk byte-for-byte alone.
+    if needs_id3 || (id3_index.is_some() && edit.manual.is_some()) {
         let mut id3 = match id3_index {
             Some(_) => read_wav_id3(&bytes)?,
             None => Id3v2Tag::default(),

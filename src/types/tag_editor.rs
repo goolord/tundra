@@ -32,12 +32,18 @@ impl TagEditorState {
         self.status = Some("Saving…".into());
     }
 
-    pub fn finish_save(&mut self, result: Result<(), String>) {
+    pub fn finish_save(&mut self, result: Result<crate::metadata::SavedTo, String>) {
         self.saving = false;
         match result {
-            Ok(()) => {
+            Ok(crate::metadata::SavedTo::File) => {
                 self.error = None;
                 self.status = Some("Tags saved.".into());
+            }
+            Ok(crate::metadata::SavedTo::Sidecar(reason)) => {
+                self.error = None;
+                self.status = Some(format!(
+                    "Saved in Tundra only; the file was left unchanged. {reason}"
+                ));
             }
             Err(err) => self.set_error(err),
         }

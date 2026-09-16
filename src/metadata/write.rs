@@ -185,6 +185,14 @@ pub(crate) fn write_tags(path: &Path, edit: &TagEdit) -> Result<(), String> {
     let target = write_target(path);
     let container = Container::detect(&target)
         .ok_or_else(|| format!("Unsupported file type: {}", path.display()))?;
+    // Reads pick the parser by extension; a tag written in a format they will
+    // not look for would vanish from search.
+    if Container::of(&target) != Some(container) {
+        return Err(format!(
+            "{} does not contain the audio format its extension says",
+            path.display()
+        ));
+    }
     let sidecar_stamp = crate::tag_store::file_stamp(path);
 
     stage_and_replace(&target, |staged| {
@@ -265,7 +273,13 @@ pub(crate) fn stage_and_replace(
         }
         // `ReplaceFileW` can fail after moving the original away. The staged
         // copy holds the full audio plus the new tags, so it takes its place.
-        let _ = std::fs::rename(&tmp, path);
+        if let Err(rename_err) = std::fs::rename(&tmp, path) {
+            return Err(format!(
+                "Failed to replace {}: {err}. The tagged audio is preserved at {} ({rename_err})",
+                path.display(),
+                tmp.display()
+            ));
+        }
         let _ = std::fs::set_permissions(path, original_perms);
         return Err(format!("Failed to replace {}: {err}", path.display()));
     }
@@ -298,7 +312,16 @@ fn sidecar_fields_for_fallback(path: &Path, edits: &ManualTagEdits) -> ManualTag
     }
 }
 
-pub fn write_manual_tags(path: &Path, edits: &ManualTagEdits) -> Result<(), String> {
+/// Where a manual edit ended up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SavedTo {
+    File,
+    /// The file could not take the write (the reason is kept); the values live
+    /// in Tundra's tag database and only Tundra shows them.
+    Sidecar(String),
+}
+
+pub fn write_manual_tags(path: &Path, edits: &ManualTagEdits) -> Result<SavedTo, String> {
     require_audio(path)?;
 
     let edit = TagEdit {
@@ -313,12 +336,13 @@ pub fn write_manual_tags(path: &Path, edits: &ManualTagEdits) -> Result<(), Stri
     match write_tags(path, &edit) {
         // The file now holds every field, so stale sidecar values must not
         // shadow it on the next read.
-        Ok(()) => crate::tag_store::clear_manual_fields(path),
+        Ok(()) => crate::tag_store::clear_manual_fields(path).map(|()| SavedTo::File),
         Err(disk_err) => crate::tag_store::set_manual_fields(
             path,
             &sidecar_fields_for_fallback(path, edits),
             TUNDRA_TAG_VERSION,
         )
+        .map(|()| SavedTo::Sidecar(disk_err.clone()))
         .map_err(|store_err| format!("{disk_err} (sidecar: {store_err})")),
     }
 }

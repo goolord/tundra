@@ -450,3 +450,18 @@ fn write_that_would_truncate_audio_is_refused_and_falls_back_to_sidecar() {
     });
     assert_eq!(dir.sidecar_count(), 0);
 }
+
+#[test]
+fn misnamed_files_are_not_tagged_in_a_format_reads_will_not_find() {
+    let dir = ScratchDir::new("misnamed");
+    let audio = dir.path().join("actually-a-wav.mp3");
+    write_minimal_wav(&audio);
+    let original = fs::read(&audio).expect("original");
+
+    crate::tag_store::with_test_db(dir.path().join("tags.db"), || {
+        let saved = write_manual_tags(&audio, &full_edits()).expect("sidecar fallback");
+        assert!(matches!(saved, crate::metadata::SavedTo::Sidecar(_)), "{saved:?}");
+        assert_eq!(fs::read(&audio).expect("unchanged"), original);
+        assert_eq!(read_tag_fields(&audio).expect("read").title, "Crack");
+    });
+}

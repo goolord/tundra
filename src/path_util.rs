@@ -563,7 +563,9 @@ pub fn reclaim_write_sidecars(dir: &Path) -> Vec<PathBuf> {
                     if live {
                         continue;
                     }
-                    if dest_exists || pid.is_some() {
+                    // With the destination gone this temp may be the only copy
+                    // left by a replace that failed half-way; never delete it.
+                    if dest_exists {
                         let _ = std::fs::remove_file(path);
                     }
                 }
@@ -945,7 +947,7 @@ mod tests {
     }
 
     #[test]
-    fn reclaim_deletes_dead_pid_tmp_when_dest_missing() {
+    fn reclaim_keeps_dead_pid_tmp_when_dest_missing() {
         let dir = ScratchDir::new("path-util");
         let dest = dir.path().join("missing.wav");
         let tmp = dead_pid_tag_tmp(&dest);
@@ -954,7 +956,7 @@ mod tests {
 
         reclaim_write_sidecars(dir.path());
 
-        assert!(!tmp.exists());
+        assert!(tmp.exists(), "may be the only copy of the audio");
         assert!(!dest.exists());
     }
 
