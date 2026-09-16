@@ -387,3 +387,66 @@ fn tags_are_written_through_a_symlink() {
     assert!(fs::symlink_metadata(&link).expect("link").file_type().is_symlink());
     assert_eq!(read_tag_fields(&real).expect("real").title, "Crack");
 }
+
+/// `tone.mp3` followed by an APE tag (with or without its header) and ID3v1.
+fn mp3_with_trailing_tags(dir: &ScratchDir, ape_header: bool) -> (std::path::PathBuf, Vec<u8>) {
+    let audio = fixture_copy(dir, "mp3");
+    let mut bytes = fs::read(&audio).expect("mp3");
+    let ape_part = |flags: u32| {
+        let mut part = Vec::from(*b"APETAGEX");
+        part.extend_from_slice(&2000u32.to_le_bytes());
+        part.extend_from_slice(&32u32.to_le_bytes());
+        part.extend_from_slice(&0u32.to_le_bytes());
+        part.extend_from_slice(&flags.to_le_bytes());
+        part.extend_from_slice(&[0u8; 8]);
+        part
+    };
+    if ape_header {
+        bytes.extend(ape_part(0xA000_0000));
+        bytes.extend(ape_part(0x8000_0000));
+    } else {
+        bytes.extend(ape_part(0));
+    }
+    let mut id3v1 = vec![0u8; 128];
+    id3v1[..3].copy_from_slice(b"TAG");
+    id3v1[3..8].copy_from_slice(b"Old!!");
+    bytes.extend_from_slice(&id3v1);
+    fs::write(&audio, &bytes).expect("write");
+    (audio, id3v1)
+}
+
+#[test]
+fn mp3_with_trailing_ape_and_id3v1_tags_is_written_in_place() {
+    let dir = ScratchDir::new("mp3-trailing-tags");
+    let (audio, id3v1) = mp3_with_trailing_tags(&dir, true);
+    let before = decoded_samples(&audio);
+
+    crate::tag_store::with_test_db(dir.path().join("tags.db"), || {
+        write_manual_tags(&audio, &full_edits()).expect("manual write");
+        assert!(crate::tag_store::manual_fields(&audio).is_none(), "written natively");
+    });
+
+    let tagged = fs::read(&audio).expect("tagged");
+    assert_eq!(&tagged[tagged.len() - 128..], &id3v1[..], "ID3v1 kept");
+    assert_eq!(read_tag_fields(&audio).expect("read").title, "Crack");
+    assert_eq!(decoded_samples(&audio), before);
+}
+
+/// lofty removes 32 bytes too many when it drops a header-less (APEv1-style)
+/// APE tag. The audio check must catch that and keep the original.
+#[test]
+fn write_that_would_truncate_audio_is_refused_and_falls_back_to_sidecar() {
+    let dir = ScratchDir::new("mp3-apev1");
+    let (audio, _) = mp3_with_trailing_tags(&dir, false);
+    let original = fs::read(&audio).expect("original");
+
+    crate::tag_store::with_test_db(dir.path().join("tags.db"), || {
+        write_manual_tags(&audio, &full_edits()).expect("sidecar fallback");
+        assert_eq!(fs::read(&audio).expect("unchanged"), original);
+        assert_eq!(
+            crate::tag_store::manual_fields(&audio).map(|fields| fields.title),
+            Some("Crack".into())
+        );
+    });
+    assert_eq!(dir.sidecar_count(), 0);
+}
