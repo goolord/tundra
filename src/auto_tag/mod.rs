@@ -6,7 +6,7 @@ mod classifier_pool;
 mod tier1;
 
 pub use classify_cache::{clear_cache as clear_classify_cache, flush_cache as flush_classify_cache};
-pub use classifier_pool::{warm as warm_classifier_pool, worker_count as classifier_worker_count};
+pub use classifier_pool::warm as warm_classifier_pool;
 
 #[derive(Debug, Clone)]
 pub struct ClassificationResult {
@@ -67,6 +67,9 @@ fn classify_file_inner(path: &Path) -> Result<ClassificationResult, ClassifyErro
         return Ok(cached);
     }
 
+    // Stamp before analysis: if the file changes while it is being analysed,
+    // the result is stored against the old version and never matches.
+    let stamp = classify_cache::FileStamp::of(path);
     let tier1 = tier1::classify(path)?;
     if tier1.decision == "definitive" {
         let instrument = tier1.instrument.ok_or_else(|| {
@@ -87,7 +90,9 @@ fn classify_file_inner(path: &Path) -> Result<ClassificationResult, ClassifyErro
                 confidence = format_confidence(confidence),
             ),
         };
-        classify_cache::store_cached(path, &result);
+        if let Some(stamp) = stamp {
+            classify_cache::store_cached(path, stamp, &result);
+        }
         return Ok(with_path_hint(path, result));
     }
 
@@ -106,7 +111,11 @@ fn classify_file_inner(path: &Path) -> Result<ClassificationResult, ClassifyErro
             confidence = format_confidence(tier2.confidence),
         ),
     };
-    classify_cache::store_cached(path, &result);
+    // Results from the librosa fallback (ONNX missing or failing) are not
+    // remembered, so the real model reclassifies once it is available.
+    if let Some(stamp) = stamp.filter(|_| engine == "onnx") {
+        classify_cache::store_cached(path, stamp, &result);
+    }
     Ok(with_path_hint(path, result))
 }
 

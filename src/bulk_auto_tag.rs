@@ -5,24 +5,16 @@ use crate::metadata::{
 };
 use crate::types::is_audio;
 use rayon::prelude::*;
-use rayon::ThreadPoolBuilder;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 use walkdir::WalkDir;
 
 const SCAN_YIELD_INTERVAL: usize = 64;
 const PHASE_SCAN: u8 = 0;
 const PHASE_CLASSIFY: u8 = 1;
 const PHASE_APPLY: u8 = 2;
-
-static CLASSIFIER_POOL: LazyLock<rayon::ThreadPool> = LazyLock::new(|| {
-    ThreadPoolBuilder::new()
-        .num_threads(auto_tag::classifier_worker_count())
-        .build()
-        .expect("classifier thread pool")
-});
 
 #[derive(Debug, Clone, Copy)]
 pub struct BulkProgressSnapshot {
@@ -364,35 +356,21 @@ pub fn classify_files_with_progress(
 ) -> Result<Vec<(PathBuf, Result<ClassificationResult, ClassifyError>)>, String> {
     progress.set_classifying(paths.len());
 
-    let results = CLASSIFIER_POOL.install(|| {
-        paths
-            .into_par_iter()
-            .map(|path| {
-                if scan_cancelled(cancel) {
-                    return (
-                        path,
-                        Err(ClassifyError::new(
-                            "Scan cancelled.",
-                            "Bulk classify interrupted",
-                        )),
-                    );
-                }
-                let result = auto_tag::classify_file_bulk(&path);
-                if scan_cancelled(cancel) {
-                    return (
-                        path,
-                        Err(ClassifyError::new(
-                            "Scan cancelled.",
-                            "Bulk classify interrupted",
-                        )),
-                    );
-                }
-                progress.inc_classify();
-                std::thread::yield_now();
-                (path, result)
-            })
-            .collect::<Vec<_>>()
-    });
+    // Tier 1 runs in Rust on every core; tier-2 requests queue for the few
+    // Python workers inside the classifier pool.
+    let results: Vec<_> = paths
+        .into_par_iter()
+        .map(|path| {
+            // After a cancel the remaining files are skipped, not analysed.
+            let result = if scan_cancelled(cancel) {
+                Err(ClassifyError::new("Scan cancelled.", "Bulk classify interrupted"))
+            } else {
+                auto_tag::classify_file_bulk(&path)
+            };
+            progress.inc_classify();
+            (path, result)
+        })
+        .collect();
 
     if scan_cancelled(cancel) {
         return Err("Scan cancelled.".into());
@@ -409,7 +387,13 @@ pub fn scan_and_classify(
     if scan_cancelled(&cancel) {
         return Err("Scan cancelled.".into());
     }
-    auto_tag::warm_classifier_pool().map_err(|err| err.message)?;
+    // Load the models while the folder is walked. A missing Python setup only
+    // fails the grey-zone files that need it; tier 1 still tags the rest.
+    std::thread::spawn(|| {
+        if let Err(err) = auto_tag::warm_classifier_pool() {
+            eprintln!("{}: {}", err.message, err.details);
+        }
+    });
     progress.set_scanning();
     let audio_paths = collect_audio_paths(&root, Some(&progress), &cancel)?;
     if scan_cancelled(&cancel) {
@@ -418,11 +402,10 @@ pub fn scan_and_classify(
     let metadata_map = enrich_metadata(&audio_paths, metadata);
     let (to_classify, metadata_only, skipped_complete) =
         partition_auto_tag_candidates(&audio_paths, metadata_map.as_ref());
-    let mut results = if to_classify.is_empty() {
-        Vec::new()
-    } else {
-        classify_files_with_progress(to_classify, &progress, &cancel)?
-    };
+    let classified = classify_files_with_progress(to_classify, &progress, &cancel);
+    // Keep what was analysed even when the scan was cancelled part-way.
+    auto_tag::flush_classify_cache();
+    let mut results = classified?;
     for path in metadata_only {
         if scan_cancelled(&cancel) {
             return Err("Scan cancelled.".into());
@@ -438,7 +421,6 @@ pub fn scan_and_classify(
         });
         results.push((path, result));
     }
-    auto_tag::flush_classify_cache();
     Ok(build_scan_summary(root, skipped_complete, results))
 }
 

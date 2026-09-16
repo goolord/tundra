@@ -1,17 +1,41 @@
+//! Classification results remembered across runs, keyed by path and stamped
+//! with the file's size and modification time.
+
 use super::ClassificationResult;
 use crate::path_util;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{LazyLock, RwLock};
+use std::sync::{LazyLock, Mutex, MutexGuard};
 use std::time::SystemTime;
 
-const CACHE_FILE: &str = "classify_cache_v4.bin";
+// v5: stamps include the file size.
+const CACHE_FILE: &str = "classify_cache_v5.bin";
 
+/// Identifies one version of a file. Size is included because copies and
+/// archive extraction often keep the original mtime (and exFAT has 2 s
+/// resolution), so mtime alone can match a different file.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-struct FileStamp {
+pub struct FileStamp {
     secs: u64,
     nanos: u32,
+    len: u64,
+}
+
+impl FileStamp {
+    pub fn of(path: &Path) -> Option<Self> {
+        let meta = std::fs::metadata(path).ok()?;
+        let modified = meta
+            .modified()
+            .ok()?
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .ok()?;
+        Some(Self {
+            secs: modified.as_secs(),
+            nanos: modified.subsec_nanos(),
+            len: meta.len(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,68 +48,33 @@ struct CachedClassification {
     summary: String,
 }
 
-impl CachedClassification {
-    fn from_result(stamp: FileStamp, result: &ClassificationResult) -> Self {
-        Self {
-            stamp,
-            instrument: result.instrument.clone(),
-            tier: result.tier,
-            zcr: result.zcr,
-            confidence: result.confidence,
-            summary: result.summary.clone(),
-        }
-    }
-
-    fn into_result(self) -> ClassificationResult {
-        ClassificationResult {
-            instrument: self.instrument,
-            tier: self.tier,
-            zcr: self.zcr,
-            confidence: self.confidence,
-            summary: self.summary,
-        }
-    }
-}
-
+#[derive(Default)]
 struct ClassifyCache {
     entries: HashMap<PathBuf, CachedClassification>,
-    path_keys: HashMap<PathBuf, PathBuf>,
     dirty: bool,
 }
 
+fn key(path: &Path) -> PathBuf {
+    path_util::cache_key(path.to_path_buf())
+}
+
 impl ClassifyCache {
-    fn new() -> Self {
-        Self {
-            entries: HashMap::new(),
-            path_keys: HashMap::new(),
-            dirty: false,
-        }
-    }
-
-    fn cache_path() -> Option<PathBuf> {
-        path_util::cache_file(CACHE_FILE)
-    }
-
     fn load() -> Self {
-        let Some(entries) = Self::cache_path().and_then(|path| path_util::read_bincode(&path))
-        else {
-            return Self::new();
-        };
+        let entries = path_util::cache_file(CACHE_FILE)
+            .and_then(|path| path_util::read_bincode(&path))
+            .unwrap_or_default();
         Self {
             entries,
-            path_keys: HashMap::new(),
             dirty: false,
         }
     }
 
     fn persist(&mut self) {
-        if !self.dirty {
-            return;
+        if self.dirty
+            && let Some(path) = path_util::cache_file(CACHE_FILE)
+        {
+            self.persist_to(&path);
         }
-        let Some(path) = Self::cache_path() else {
-            return;
-        };
-        self.persist_to(&path);
     }
 
     fn persist_to(&mut self, path: &Path) {
@@ -94,151 +83,124 @@ impl ClassifyCache {
         }
     }
 
-    fn file_stamp(path: &Path) -> Option<FileStamp> {
-        let modified = std::fs::metadata(path).ok()?.modified().ok()?;
-        stamp_from_system_time(modified)
-    }
-
-    fn lookup_key(&self, path: &Path) -> PathBuf {
-        let direct = path_util::cache_key(path.to_path_buf());
-        if self.entries.contains_key(&direct) {
-            return direct;
-        }
-        if let Some(key) = self.path_keys.get(&direct) {
-            return key.clone();
-        }
-        path_util::canonical_path(path)
-            .map(path_util::cache_key)
-            .unwrap_or(direct)
-    }
-
     fn get(&self, path: &Path) -> Option<ClassificationResult> {
-        let stamp = Self::file_stamp(path)?;
-        let key = self.lookup_key(path);
-        self.get_by_key(&key, stamp)
+        let stamp = FileStamp::of(path)?;
+        let cached = self.entries.get(&key(path))?;
+        (cached.stamp == stamp).then(|| ClassificationResult {
+            instrument: cached.instrument.clone(),
+            tier: cached.tier,
+            zcr: cached.zcr,
+            confidence: cached.confidence,
+            summary: cached.summary.clone(),
+        })
     }
 
-    fn get_by_key(&self, key: &PathBuf, stamp: FileStamp) -> Option<ClassificationResult> {
-        let cached = self.entries.get(key)?;
-        if cached.stamp != stamp {
-            return None;
-        }
-        Some(cached.clone().into_result())
-    }
-
-    fn remember_path_alias(&mut self, direct: PathBuf, canonical: PathBuf) {
-        if direct != canonical {
-            self.path_keys.insert(direct, canonical);
-        }
-    }
-
-    fn insert(&mut self, path: &Path, result: &ClassificationResult) {
-        let Some(stamp) = Self::file_stamp(path) else {
-            return;
-        };
-        let entry = CachedClassification::from_result(stamp, result);
-        let direct = path_util::cache_key(path.to_path_buf());
-        let canonical = path_util::canonical_path(path)
-            .map(path_util::cache_key)
-            .unwrap_or_else(|_| direct.clone());
-        self.entries.insert(canonical.clone(), entry.clone());
-        self.remember_path_alias(direct.clone(), canonical.clone());
-        if direct != canonical {
-            self.entries.insert(direct, entry);
-        }
+    fn insert(&mut self, path: &Path, stamp: FileStamp, result: &ClassificationResult) {
+        self.entries.insert(
+            key(path),
+            CachedClassification {
+                stamp,
+                instrument: result.instrument.clone(),
+                tier: result.tier,
+                zcr: result.zcr,
+                confidence: result.confidence,
+                summary: result.summary.clone(),
+            },
+        );
         self.dirty = true;
     }
-
-    fn clear(&mut self) {
-        self.entries.clear();
-        self.path_keys.clear();
-        self.dirty = true;
-        self.persist();
-    }
 }
 
-fn stamp_from_system_time(time: SystemTime) -> Option<FileStamp> {
-    let duration = time.duration_since(SystemTime::UNIX_EPOCH).ok()?;
-    Some(FileStamp {
-        secs: duration.as_secs(),
-        nanos: duration.subsec_nanos(),
-    })
-}
+static CLASSIFY_CACHE: LazyLock<Mutex<ClassifyCache>> =
+    LazyLock::new(|| Mutex::new(ClassifyCache::load()));
 
-static CLASSIFY_CACHE: LazyLock<RwLock<ClassifyCache>> =
-    LazyLock::new(|| RwLock::new(ClassifyCache::load()));
-
-fn with_cache_read<T>(f: impl FnOnce(&ClassifyCache) -> T) -> Option<T> {
-    match CLASSIFY_CACHE.read() {
-        Ok(cache) => Some(f(&cache)),
-        Err(_) => {
-            eprintln!("classify cache lock poisoned");
-            None
-        }
-    }
-}
-
-fn with_cache_write<T>(f: impl FnOnce(&mut ClassifyCache) -> T) -> Option<T> {
-    match CLASSIFY_CACHE.write() {
-        Ok(mut cache) => Some(f(&mut cache)),
-        Err(_) => {
-            eprintln!("classify cache lock poisoned");
-            None
-        }
-    }
+fn cache() -> MutexGuard<'static, ClassifyCache> {
+    CLASSIFY_CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 pub fn get_cached(path: &Path) -> Option<ClassificationResult> {
-    with_cache_read(|cache| cache.get(path))?
+    cache().get(path)
 }
 
-pub fn store_cached(path: &Path, result: &ClassificationResult) {
-    let _ = with_cache_write(|cache| cache.insert(path, result));
+/// Remember `result` for the file as it was when `stamp` was taken, before
+/// analysis started. If the file changed since, the entry simply never matches.
+pub fn store_cached(path: &Path, stamp: FileStamp, result: &ClassificationResult) {
+    cache().insert(path, stamp, result);
 }
 
 pub fn flush_cache() {
-    let _ = with_cache_write(|cache| cache.persist());
+    cache().persist();
 }
 
 pub fn clear_cache() {
-    let _ = with_cache_write(|cache| cache.clear());
+    let mut cache = cache();
+    cache.entries.clear();
+    cache.dirty = true;
+    cache.persist();
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auto_tag::ClassificationResult;
-    use crate::path_util::{reclaim_write_sidecars, sidecar, REPLACE_OLD_SUFFIX};
     use crate::test_fixtures::ScratchDir;
 
+    fn kick() -> ClassificationResult {
+        ClassificationResult {
+            instrument: "Kick".into(),
+            tier: 1,
+            zcr: None,
+            confidence: Some(0.9),
+            summary: "kick".into(),
+        }
+    }
+
     #[test]
-    fn classify_cache_persist_recovers_from_crash_aside() {
+    fn entries_match_only_the_stamped_file() {
+        let dir = ScratchDir::new("classify-stamp");
+        let audio = dir.path().join("kick.wav");
+        std::fs::write(&audio, b"audio").expect("audio");
+        let stamp = FileStamp::of(&audio).expect("stamp");
+
+        let mut cache = ClassifyCache::default();
+        cache.insert(&audio, stamp, &kick());
+        assert_eq!(
+            cache.get(&audio).map(|result| result.instrument),
+            Some("Kick".into())
+        );
+
+        let modified = std::fs::metadata(&audio)
+            .and_then(|meta| meta.modified())
+            .expect("mtime");
+        std::fs::write(&audio, b"different audio").expect("replace");
+        std::fs::File::options()
+            .write(true)
+            .open(&audio)
+            .and_then(|file| file.set_modified(modified))
+            .expect("keep mtime");
+        assert!(cache.get(&audio).is_none(), "same mtime, different size");
+    }
+
+    #[test]
+    fn persisted_cache_round_trips() {
         let dir = ScratchDir::new("classify-persist");
-        let path = dir.path().join("classify_cache_v4.bin");
+        let path = dir.path().join(CACHE_FILE);
         let audio = dir.path().join("kick.wav");
         std::fs::write(&audio, b"audio").expect("audio");
 
-        let mut cache = ClassifyCache::new();
-        cache.insert(
-            &audio,
-            &ClassificationResult {
-                instrument: "Kick".into(),
-                tier: 1,
-                zcr: None,
-                confidence: Some(0.9),
-                summary: "kick".into(),
-            },
-        );
+        let mut cache = ClassifyCache::default();
+        cache.insert(&audio, FileStamp::of(&audio).expect("stamp"), &kick());
         cache.persist_to(&path);
-        let bytes = std::fs::read(&path).expect("persisted");
-
-        std::fs::write(sidecar(&path, REPLACE_OLD_SUFFIX), &bytes).expect("crash aside");
-        std::fs::remove_file(&path).expect("crash delete");
-
-        reclaim_write_sidecars(dir.path());
-        assert_eq!(std::fs::read(&path).expect("restored"), bytes);
-
-        cache.persist_to(&path);
+        assert!(!cache.dirty);
         assert_eq!(dir.sidecar_count(), 0);
+
+        let entries: HashMap<PathBuf, CachedClassification> =
+            path_util::read_bincode(&path).expect("reload");
+        let reloaded = ClassifyCache {
+            entries,
+            dirty: false,
+        };
+        assert!(reloaded.get(&audio).is_some());
     }
 }
