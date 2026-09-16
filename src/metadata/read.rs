@@ -115,7 +115,7 @@ fn tundra_owns_tags(comment: &str) -> bool {
 /// Tundra may replace tags it wrote; sidecar alone does not own native tags.
 pub fn tundra_tagged_file(path: &Path, comment: &str, native_instrument: &str) -> bool {
     tundra_owns_tags(comment)
-        || (native_instrument.trim().is_empty() && crate::tag_store::instrument(path).is_some())
+        || (native_instrument.trim().is_empty() && crate::tag_store::tundra_instrument(path).is_some())
 }
 
 /// Containers Tundra tags natively. Each maps the instrument label to the one

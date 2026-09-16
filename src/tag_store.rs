@@ -1,15 +1,19 @@
 //! SQLite fallback when the audio container cannot hold tags.
+//!
+//! Rows are keyed by `cache_key` and stamped with the file's mtime and size, so
+//! a different file later saved at the same path does not inherit them. All
+//! rows are loaded once; reads never touch the database.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{OnceLock, RwLock};
+use std::sync::{LazyLock, Mutex, MutexGuard, RwLock};
 use std::time::UNIX_EPOCH;
 
 use rusqlite::Connection;
 
 pub use crate::metadata::ManualTagEdits as SidecarManualFields;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct SidecarTag {
     instrument: String,
     artist: String,
@@ -19,6 +23,9 @@ struct SidecarTag {
     genre: String,
     comment: String,
     tag_version: u32,
+    /// The instrument came from the tag editor, not the classifier, so
+    /// auto-tag must never replace it.
+    user_owned: bool,
     mtime_secs: u64,
     size: u64,
 }
@@ -35,25 +42,6 @@ impl SidecarTag {
             comment: self.comment.clone(),
         }
     }
-
-    fn generic_empty(&self) -> bool {
-        [
-            &self.title,
-            &self.artist,
-            &self.bpm,
-            &self.key,
-            &self.genre,
-            &self.comment,
-        ]
-        .iter()
-        .all(|value| value.trim().is_empty())
-    }
-}
-
-enum Store {
-    Missing,
-    Ready(HashMap<PathBuf, SidecarTag>),
-    Failed(String),
 }
 
 /// Canonical map key. Same as metadata/dir cache keys so `\\?\` and case match.
@@ -76,310 +64,221 @@ fn stamp_matches(path: &Path, entry: &SidecarTag) -> bool {
     file_stamp(path) == Some((entry.mtime_secs, entry.size))
 }
 
-fn cache_db_path() -> Option<PathBuf> {
-    crate::path_util::cache_file("tags.db")
-}
-
-fn data_db_path() -> Option<PathBuf> {
-    crate::path_util::tundra_data_dir().map(|mut dir| {
-        dir.push("tags.db");
-        dir
-    })
-}
-
-fn migrate_sqlite_file(src: &Path, dest: &Path) {
-    if dest.exists() || !src.exists() {
-        return;
-    }
-    if let Some(parent) = dest.parent() {
-        if std::fs::create_dir_all(parent).is_err() {
-            return;
-        }
-    }
-    if std::fs::copy(src, dest).is_err() {
-        return;
-    }
-    for suffix in ["-wal", "-shm"] {
-        let src_side = crate::path_util::sidecar(src, suffix);
-        if src_side.exists() {
-            let _ = std::fs::copy(&src_side, crate::path_util::sidecar(dest, suffix));
-        }
-    }
-    let _ = std::fs::remove_file(src);
-    for suffix in ["-wal", "-shm"] {
-        let _ = std::fs::remove_file(crate::path_util::sidecar(src, suffix));
-    }
-}
-
 fn db_path() -> Option<PathBuf> {
     #[cfg(test)]
     if let Some(path) = test_db_path() {
         return Some(path);
     }
-    let dest = data_db_path()?;
-    if let Some(src) = cache_db_path() {
-        migrate_sqlite_file(&src, &dest);
+    let dest = crate::path_util::tundra_data_dir()?.join("tags.db");
+    if let Some(legacy) = crate::path_util::cache_file("tags.db") {
+        migrate_legacy_db(&legacy, &dest);
     }
     Some(dest)
 }
 
-#[cfg(test)]
-use std::cell::RefCell;
-
-#[cfg(test)]
-thread_local! {
-    static TEST_DB_PATH: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+/// Older builds kept the database in the cache directory. `VACUUM INTO`
+/// produces one consistent file including anything still in the WAL, and the
+/// source is only removed once that copy is in place.
+fn migrate_legacy_db(src: &Path, dest: &Path) {
+    if dest.exists() || !src.exists() {
+        return;
+    }
+    let staged = crate::path_util::unique_sidecar(dest, "atomic");
+    let copied = Connection::open(src).and_then(|connection| {
+        connection.execute("VACUUM INTO ?1", [staged.to_string_lossy()])
+    });
+    let result = copied
+        .map_err(|err| err.to_string())
+        .and_then(|_| crate::path_util::replace_file(&staged, dest).map_err(|err| err.to_string()));
+    match result {
+        Ok(()) => {
+            for suffix in ["", "-wal", "-shm"] {
+                let _ = std::fs::remove_file(crate::path_util::sidecar(src, suffix));
+            }
+        }
+        Err(err) => {
+            let _ = std::fs::remove_file(&staged);
+            eprintln!("tundra: failed to move tag store to {}: {err}", dest.display());
+        }
+    }
 }
 
-#[cfg(test)]
-fn test_db_path() -> Option<PathBuf> {
-    TEST_DB_PATH.with(|slot| slot.borrow().clone())
-}
-
-#[cfg(test)]
-static TAG_STORE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-#[cfg(test)]
-fn reset_cache_for_tests() {
-    let mut store = cache()
-        .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    *store = Store::Missing;
-}
-
-/// Run `f` against an isolated SQLite sidecar database (tests only).
-#[cfg(test)]
-pub(crate) fn with_test_db<F, R>(path: PathBuf, f: F) -> R
-where
-    F: FnOnce() -> R,
-{
-    let _lock = TAG_STORE_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    TEST_DB_PATH.with(|slot| {
-        *slot.borrow_mut() = Some(path);
-        reset_cache_for_tests();
-        let result = f();
-        reset_cache_for_tests();
-        *slot.borrow_mut() = None;
-        result
-    })
-}
-
-fn open() -> Result<Connection, String> {
-    let path = db_path().ok_or_else(|| "No data directory available".to_string())?;
-    let connection = Connection::open(&path)
-        .map_err(|err| format!("Failed to open {}: {err}", path.display()))?;
-    prepare_schema(&connection)?;
-    Ok(connection)
-}
+const COLUMNS: [(&str, &str); 10] = [
+    ("tag_version", "INTEGER NOT NULL DEFAULT 0"),
+    ("mtime_secs", "INTEGER NOT NULL DEFAULT 0"),
+    ("size", "INTEGER NOT NULL DEFAULT 0"),
+    ("title", "TEXT NOT NULL DEFAULT ''"),
+    ("artist", "TEXT NOT NULL DEFAULT ''"),
+    ("bpm", "TEXT NOT NULL DEFAULT ''"),
+    ("key", "TEXT NOT NULL DEFAULT ''"),
+    ("genre", "TEXT NOT NULL DEFAULT ''"),
+    ("comment", "TEXT NOT NULL DEFAULT ''"),
+    ("user_owned", "INTEGER NOT NULL DEFAULT 0"),
+];
 
 fn prepare_schema(connection: &Connection) -> Result<(), String> {
+    let fail = |err: rusqlite::Error| format!("Failed to prepare tag store: {err}");
     connection
         .execute_batch(
             "PRAGMA journal_mode = WAL;
              CREATE TABLE IF NOT EXISTS instrument_tags (
                  path TEXT PRIMARY KEY,
-                 instrument TEXT NOT NULL,
-                 tag_version INTEGER NOT NULL DEFAULT 0,
-                 mtime_secs INTEGER NOT NULL DEFAULT 0,
-                 size INTEGER NOT NULL DEFAULT 0
+                 instrument TEXT NOT NULL
              );",
         )
-        .map_err(|err| format!("Failed to prepare tag store: {err}"))?;
-    ensure_column(
-        connection,
-        "instrument_tags",
-        "tag_version",
-        "INTEGER NOT NULL DEFAULT 0",
-    )?;
-    ensure_column(
-        connection,
-        "instrument_tags",
-        "mtime_secs",
-        "INTEGER NOT NULL DEFAULT 0",
-    )?;
-    ensure_column(connection, "instrument_tags", "size", "INTEGER NOT NULL DEFAULT 0")?;
-    ensure_column(
-        connection,
-        "instrument_tags",
-        "title",
-        "TEXT NOT NULL DEFAULT ''",
-    )?;
-    ensure_column(
-        connection,
-        "instrument_tags",
-        "artist",
-        "TEXT NOT NULL DEFAULT ''",
-    )?;
-    ensure_column(connection, "instrument_tags", "bpm", "TEXT NOT NULL DEFAULT ''")?;
-    ensure_column(connection, "instrument_tags", "key", "TEXT NOT NULL DEFAULT ''")?;
-    ensure_column(
-        connection,
-        "instrument_tags",
-        "genre",
-        "TEXT NOT NULL DEFAULT ''",
-    )?;
-    ensure_column(
-        connection,
-        "instrument_tags",
-        "comment",
-        "TEXT NOT NULL DEFAULT ''",
-    )?;
+        .map_err(fail)?;
+    let existing: Vec<String> = connection
+        .prepare("SELECT name FROM pragma_table_info('instrument_tags')")
+        .and_then(|mut statement| {
+            statement
+                .query_map([], |row| row.get(0))?
+                .collect::<Result<_, _>>()
+        })
+        .map_err(fail)?;
+    for (column, decl) in COLUMNS {
+        if existing.iter().any(|name| name == column) {
+            continue;
+        }
+        connection
+            .execute(&format!("ALTER TABLE instrument_tags ADD COLUMN {column} {decl}"), [])
+            .map_err(fail)?;
+        if column == "user_owned" {
+            // Rows written before ownership was tracked: any manual field
+            // besides the instrument means the tag editor wrote the row.
+            connection
+                .execute(
+                    "UPDATE instrument_tags SET user_owned = 1
+                     WHERE instrument != '' AND (artist != '' OR title != '' OR bpm != ''
+                         OR key != '' OR genre != '' OR comment != '')",
+                    [],
+                )
+                .map_err(fail)?;
+        }
+    }
     Ok(())
 }
 
-fn ensure_column(
-    connection: &Connection,
-    table: &str,
-    column: &str,
-    decl: &str,
-) -> Result<(), String> {
-    if has_column(connection, table, column)? {
-        return Ok(());
-    }
-    connection
-        .execute(
-            &format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"),
-            [],
-        )
-        .map_err(|err| format!("Failed to migrate tag store: {err}"))?;
-    Ok(())
-}
-
-fn has_column(connection: &Connection, table: &str, column: &str) -> Result<bool, String> {
-    let mut statement = connection
-        .prepare(&format!("PRAGMA table_info({table})"))
-        .map_err(|err| format!("Failed to inspect {table}: {err}"))?;
-    let mut rows = statement
-        .query([])
-        .map_err(|err| format!("Failed to read {table} schema: {err}"))?;
-    while let Some(row) = rows
-        .next()
-        .map_err(|err| format!("Failed to read {table} schema: {err}"))?
-    {
-        let name: String = row
-            .get(1)
-            .map_err(|err| format!("Failed to read {table} column name: {err}"))?;
-        if name == column {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-fn cache() -> &'static RwLock<Store> {
-    static CACHE: OnceLock<RwLock<Store>> = OnceLock::new();
-    CACHE.get_or_init(|| RwLock::new(init_store()))
-}
-
-fn init_store() -> Store {
-    let Some(path) = db_path() else {
-        let err = "No data directory available".to_string();
-        eprintln!("tundra: failed to load tag store: {err}");
-        return Store::Failed(err);
-    };
-    if !path.exists() {
-        return Store::Missing;
-    }
-    match load_all() {
-        Ok(map) => Store::Ready(map),
-        Err(err) => {
-            eprintln!("tundra: failed to load tag store: {err}");
-            Store::Failed(err)
-        }
-    }
-}
-
-fn load_all() -> Result<HashMap<PathBuf, SidecarTag>, String> {
-    // Most libraries never need the fallback, so don't create a database until
-    // something is actually written to it.
-    if !db_path().is_some_and(|path| path.exists()) {
-        return Ok(HashMap::new());
-    }
-    let connection = open()?;
+fn load_rows(connection: &Connection) -> Result<HashMap<PathBuf, SidecarTag>, String> {
     let mut statement = connection
         .prepare(
-            "SELECT path, instrument, tag_version, mtime_secs, size, title, artist, bpm, key, genre, comment
+            "SELECT path, instrument, tag_version, mtime_secs, size, title, artist, bpm, key,
+                    genre, comment, user_owned
              FROM instrument_tags",
         )
         .map_err(|err| format!("Failed to query tag store: {err}"))?;
     let rows = statement
         .query_map([], |row| {
+            let path: String = row.get(0)?;
             Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, u32>(2)?,
-                row.get::<_, i64>(3)?,
-                row.get::<_, i64>(4)?,
-                row.get::<_, String>(5)?,
-                row.get::<_, String>(6)?,
-                row.get::<_, String>(7)?,
-                row.get::<_, String>(8)?,
-                row.get::<_, String>(9)?,
-                row.get::<_, String>(10)?,
+                key(Path::new(&path)),
+                SidecarTag {
+                    instrument: row.get(1)?,
+                    tag_version: row.get(2)?,
+                    mtime_secs: row.get::<_, i64>(3)?.max(0) as u64,
+                    size: row.get::<_, i64>(4)?.max(0) as u64,
+                    title: row.get(5)?,
+                    artist: row.get(6)?,
+                    bpm: row.get(7)?,
+                    key: row.get(8)?,
+                    genre: row.get(9)?,
+                    comment: row.get(10)?,
+                    user_owned: row.get(11)?,
+                },
             ))
         })
         .map_err(|err| format!("Failed to read tag store: {err}"))?;
-    Ok(rows
-        .filter_map(Result::ok)
-        .map(
-            |(
-                path,
-                instrument,
-                tag_version,
-                mtime_secs,
-                size,
-                title,
-                artist,
-                bpm,
-                initial_key,
-                genre,
-                comment,
-            )| {
-            (
-                key(Path::new(&path)),
-                SidecarTag {
-                    instrument,
-                    artist,
-                    title,
-                    bpm,
-                    key: initial_key,
-                    genre,
-                    comment,
-                    tag_version,
-                    mtime_secs: mtime_secs.max(0) as u64,
-                    size: size.max(0) as u64,
-                },
-            )
-        },
-        )
-        .collect())
+    rows.collect::<Result<_, _>>()
+        .map_err(|err| format!("Failed to read tag store: {err}"))
 }
 
-fn cached(path: &Path) -> Option<SidecarTag> {
-    let store = cache()
-        .read()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    match &*store {
-        Store::Ready(map) => map
-            .get(&key(path))
-            .cloned()
-            .filter(|entry| stamp_matches(path, entry)),
-        Store::Missing => None,
-        Store::Failed(err) => {
-            let _ = err;
-            None
+/// The open database. Opened at start-up only when it already exists, so
+/// libraries that never need the fallback never get a database file.
+struct Database {
+    connection: Option<Connection>,
+    error: Option<String>,
+}
+
+impl Database {
+    fn connection(&mut self) -> Result<&Connection, String> {
+        if let Some(err) = &self.error {
+            return Err(err.clone());
         }
+        if self.connection.is_none() {
+            let path = db_path().ok_or_else(|| "No data directory available".to_string())?;
+            let connection = Connection::open(&path)
+                .map_err(|err| format!("Failed to open {}: {err}", path.display()))?;
+            prepare_schema(&connection)?;
+            self.connection = Some(connection);
+        }
+        Ok(self.connection.as_ref().expect("opened above"))
     }
 }
 
+struct TagStore {
+    rows: RwLock<HashMap<PathBuf, SidecarTag>>,
+    database: Mutex<Database>,
+}
+
+fn open_store() -> TagStore {
+    let mut database = Database {
+        connection: None,
+        error: None,
+    };
+    let rows = match db_path() {
+        Some(path) if path.exists() => database.connection().and_then(load_rows),
+        Some(_) => Ok(HashMap::new()),
+        None => Err("No data directory available".to_string()),
+    };
+    let rows = rows.unwrap_or_else(|err| {
+        // Refuse writes rather than let a half-loaded view overwrite rows the
+        // database still holds.
+        eprintln!("tundra: failed to load tag store: {err}");
+        database.error = Some(err);
+        HashMap::new()
+    });
+    TagStore {
+        rows: RwLock::new(rows),
+        database: Mutex::new(database),
+    }
+}
+
+static STORE: LazyLock<RwLock<TagStore>> = LazyLock::new(|| RwLock::new(open_store()));
+
+fn with_store<R>(f: impl FnOnce(&TagStore) -> R) -> R {
+    let store = STORE
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    f(&store)
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn cached(path: &Path) -> Option<SidecarTag> {
+    with_store(|store| {
+        let rows = store
+            .rows
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        rows.get(&key(path))
+            .filter(|entry| stamp_matches(path, entry))
+            .cloned()
+    })
+}
+
 /// Instrument recorded for `path`, if the container could not hold one.
-///
-/// A poisoned lock is recovered rather than propagated: the map is a plain
-/// cache, so a panic elsewhere must not silently disable the fallback.
 pub fn instrument(path: &Path) -> Option<String> {
-    cached(path).map(|entry| entry.instrument)
+    cached(path)
+        .map(|entry| entry.instrument)
+        .filter(|instrument| !instrument.is_empty())
+}
+
+/// Instrument the classifier stored, which a newer classifier may replace.
+pub fn tundra_instrument(path: &Path) -> Option<String> {
+    cached(path)
+        .filter(|entry| !entry.user_owned && !entry.instrument.is_empty())
+        .map(|entry| entry.instrument)
 }
 
 pub fn tag_version(path: &Path) -> Option<u32> {
@@ -387,83 +286,75 @@ pub fn tag_version(path: &Path) -> Option<u32> {
 }
 
 pub fn manual_fields(path: &Path) -> Option<SidecarManualFields> {
-    cached(path).and_then(|entry| {
-        let fields = entry.manual_fields();
-        (!fields.is_empty()).then_some(fields)
+    cached(path)
+        .map(|entry| entry.manual_fields())
+        .filter(|fields| !fields.is_empty())
+}
+
+fn save(path: &Path, entry: Option<SidecarTag>) -> Result<(), String> {
+    let row_key = key(path);
+    let stored = row_key.to_string_lossy().into_owned();
+    with_store(|store| {
+        let mut database = lock(&store.database);
+        let connection = database.connection()?;
+        let result = match &entry {
+            Some(entry) => connection.execute(
+                "INSERT INTO instrument_tags (
+                     path, instrument, tag_version, mtime_secs, size,
+                     title, artist, bpm, key, genre, comment, user_owned
+                 )
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                 ON CONFLICT(path) DO UPDATE SET
+                     instrument = excluded.instrument,
+                     tag_version = excluded.tag_version,
+                     mtime_secs = excluded.mtime_secs,
+                     size = excluded.size,
+                     title = excluded.title,
+                     artist = excluded.artist,
+                     bpm = excluded.bpm,
+                     key = excluded.key,
+                     genre = excluded.genre,
+                     comment = excluded.comment,
+                     user_owned = excluded.user_owned",
+                rusqlite::params![
+                    stored,
+                    entry.instrument,
+                    entry.tag_version,
+                    entry.mtime_secs as i64,
+                    entry.size as i64,
+                    entry.title,
+                    entry.artist,
+                    entry.bpm,
+                    entry.key,
+                    entry.genre,
+                    entry.comment,
+                    entry.user_owned,
+                ],
+            ),
+            None => connection.execute("DELETE FROM instrument_tags WHERE path = ?1", [&stored]),
+        };
+        result.map_err(|err| format!("Failed to save tag for {}: {err}", path.display()))?;
+
+        let mut rows = store
+            .rows
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match entry {
+            Some(entry) => rows.insert(row_key, entry),
+            None => rows.remove(&row_key),
+        };
+        Ok(())
     })
 }
 
-fn write_sidecar_entry(path: &Path, entry: SidecarTag) -> Result<(), String> {
-    let key = key(path);
-    let stored = key.to_string_lossy().into_owned();
-    open()?
-        .execute(
-            "INSERT INTO instrument_tags (
-                 path, instrument, tag_version, mtime_secs, size,
-                 title, artist, bpm, key, genre, comment
-             )
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
-             ON CONFLICT(path) DO UPDATE SET
-                 instrument = excluded.instrument,
-                 tag_version = excluded.tag_version,
-                 mtime_secs = excluded.mtime_secs,
-                 size = excluded.size,
-                 title = excluded.title,
-                 artist = excluded.artist,
-                 bpm = excluded.bpm,
-                 key = excluded.key,
-                 genre = excluded.genre,
-                 comment = excluded.comment",
-            (
-                &stored,
-                &entry.instrument,
-                entry.tag_version,
-                entry.mtime_secs as i64,
-                entry.size as i64,
-                &entry.title,
-                &entry.artist,
-                &entry.bpm,
-                &entry.key,
-                &entry.genre,
-                &entry.comment,
-            ),
-        )
-        .map_err(|err| format!("Failed to save tag for {}: {err}", path.display()))?;
-
-    let mut store = cache()
-        .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    match &mut *store {
-        Store::Ready(map) => {
-            map.insert(key, entry);
-        }
-        Store::Missing | Store::Failed(_) => {
-            let mut map = load_all().unwrap_or_default();
-            map.insert(key, entry);
-            *store = Store::Ready(map);
-        }
-    }
-    Ok(())
-}
-
-fn merge_sidecar_entry(path: &Path, update: impl FnOnce(&mut SidecarTag)) -> Result<(), String> {
+/// Read-modify-write one row against the file's current stamp.
+fn update(path: &Path, change: impl FnOnce(&mut SidecarTag)) -> Result<(), String> {
     let (mtime_secs, size) = file_stamp(path).unwrap_or((0, 0));
-    let mut entry = cached(path).unwrap_or(SidecarTag {
-        instrument: String::new(),
-        artist: String::new(),
-        title: String::new(),
-        bpm: String::new(),
-        key: String::new(),
-        genre: String::new(),
-        comment: String::new(),
-        tag_version: 0,
-        mtime_secs,
-        size,
-    });
+    let mut entry = cached(path).unwrap_or_default();
     entry.mtime_secs = mtime_secs;
     entry.size = size;
-    update(&mut entry);
-    write_sidecar_entry(path, entry)
+    change(&mut entry);
+    save(path, Some(entry))
 }
 
 pub fn set_instrument(path: &Path, instrument: &str, tag_version: u32) -> Result<(), String> {
@@ -471,9 +362,10 @@ pub fn set_instrument(path: &Path, instrument: &str, tag_version: u32) -> Result
     if instrument.is_empty() {
         return Err("Instrument label cannot be empty".into());
     }
-    merge_sidecar_entry(path, |entry| {
+    update(path, |entry| {
         entry.instrument = instrument.to_string();
         entry.tag_version = tag_version;
+        entry.user_owned = false;
     })
 }
 
@@ -482,8 +374,12 @@ pub fn set_manual_fields(
     fields: &SidecarManualFields,
     tag_version: u32,
 ) -> Result<(), String> {
-    merge_sidecar_entry(path, |entry| {
-        entry.instrument = fields.instrument.trim().to_string();
+    update(path, |entry| {
+        let instrument = fields.instrument.trim();
+        if instrument != entry.instrument {
+            entry.user_owned = !instrument.is_empty();
+        }
+        entry.instrument = instrument.to_string();
         entry.artist = fields.artist.trim().to_string();
         entry.title = fields.title.trim().to_string();
         entry.bpm = fields.bpm.trim().to_string();
@@ -494,14 +390,16 @@ pub fn set_manual_fields(
     })
 }
 
+/// Drop the manual fields after they were written into the file itself. A
+/// fallback instrument stays, since the file may still lack one.
 pub fn clear_manual_fields(path: &Path) -> Result<(), String> {
     let Some(entry) = cached(path) else {
         return Ok(());
     };
-    if entry.instrument.trim().is_empty() && entry.generic_empty() {
-        return remove_sidecar(path);
+    if entry.instrument.trim().is_empty() {
+        return save(path, None);
     }
-    merge_sidecar_entry(path, |entry| {
+    update(path, |entry| {
         entry.artist.clear();
         entry.title.clear();
         entry.bpm.clear();
@@ -520,83 +418,64 @@ pub(crate) fn restamp(path: &Path, previous: (u64, u64)) {
     if current == previous {
         return;
     }
-    let entry = {
-        let store = cache()
+    let entry = with_store(|store| {
+        let rows = store
+            .rows
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match &*store {
-            Store::Ready(map) => map.get(&key(path)).cloned(),
-            Store::Missing | Store::Failed(_) => None,
-        }
-    };
+        rows.get(&key(path)).cloned()
+    });
     let Some(mut entry) = entry.filter(|entry| (entry.mtime_secs, entry.size) == previous) else {
         return;
     };
     (entry.mtime_secs, entry.size) = current;
-    if let Err(err) = write_sidecar_entry(path, entry) {
+    if let Err(err) = save(path, Some(entry)) {
         eprintln!("tundra: {err}");
     }
 }
 
-pub fn remove_sidecar(path: &Path) -> Result<(), String> {
-    let cache_key = key(path);
-    let stored = cache_key.to_string_lossy().into_owned();
-    if db_path().is_some_and(|path| path.exists()) {
-        open()?.execute(
-            "DELETE FROM instrument_tags WHERE path = ?1",
-            [&stored],
-        )
-        .map_err(|err| format!("Failed to remove tag for {}: {err}", path.display()))?;
-    }
-    let mut store = cache()
-        .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Store::Ready(map) = &mut *store {
-        map.remove(&cache_key);
-    }
-    Ok(())
+#[cfg(test)]
+use std::cell::RefCell;
+
+#[cfg(test)]
+thread_local! {
+    static TEST_DB_PATH: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn test_db_path() -> Option<PathBuf> {
+    TEST_DB_PATH.with(|slot| slot.borrow().clone())
+}
+
+#[cfg(test)]
+static TAG_STORE_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+/// Run `f` against an isolated SQLite sidecar database (tests only).
+#[cfg(test)]
+pub(crate) fn with_test_db<F, R>(path: PathBuf, f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    let _lock = lock(&TAG_STORE_TEST_LOCK);
+    let reset = || {
+        *STORE
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = open_store();
+    };
+    TEST_DB_PATH.with(|slot| {
+        *slot.borrow_mut() = Some(path);
+        reset();
+        let result = f();
+        *slot.borrow_mut() = None;
+        reset();
+        result
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn round_trips_instrument_and_version_through_sqlite() {
-        let scratch = crate::test_fixtures::ScratchDir::new("tundra_tag_store");
-        let dir = scratch.path();
-        let db = dir.join("tags.db");
-        let connection = Connection::open(&db).expect("open db");
-        connection
-            .execute_batch(
-                "CREATE TABLE instrument_tags (
-                     path TEXT PRIMARY KEY,
-                     instrument TEXT NOT NULL,
-                     tag_version INTEGER NOT NULL DEFAULT 0,
-                     mtime_secs INTEGER NOT NULL DEFAULT 0,
-                     size INTEGER NOT NULL DEFAULT 0
-                 );",
-            )
-            .expect("create table");
-        connection
-            .execute(
-                "INSERT INTO instrument_tags (path, instrument, tag_version, mtime_secs, size)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                ("c:/samples/kick.wav", "Kick", 1_u32, 100_i64, 512_i64),
-            )
-            .expect("insert");
-
-        let stored: (String, u32, i64, i64) = connection
-            .query_row(
-                "SELECT instrument, tag_version, mtime_secs, size FROM instrument_tags WHERE path = ?1",
-                ["c:/samples/kick.wav"],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .expect("select");
-        assert_eq!(stored, ("Kick".to_string(), 1, 100, 512));
-
-        drop(connection);
-    }
+    use crate::test_fixtures::ScratchDir;
 
     #[test]
     fn sidecar_key_matches_cache_key_including_verbatim_prefix() {
@@ -607,69 +486,40 @@ mod tests {
     }
 
     #[test]
-    fn prepare_schema_adds_missing_columns() {
-        let scratch = crate::test_fixtures::ScratchDir::new("tundra_tag_store_migrate");
-        let dir = scratch.path();
-        let db = dir.join("tags.db");
-        let connection = Connection::open(&db).expect("open db");
+    fn prepare_schema_migrates_old_tables_and_infers_ownership() {
+        let scratch = ScratchDir::new("tag-store-migrate");
+        let connection = Connection::open(scratch.path().join("tags.db")).expect("open db");
         connection
             .execute_batch(
-                "CREATE TABLE instrument_tags (
-                     path TEXT PRIMARY KEY,
-                     instrument TEXT NOT NULL
-                 );",
+                "CREATE TABLE instrument_tags (path TEXT PRIMARY KEY, instrument TEXT NOT NULL,
+                     title TEXT NOT NULL DEFAULT '');
+                 INSERT INTO instrument_tags VALUES ('c:/auto.wav', 'Kick', '');
+                 INSERT INTO instrument_tags VALUES ('c:/manual.wav', 'Snare', 'Crack');",
             )
-            .expect("create pre-version table");
-        connection
-            .execute(
-                "INSERT INTO instrument_tags (path, instrument) VALUES (?1, ?2)",
-                ("c:/samples/kick.wav", "Kick"),
-            )
-            .expect("insert");
+            .expect("old schema");
 
         prepare_schema(&connection).expect("migrate");
-        assert!(has_column(&connection, "instrument_tags", "tag_version").expect("column"));
-        assert!(has_column(&connection, "instrument_tags", "mtime_secs").expect("column"));
-        assert!(has_column(&connection, "instrument_tags", "size").expect("column"));
-        let version: u32 = connection
-            .query_row(
-                "SELECT tag_version FROM instrument_tags WHERE path = ?1",
-                ["c:/samples/kick.wav"],
-                |row| row.get(0),
-            )
-            .expect("select version");
-        assert_eq!(version, 0);
-        let stamp: (i64, i64) = connection
-            .query_row(
-                "SELECT mtime_secs, size FROM instrument_tags WHERE path = ?1",
-                ["c:/samples/kick.wav"],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .expect("select stamp");
-        assert_eq!(stamp, (0, 0));
         prepare_schema(&connection).expect("migrate is idempotent");
 
-        drop(connection);
+        let rows = load_rows(&connection).expect("rows");
+        let auto = &rows[&key(Path::new("c:/auto.wav"))];
+        let manual = &rows[&key(Path::new("c:/manual.wav"))];
+        assert_eq!((auto.tag_version, auto.mtime_secs, auto.size), (0, 0, 0));
+        assert!(!auto.user_owned);
+        assert!(manual.user_owned);
     }
 
     #[test]
     fn stamp_mismatch_or_missing_file_hides_sidecar() {
-        let scratch = crate::test_fixtures::ScratchDir::new("tundra_tag_store_stamp");
-        let dir = scratch.path();
-        let audio = dir.join("kick.wav");
+        let scratch = ScratchDir::new("tag-store-stamp");
+        let audio = scratch.path().join("kick.wav");
         std::fs::write(&audio, b"audio-v1").expect("write");
         let (mtime_secs, size) = file_stamp(&audio).expect("stamp");
         let entry = SidecarTag {
             instrument: "Kick".into(),
-            artist: String::new(),
-            title: String::new(),
-            bpm: String::new(),
-            key: String::new(),
-            genre: String::new(),
-            comment: String::new(),
-            tag_version: 1,
             mtime_secs,
             size,
+            ..SidecarTag::default()
         };
         assert!(stamp_matches(&audio, &entry));
 
@@ -678,21 +528,8 @@ mod tests {
             !stamp_matches(&audio, &entry),
             "recycled path with new contents must hide the old sidecar"
         );
-
-        let stale = SidecarTag {
-            instrument: "Kick".into(),
-            artist: String::new(),
-            title: String::new(),
-            bpm: String::new(),
-            key: String::new(),
-            genre: String::new(),
-            comment: String::new(),
-            tag_version: 1,
-            mtime_secs: 0,
-            size: 0,
-        };
         assert!(
-            !stamp_matches(&audio, &stale),
+            !stamp_matches(&audio, &SidecarTag::default()),
             "pre-stamp rows must not match a real file"
         );
 
@@ -701,62 +538,50 @@ mod tests {
     }
 
     #[test]
-    fn migrate_copies_db_and_wal_then_removes_source() {
-        let scratch = crate::test_fixtures::ScratchDir::new("tundra_tag_store_cache_migrate");
-        let dir = scratch.path();
-        let src_dir = dir.join("cache");
-        let dest_dir = dir.join("data");
-        std::fs::create_dir_all(&src_dir).expect("cache dir");
-        let src = src_dir.join("tags.db");
-        let dest = dest_dir.join("tags.db");
-        std::fs::write(&src, b"sqlite-main").expect("db");
-        std::fs::write(crate::path_util::sidecar(&src, "-wal"), b"wal").expect("wal");
-        std::fs::write(crate::path_util::sidecar(&src, "-shm"), b"shm").expect("shm");
+    fn legacy_database_moves_with_its_wal_contents() {
+        let scratch = ScratchDir::new("tag-store-legacy");
+        let src = scratch.path().join("cache").join("tags.db");
+        let dest = scratch.path().join("data").join("tags.db");
+        std::fs::create_dir_all(src.parent().unwrap()).expect("cache dir");
+        std::fs::create_dir_all(dest.parent().unwrap()).expect("data dir");
+        let writer = Connection::open(&src).expect("open src");
+        prepare_schema(&writer).expect("schema");
+        writer
+            .execute(
+                "INSERT INTO instrument_tags (path, instrument) VALUES ('c:/kick.wav', 'Kick')",
+                [],
+            )
+            .expect("insert");
 
-        migrate_sqlite_file(&src, &dest);
+        // `writer` stays open, so the row may still live only in the WAL.
+        migrate_legacy_db(&src, &dest);
+        drop(writer);
 
-        assert_eq!(std::fs::read(&dest).expect("dest"), b"sqlite-main");
-        assert_eq!(
-            std::fs::read(crate::path_util::sidecar(&dest, "-wal")).expect("wal"),
-            b"wal"
-        );
-        assert_eq!(
-            std::fs::read(crate::path_util::sidecar(&dest, "-shm")).expect("shm"),
-            b"shm"
-        );
+        let rows = load_rows(&Connection::open(&dest).expect("open dest")).expect("rows");
+        assert_eq!(rows[&key(Path::new("c:/kick.wav"))].instrument, "Kick");
+        // Windows cannot delete a database another connection holds open.
+        #[cfg(unix)]
         assert!(!src.exists());
-        assert!(!crate::path_util::sidecar(&src, "-wal").exists());
-        assert!(!crate::path_util::sidecar(&src, "-shm").exists());
 
-        std::fs::write(&src, b"should-not-overwrite").expect("new cache");
-        migrate_sqlite_file(&src, &dest);
-        assert_eq!(std::fs::read(&dest).expect("kept dest"), b"sqlite-main");
+        std::fs::write(&src, b"stale").expect("new cache file");
+        migrate_legacy_db(&src, &dest);
+        assert!(load_rows(&Connection::open(&dest).expect("dest")).is_ok());
     }
 
     #[test]
-    fn migrate_noops_when_source_missing() {
-        let scratch = crate::test_fixtures::ScratchDir::new("tundra_tag_store_migrate_missing");
-        let dir = scratch.path();
-        let src = dir.join("missing.db");
-        let dest = dir.join("dest.db");
-
-        migrate_sqlite_file(&src, &dest);
-
-        assert!(!dest.exists());
-    }
-
-    #[test]
-    fn set_instrument_persists_stamp_and_round_trips_through_cache() {
-        let scratch = crate::test_fixtures::ScratchDir::new("tundra_tag_store_set");
-        let dir = scratch.path();
-        let db = dir.join("tags.db");
-        let audio = dir.join("kick.wav");
+    fn set_instrument_persists_and_survives_a_reload() {
+        let scratch = ScratchDir::new("tag-store-set");
+        let db = scratch.path().join("tags.db");
+        let audio = scratch.path().join("kick.wav");
         std::fs::write(&audio, b"audio-v1-bytes").expect("write");
-        with_test_db(db, || {
+        with_test_db(db.clone(), || {
+            assert!(instrument(&audio).is_none());
             set_instrument(&audio, "Kick", 2).expect("set");
             assert_eq!(instrument(&audio).as_deref(), Some("Kick"));
             assert_eq!(tag_version(&audio), Some(2));
-
+        });
+        with_test_db(db, || {
+            assert_eq!(instrument(&audio).as_deref(), Some("Kick"), "reloaded from disk");
             std::fs::write(&audio, b"short").expect("replace file");
             assert!(
                 instrument(&audio).is_none(),
@@ -766,13 +591,33 @@ mod tests {
     }
 
     #[test]
-    fn set_instrument_rejects_empty_label() {
-        let scratch = crate::test_fixtures::ScratchDir::new("tundra_tag_store_empty");
-        let dir = scratch.path();
-        let db = dir.join("tags.db");
-        let audio = dir.join("kick.wav");
+    fn manual_instrument_is_user_owned_until_the_classifier_sets_one() {
+        let scratch = ScratchDir::new("tag-store-owner");
+        let audio = scratch.path().join("kick.wav");
         std::fs::write(&audio, b"audio").expect("write");
-        with_test_db(db, || {
+        with_test_db(scratch.path().join("tags.db"), || {
+            let fields = SidecarManualFields {
+                instrument: "Snare".into(),
+                ..SidecarManualFields::default()
+            };
+            set_manual_fields(&audio, &fields, 1).expect("manual");
+            assert_eq!(instrument(&audio).as_deref(), Some("Snare"));
+            assert_eq!(tundra_instrument(&audio), None);
+
+            set_instrument(&audio, "Kick", 1).expect("auto");
+            assert_eq!(tundra_instrument(&audio).as_deref(), Some("Kick"));
+
+            clear_manual_fields(&audio).expect("clear");
+            assert_eq!(instrument(&audio).as_deref(), Some("Kick"));
+        });
+    }
+
+    #[test]
+    fn set_instrument_rejects_empty_label() {
+        let scratch = ScratchDir::new("tag-store-empty");
+        let audio = scratch.path().join("kick.wav");
+        std::fs::write(&audio, b"audio").expect("write");
+        with_test_db(scratch.path().join("tags.db"), || {
             assert!(set_instrument(&audio, "   ", 1).is_err());
         });
     }
