@@ -3,6 +3,7 @@ use crate::auto_tag;
 use crate::bulk_auto_tag;
 use crate::drag_out::NativeDrag;
 use crate::metadata::{
+    TagField,
     control_bar_tags, file_search_debounce_ms, index_paths, instrument_tag, parse_tag_filter,
     refresh_cached_metadata, tag_field_best_match,
     tag_parse_message, write_auto_tags, write_manual_tags,
@@ -20,7 +21,6 @@ use super::settings::{
 use super::tag_editor::{tag_editor_view, TagEditorState};
 use futures::channel::oneshot;
 use futures::future::{AbortHandle, Abortable};
-use futures::*;
 
 use iced::widget::{button, center, column, container, mouse_area, opaque, operation, row, stack, text, Space};
 use iced::widget::Id;
@@ -45,6 +45,7 @@ mod prefs;
 
 pub use cache::{DirCache, MetadataCache};
 pub use prefs::{window_level, set_window_level};
+use prefs::on_window;
 use cache::load_startup_caches;
 use helpers::{
     execute_file_search, pick_audio_file, pick_folder,
@@ -57,6 +58,14 @@ use prefs::{
     SIDEBAR_RESIZER_HIT_WIDTH, SIDEBAR_RESIZER_LINE_WIDTH,
     TITLE_DRAG_THRESHOLD, WINDOW_RESIZE_BORDER,
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Modal {
+    None,
+    Settings,
+    AutoTag,
+    TagEditor,
+}
 
 pub struct App {
     pub file_selector: FileSelector,
@@ -73,13 +82,14 @@ pub struct App {
     allowed_directories: AllowedDirectories,
     favorites: FavoritesStore,
     search_enabled_memo: std::cell::RefCell<Option<(PathBuf, Vec<PathBuf>, bool)>>,
-    settings_open: bool,
+    /// Directories being walked, so repeated requests share one walk.
+    walks_in_progress: HashSet<PathBuf>,
+    /// At most one of these modals is open; bulk auto-tag tracks its own state.
+    modal: Modal,
     settings_first_run: bool,
     settings_error: Option<String>,
     always_on_top: bool,
-    auto_tag_open: bool,
     auto_tag: AutoTagState,
-    tag_editor_open: bool,
     tag_editor: TagEditorState,
     bulk_auto_tag: BulkAutoTagState,
     bulk_scan_progress: Option<Arc<bulk_auto_tag::BulkScanProgress>>,
@@ -125,6 +135,7 @@ pub fn app() {
 }
 
 
+/// Run blocking work on its own thread. `Err` means it panicked.
 async fn run_blocking<T>(f: impl FnOnce() -> T + Send + 'static) -> Result<T, ()>
 where
     T: Send + 'static,
@@ -187,10 +198,7 @@ impl App {
                     },
                 ),
                 launch,
-                window::latest().then(|id| match id {
-                    Some(id) => window::is_maximized(id).map(Message::WindowMaximizedChanged),
-                    None => Task::none(),
-                }),
+                on_window(|id| window::is_maximized(id).map(Message::WindowMaximizedChanged)),
             ]),
         )
     }
@@ -200,7 +208,6 @@ impl Default for App {
     fn default() -> App {
         let allowed_directories = AllowedDirectories::load();
         let settings_first_run = allowed_directories.is_empty();
-        let settings_open = settings_first_run;
         let current_dir = allowed_directories
             .startup_directory()
             .unwrap_or_else(startup_directory);
@@ -224,13 +231,12 @@ impl Default for App {
             allowed_directories,
             favorites: FavoritesStore::load(),
             search_enabled_memo: Default::default(),
-            settings_open,
+            walks_in_progress: HashSet::new(),
+            modal: if settings_first_run { Modal::Settings } else { Modal::None },
             settings_first_run,
             settings_error: None,
             always_on_top: load_always_on_top(),
-            auto_tag_open: false,
             auto_tag: AutoTagState::default(),
-            tag_editor_open: false,
             tag_editor: TagEditorState::default(),
             bulk_auto_tag: BulkAutoTagState::default(),
             bulk_scan_progress: None,
@@ -307,9 +313,7 @@ impl App {
 
         let transport_keys = if state.player.waveform.is_some()
             && state.dialog.is_none()
-            && !state.settings_open
-            && !state.auto_tag_open
-            && !state.tag_editor_open
+            && state.modal == Modal::None
             && !state.bulk_auto_tag.is_open()
             && state.filter_focus != FilterFocus::FileSearch
             && (state.filter_focus != FilterFocus::TagSearch || state.file_list_focused)
@@ -545,18 +549,46 @@ impl App {
     }
 
     fn autocomplete_tag_field(&mut self) -> Task<Message> {
-        let input = self.file_selector.tag_search_value.clone();
-        if input.contains(':') || input.trim().is_empty() {
+        match tag_field_best_match(&self.file_selector.tag_search_value) {
+            Some(field) => self.select_tag_field(field),
+            None => Task::none(),
+        }
+    }
+
+    /// Put `field:` in the tag search box, ready for a value.
+    fn select_tag_field(&mut self, field: TagField) -> Task<Message> {
+        self.filter_focus = FilterFocus::TagSearch;
+        self.file_selector.tag_search_error = None;
+        self.file_selector.tag_search_value = format!("{}:", field.as_str());
+        operation::focus(Id::new(TAG_SEARCH_INPUT_ID))
+    }
+
+    /// Walk `dir` on a background thread unless a walk of it is already running.
+    fn walk_task(&mut self, dir: PathBuf) -> Task<Message> {
+        if !self.walks_in_progress.insert(crate::path_util::cache_key(dir.clone())) {
             return Task::none();
         }
-        if let Some(field) = tag_field_best_match(&input) {
-            self.filter_focus = FilterFocus::TagSearch;
-            self.file_selector.tag_search_error = None;
-            self.file_selector.tag_search_value = format!("{}:", field.as_str());
-            operation::focus(Id::new(TAG_SEARCH_INPUT_ID))
-        } else {
-            Task::none()
+        Task::perform(
+            run_blocking(move || {
+                let children = walk_directory(&dir);
+                (dir, children)
+            }),
+            |walked| walked.map_or(Message::NoOp, Message::InsertDircache),
+        )
+    }
+
+    fn finish_scrub(&mut self, progress: f64) -> Task<Message> {
+        if !self.waveform_scrubbing {
+            return Task::none();
         }
+        self.waveform_scrubbing = false;
+        self.player.controls.scrubbing = false;
+        if let Some(waveform) = &mut self.player.waveform {
+            waveform.set_ui_scrubbing(false);
+            waveform.set_scrub_progress(None);
+        }
+        self.player.seek(progress);
+        Task::none()
     }
 
     fn release_filter_focus(&mut self) -> Task<Message> {
@@ -589,7 +621,7 @@ impl App {
     }
 
     fn maybe_open_pending_launch(&mut self) -> Option<Task<Message>> {
-        if self.settings_open || self.pending_launch_path.is_none() {
+        if self.modal == Modal::Settings || self.pending_launch_path.is_none() {
             return None;
         }
         if !self.player.audio_ready() {
@@ -629,11 +661,7 @@ impl App {
             return Task::none();
         }
         if !self.dir_cache.contains_key(&dir) {
-            let walker = future::lazy(move |_| {
-                let children = walk_directory(&dir);
-                (dir, children)
-            });
-            Task::perform(walker, Message::InsertDircache)
+            self.walk_task(dir)
         } else {
             self.start_file_search()
         }
@@ -670,24 +698,17 @@ impl App {
     }
 
     fn ensure_drag() -> Task<Message> {
-        window::latest().then(|id| match id {
-            Some(id) => window::run(id, |window| crate::drag_out::x11_window_id(window))
-                .map(Message::DragWindowId),
-            None => Task::none(),
+        on_window(|id| {
+            window::run(id, |window| crate::drag_out::x11_window_id(window)).map(Message::DragWindowId)
         })
     }
 
     #[cfg(any(windows, target_os = "macos"))]
     fn begin_platform_drag(path: PathBuf) -> Task<Message> {
-        window::latest().then(move |id| match id {
-            Some(id) => {
-                let drag_path = path.clone();
-                window::run(id, move |window| {
-                    crate::drag_out::start_blocking(window, drag_path)
-                })
+        on_window(move |id| {
+            let drag_path = path.clone();
+            window::run(id, move |window| crate::drag_out::start_blocking(window, drag_path))
                 .map(Message::FileDragCompleted)
-            }
-            None => Task::none(),
         })
     }
 
@@ -775,8 +796,7 @@ impl App {
 
     fn open_tag_editor_for(&mut self, path: PathBuf) -> Task<Message> {
         self.prepare_feature_modal();
-        self.auto_tag_open = false;
-        self.tag_editor_open = true;
+        self.modal = Modal::TagEditor;
         if let Some(err) = self.allowed_audio_error(&path) {
             self.tag_editor = TagEditorState::default();
             self.tag_editor.set_error(err);
@@ -850,23 +870,17 @@ impl App {
         }
     }
 
-    fn warm_allowed_caches(&self) -> Task<Message> {
-        let tasks: Vec<Task<Message>> = self
+    fn warm_allowed_caches(&mut self) -> Task<Message> {
+        let missing: Vec<PathBuf> = self
             .allowed_directories
             .roots()
             .iter()
-            .filter(|root| !self.dir_cache.contains_key(*root))
-            .map(|root| {
-                let dir = root.clone();
-                let walker = future::lazy(move |_| {
-                    let children = walk_directory(&dir);
-                    (dir, children)
-                });
-                Task::perform(walker, Message::InsertDircache)
-            })
+            .filter(|root| !self.dir_cache.contains_key(root))
+            .cloned()
             .collect();
-        Task::batch(tasks)
+        Task::batch(missing.into_iter().map(|root| self.walk_task(root)))
     }
+
 
     fn start_file_search(&mut self) -> Task<Message> {
         self.search_thread.abort();
@@ -995,29 +1009,14 @@ impl App {
 
         Task::perform(
             async move {
-                let (tx, rx) = futures::channel::oneshot::channel();
-                std::thread::spawn(move || {
-                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        bulk_auto_tag::scan_and_classify(root, metadata, progress, cancel)
-                    }));
-                    let summary = match result {
-                        Ok(Ok(summary)) => Ok(summary),
-                        Ok(Err(message)) => Err(message),
-                        Err(_) => {
-                            eprintln!("bulk auto tag scan panicked");
-                            Err("Scan failed unexpectedly.".into())
-                        }
-                    };
-                    let _ = tx.send((generation, summary));
-                });
-                rx.await.unwrap_or_else(|_| {
-                    eprintln!("bulk auto tag scan channel dropped");
-                    (
-                        generation,
-                        Err("Scan failed unexpectedly.".into()),
-                    )
+                let result = run_blocking(move || {
+                    bulk_auto_tag::scan_and_classify(root, metadata, progress, cancel)
                 })
+                .await
+                .unwrap_or_else(|()| Err("Scan failed unexpectedly.".into()));
+                (generation, result)
             },
+
             |(generation, result)| Message::BulkAutoTagScanCompleted { generation, result },
         )
     }
@@ -1063,18 +1062,10 @@ impl App {
             }
 
             Message::OpenFile => Task::perform(
-                async {
-                    rfd::AsyncFileDialog::new()
-                        .add_filter(
-                            "Audio",
-                            AUDIO_EXTENSIONS,
-                        )
-                        .pick_file()
-                        .await
-                        .map(|file| file.path().to_path_buf())
-                },
+                pick_audio_file(self.file_selector.current_dir.clone()),
                 Message::FilePicked,
             ),
+
 
             Message::FilePicked(file) => {
                 if let Some(path) = file {
@@ -1120,19 +1111,14 @@ impl App {
                 Task::none()
             }
 
-            Message::WindowMinimize => window::latest().then(|id| match id {
-                Some(id) => window::minimize(id, true),
-                None => Task::none(),
-            }),
+            Message::WindowMinimize => on_window(|id| window::minimize(id, true)),
 
             Message::WindowToggleMaximize => {
                 self.title_bar.drag_armed = false;
                 self.title_bar.press_origin = None;
-                window::latest().then(|id| match id {
-                    Some(id) => window::toggle_maximize(id).chain(
-                        window::is_maximized(id).map(Message::WindowMaximizedChanged),
-                    ),
-                    None => Task::none(),
+                on_window(|id| {
+                    window::toggle_maximize(id)
+                        .chain(window::is_maximized(id).map(Message::WindowMaximizedChanged))
                 })
             }
 
@@ -1141,15 +1127,11 @@ impl App {
                 Task::none()
             }
 
-            Message::SyncWindowMaximized => window::latest().then(|id| match id {
-                Some(id) => window::is_maximized(id).map(Message::WindowMaximizedChanged),
-                None => Task::none(),
-            }),
+            Message::SyncWindowMaximized => {
+                on_window(|id| window::is_maximized(id).map(Message::WindowMaximizedChanged))
+            }
 
-            Message::WindowResize(direction) => window::latest().then(move |id| match id {
-                Some(id) => window::drag_resize(id, direction),
-                None => Task::none(),
-            }),
+            Message::WindowResize(direction) => on_window(move |id| window::drag_resize(id, direction)),
 
             Message::NoOp => Task::none(),
 
@@ -1170,8 +1152,7 @@ impl App {
 
             Message::OpenSettings => {
                 self.prepare_feature_modal();
-                self.auto_tag_open = false;
-                self.settings_open = true;
+                self.modal = Modal::Settings;
                 self.settings_error = None;
                 Task::none()
             }
@@ -1188,7 +1169,7 @@ impl App {
                         Some("Add at least one directory to search.".into());
                     return Task::none();
                 }
-                self.settings_open = false;
+                self.modal = Modal::None;
                 self.settings_first_run = false;
                 self.settings_error = None;
                 self.prune_caches();
@@ -1234,11 +1215,7 @@ impl App {
                             if self.dir_cache.contains_key(&resolved) {
                                 return self.refresh_search_if_active();
                             }
-                            let walker = future::lazy(move |_| {
-                                let children = walk_directory(&resolved);
-                                (resolved, children)
-                            });
-                            return Task::perform(walker, Message::InsertDircache);
+                            return self.walk_task(resolved);
                         }
                         (AddDirectoryResult::Unresolved, _) => {
                             self.settings_error =
@@ -1283,12 +1260,7 @@ impl App {
 
             Message::ToggleFavoritesOnly => {
                 self.file_selector.favorites_only = !self.file_selector.favorites_only;
-                if self.file_selector.search_active() {
-                    self.start_file_search()
-                } else {
-                    self.reset_file_list();
-                    Task::none()
-                }
+                self.refresh_after_favorites_change()
             }
 
             Message::ToggleFavorite(path) => {
@@ -1302,8 +1274,7 @@ impl App {
 
             Message::OpenAutoTag => {
                 self.prepare_feature_modal();
-                self.tag_editor_open = false;
-                self.auto_tag_open = true;
+                self.modal = Modal::AutoTag;
                 let target = self.file_selector.selected_audio_path();
                 self.auto_tag.reset_for_target(target);
                 Task::none()
@@ -1311,8 +1282,7 @@ impl App {
 
             Message::OpenAutoTagFor(path) => {
                 self.prepare_feature_modal();
-                self.tag_editor_open = false;
-                self.auto_tag_open = true;
+                self.modal = Modal::AutoTag;
                 if let Some(err) = self.allowed_audio_error(&path) {
                     self.auto_tag.reset_for_target(None);
                     self.auto_tag.set_error(err);
@@ -1323,14 +1293,14 @@ impl App {
             }
 
             Message::CloseAutoTag => {
-                self.auto_tag_open = false;
+                self.modal = Modal::None;
                 Task::none()
             }
 
             Message::OpenTagEditorFor(path) => self.open_tag_editor_for(path),
 
             Message::CloseTagEditor => {
-                self.tag_editor_open = false;
+                self.modal = Modal::None;
                 self.tag_editor = TagEditorState::default();
                 Task::none()
             }
@@ -1495,8 +1465,7 @@ impl App {
 
             Message::OpenBulkAutoTag => {
                 self.dialog = None;
-                self.auto_tag_open = false;
-                self.tag_editor_open = false;
+                self.modal = Modal::None;
                 self.abort_bulk_scan();
                 self.bulk_auto_tag.open();
                 Task::none()
@@ -1799,12 +1768,7 @@ impl App {
                 self.start_file_search()
             }
 
-            Message::TagSuggestionSelect(field) => {
-                self.filter_focus = FilterFocus::TagSearch;
-                self.file_selector.tag_search_error = None;
-                self.file_selector.tag_search_value = format!("{}:", field.as_str());
-                operation::focus(Id::new(TAG_SEARCH_INPUT_ID))
-            }
+            Message::TagSuggestionSelect(field) => self.select_tag_field(field),
 
             Message::SearchCompleted { generation, result } => {
                 if generation != self.search_generation {
@@ -1903,6 +1867,8 @@ impl App {
             }
 
             Message::InsertDircache((parent_dir, children)) => {
+                self.walks_in_progress
+                    .remove(&crate::path_util::cache_key(parent_dir.clone()));
                 if !self.allowed_directories.contains_path(&parent_dir) {
                     return Task::none();
                 }
@@ -2230,10 +2196,7 @@ impl App {
                     }
                     self.title_bar.drag_armed = false;
                     self.title_bar.press_origin = None;
-                    return window::latest().then(|id| match id {
-                        Some(id) => window::drag(id),
-                        None => Task::none(),
-                    });
+                    return on_window(window::drag);
                 }
                 Task::none()
             }
@@ -2329,34 +2292,9 @@ impl App {
                 Task::none()
             }
 
-            Message::WaveformScrubEnd(progress) => {
-                if !self.waveform_scrubbing {
-                    return Task::none();
-                }
-                self.waveform_scrubbing = false;
-                self.player.controls.scrubbing = false;
-                if let Some(waveform) = &mut self.player.waveform {
-                    waveform.set_ui_scrubbing(false);
-                    waveform.set_scrub_progress(None);
-                }
-                self.player.seek(progress);
-                Task::none()
-            }
+            Message::WaveformScrubEnd(progress) => self.finish_scrub(progress),
 
-            Message::WaveformScrubRelease => {
-                if !self.waveform_scrubbing {
-                    return Task::none();
-                }
-                let progress = self.last_scrub_progress;
-                self.waveform_scrubbing = false;
-                self.player.controls.scrubbing = false;
-                if let Some(waveform) = &mut self.player.waveform {
-                    waveform.set_ui_scrubbing(false);
-                    waveform.set_scrub_progress(None);
-                }
-                self.player.seek(progress);
-                Task::none()
-            }
+            Message::WaveformScrubRelease => self.finish_scrub(self.last_scrub_progress),
 
             Message::WaveformFileDragStart => {
                 let Some(path) = self.player.current_file.clone() else {
@@ -2833,7 +2771,7 @@ impl App {
         .width(Length::Fill)
         .height(Length::Fill);
 
-        let workspace: Element<_> = if self.settings_open {
+        let workspace: Element<_> = if self.modal == Modal::Settings {
             Self::with_dim_overlay(
                 workspace.into(),
                 settings::settings_view(
@@ -2847,9 +2785,9 @@ impl App {
                 workspace.into(),
                 bulk_auto_tag_view(&self.bulk_auto_tag, self.modifiers),
             )
-        } else if self.tag_editor_open {
+        } else if self.modal == Modal::TagEditor {
             Self::with_dim_overlay(workspace.into(), tag_editor_view(&self.tag_editor))
-        } else if self.auto_tag_open {
+        } else if self.modal == Modal::AutoTag {
             Self::with_dim_overlay(workspace.into(), auto_tag_view(&self.auto_tag))
         } else if let Some(dialog) = &self.dialog {
             Self::with_dialog(workspace.into(), dialog)

@@ -76,10 +76,14 @@ pub fn window_level(always_on_top: bool) -> window::Level {
     }
 }
 
+/// Run `task` against the app window, or do nothing if there is none yet.
+pub(crate) fn on_window(
+    task: impl Fn(window::Id) -> Task<Message> + Send + 'static,
+) -> Task<Message> {
+    window::latest().then(move |id| id.map_or_else(Task::none, &task))
+}
+
 pub fn set_window_level(always_on_top: bool) -> Task<Message> {
     let level = window_level(always_on_top);
-    window::latest().then(move |id| match id {
-        Some(id) => window::set_level(id, level),
-        None => Task::none(),
-    })
+    on_window(move |id| window::set_level(id, level))
 }
