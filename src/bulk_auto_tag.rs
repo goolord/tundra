@@ -443,7 +443,11 @@ pub fn build_scan_summary(
                 path: path.clone(),
                 suggested: Some(classification.instrument),
                 confidence: classification.confidence,
-                accepted: true,
+                // Pre-check only suggestions worth trusting; a low-confidence guess
+                // must be opted into before Apply writes it permanently.
+                accepted: classification
+                    .confidence
+                    .is_none_or(|confidence| confidence >= auto_tag::MEDIUM_CLASSIFIER_CONFIDENCE),
                 error: None,
             },
             Err(err) => {

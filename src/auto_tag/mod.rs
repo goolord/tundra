@@ -79,6 +79,8 @@ pub fn bundled_python() -> Option<BundledPython> {
 /// Must match `scripts/.python-version` and xtask's `PYTHON_VERSION`.
 pub const UV_PYTHON: &str = "3.12";
 pub const HIGH_CLASSIFIER_CONFIDENCE: f64 = 0.85;
+/// Below this a suggestion is shown but not pre-selected for bulk apply.
+pub const MEDIUM_CLASSIFIER_CONFIDENCE: f64 = 0.65;
 
 /// Single-file path persists cache immediately so manual Auto Tag survives app restarts.
 pub fn classify_file(path: &Path) -> Result<ClassificationResult, ClassifyError> {

@@ -620,7 +620,7 @@ fn confidence_badge(confidence: Option<f64>) -> Element<'static, Message> {
     let label = crate::auto_tag::confidence_percent(confidence);
     let tone = match confidence {
         Some(value) if value >= crate::auto_tag::HIGH_CLASSIFIER_CONFIDENCE => CONF_HIGH,
-        Some(value) if value >= 0.65 => CONF_MED,
+        Some(value) if value >= crate::auto_tag::MEDIUM_CLASSIFIER_CONFIDENCE => CONF_MED,
         _ => CONF_LOW,
     };
     container(
