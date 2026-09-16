@@ -2,36 +2,109 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::LazyLock;
 
+/// Names for each instrument, matched against words in file and folder names
+/// and used to widen instrument searches. English names and common sample-pack
+/// abbreviations come first in each group, then other languages (Spanish,
+/// Portuguese, French, Italian, German, Japanese, Chinese, Korean).
+///
+/// Non-ASCII names of two or more characters also match inside a longer word,
+/// since Japanese and Chinese names are not separated by spaces
+/// (`スネアドラム01`). Two-letter drum-machine codes that are also ordinary
+/// words live in `WEAK_ALIASES` instead.
 const INSTRUMENT_ALIAS_GROUPS: &[&[&str]] = &[
     &[
         "kick", "bd", "bassdrum", "bass drum", "kick drum", "kickdrum", "808 kick", "808kick",
-        "kik",
+        "kik", "kck", "bombo", "bumbo", "grosse caisse", "cassa", "basstrommel", "キック",
+        "バスドラム", "バスドラ", "底鼓", "大鼓", "킥",
     ],
-    &["snare", "sd", "sn", "snr"],
-    &["rim", "rimshot", "rim shot", "side stick", "sidestick"],
+    &[
+        "snare", "sd", "sn", "snr", "snare drum", "snaredrum", "caja", "redoblante", "caixa",
+        "caisse claire", "rullante", "kleine trommel", "スネア", "军鼓", "小鼓", "스네어",
+    ],
+    &["rim", "rimshot", "rim shot", "side stick", "sidestick", "rim click", "rimclick"],
     &[
         "hihat", "hi-hat", "hi hat", "hh", "hat", "hats", "open hat", "closed hat", "openhat",
-        "closedhat", "op hat", "cl hat",
+        "closedhat", "op hat", "cl hat", "hhat", "chh", "ohh", "phh", "hhc", "hho",
+        "pedal hat", "pedalhat", "charleston", "chimbal", "ハイハット", "踩镲", "하이햇",
     ],
-    &["clap", "handclap", "hand clap"],
-    &["tom", "toms", "floor tom", "floortom", "rack tom", "racktom"],
+    &[
+        "clap", "handclap", "hand clap", "clp", "snap", "fingersnap", "finger snap", "snp",
+        "palmas", "aplauso", "battimani", "クラップ", "拍手", "클랩",
+    ],
+    &[
+        "tom", "toms", "floor tom", "floortom", "rack tom", "racktom", "tomtom", "tom tom",
+        "hi tom", "mid tom", "low tom", "タム", "通鼓", "탐탐",
+    ],
     &[
         "perc", "percs", "percussion", "conga", "bongo", "bongos", "shaker", "tamb",
-        "tambourine", "cowbell", "triangle", "woodblock", "cabasa",
+        "tambourine", "cowbell", "triangle", "woodblock", "cabasa", "prc", "clave", "claves",
+        "guiro", "timbale", "timbales", "djembe", "cajon", "agogo", "maraca", "tabla",
+        "tamborine", "percusion", "percusión", "percussioni", "perkussion", "パーカッション",
+        "打击乐", "퍼커션",
     ],
-    &["crash", "cymbal", "cymbals", "ride", "splash", "china"],
-    &["bass", "sub", "subbass", "sub bass", "808 bass", "808bass", "reese", "wobble"],
-    &["synth", "lead", "pad", "pluck", "stab", "arp", "arpeggio", "keys"],
+    &[
+        "crash", "cymbal", "cymbals", "ride", "splash", "china", "crsh", "crashes", "cym",
+        "cymb", "platillo", "prato", "cymbale", "piatto", "piatti", "becken", "シンバル",
+        "吊镲", "镲片", "심벌",
+    ],
+    &[
+        "bass", "sub", "subbass", "sub bass", "808 bass", "808bass", "reese", "wobble", "bajo",
+        "baixo", "basse", "basso", "ベース", "贝斯", "베이스",
+    ],
+    &[
+        "synth", "lead", "pad", "pluck", "stab", "arp", "arpeggio", "keys", "synthesizer",
+        "teclado", "clavier", "tastiera", "sintetizador", "シンセ", "合成器", "신스",
+    ],
     &[
         "fx", "sfx", "effect", "impact", "riser", "sweep", "noise", "atm", "atmosphere",
-        "ambient", "transition", "downlifter", "uplifter",
+        "ambient", "transition", "downlifter", "uplifter", "whoosh", "swoosh", "glitch",
+        "efectos", "effets", "effetti", "エフェクト", "音效", "효과음",
     ],
-    &["vocal", "vox", "voice", "acapella", "aca", "phrase", "adlib"],
-    &["piano", "rhodes", "organ", "electric piano", "ep"],
-    &["guitar", "gtr", "acoustic guitar", "acousticguitar"],
-    &["loop", "loops", "top loop", "toploop", "drum loop", "drumloop"],
-    &["oneshot", "one shot", "one-shot"],
-    &["brass", "horn", "trumpet", "sax", "saxophone", "flute", "strings", "string"],
+    &[
+        "vocal", "vox", "voice", "acapella", "aca", "phrase", "adlib", "voc", "vcl",
+        "acappella", "a cappella", "choir", "chant", "voz", "voix", "voce", "stimme", "gesang",
+        "ボーカル", "ボイス", "人声", "보컬",
+    ],
+    &[
+        "piano", "rhodes", "organ", "electric piano", "epiano", "klavier", "ピアノ",
+        "钢琴", "피아노",
+    ],
+    &[
+        "guitar", "gtr", "acoustic guitar", "acousticguitar", "guit", "guitarra", "guitare",
+        "chitarra", "gitarre", "violao", "violão", "ギター", "吉他",
+    ],
+    &[
+        "loop", "loops", "top loop", "toploop", "drum loop", "drumloop", "bucle", "boucle",
+        "ループ", "循环", "루프",
+    ],
+    &["oneshot", "one shot", "one-shot", "ワンショット"],
+    &[
+        "brass", "horn", "trumpet", "sax", "saxophone", "flute", "strings", "string", "metales",
+        "cuivres", "ottoni", "blechbläser", "ブラス", "铜管",
+    ],
+];
+
+/// Drum-machine codes (TR-808/909 pad names and common kit abbreviations) that
+/// are also everyday words or initials: `Oh Yeah.wav` is a vocal, not an open
+/// hat. They only name the instrument when nothing else in the path does, and
+/// never widen searches.
+const WEAK_ALIASES: &[(&str, &str)] = &[
+    ("ch", "Hi-Hat"),
+    ("oh", "Hi-Hat"),
+    ("rd", "Cymbal"),
+    ("cr", "Cymbal"),
+    ("cy", "Cymbal"),
+    ("cp", "Clap"),
+    ("rs", "Rim"),
+    ("lt", "Tom"),
+    ("mt", "Tom"),
+    ("ht", "Tom"),
+    ("cb", "Percussion"),
+    ("cl", "Percussion"),
+    ("ma", "Percussion"),
+    ("kd", "Kick"),
+    // Also "extended play" in release folder names.
+    ("ep", "Piano"),
 ];
 
 const INSTRUMENT_HINT_LABELS: &[&str] = &[
@@ -58,6 +131,9 @@ const _: () = assert!(INSTRUMENT_ALIAS_GROUPS.len() == INSTRUMENT_HINT_LABELS.le
 const _: () = assert!(INSTRUMENT_ALIAS_GROUPS.len() <= u32::BITS as usize);
 
 const MIN_INSTRUMENT_SUBSTRING_LEN: usize = 4;
+/// Shortest word that may match an alias by prefix. One- and two-letter words
+/// are initials or key names (`C`, `A`), not instruments.
+const MIN_PREFIX_NEEDLE_LEN: usize = 3;
 
 /// `INSTRUMENT_ALIAS_GROUPS`, normalized once.
 static NORMALIZED_ALIAS_GROUPS: LazyLock<Vec<Vec<String>>> = LazyLock::new(|| {
@@ -75,9 +151,15 @@ fn instrument_alias_matches(needle: &str, alias_norm: &str) -> bool {
     {
         return true;
     }
-    // Short tokens only: "hat"/"hh". Prefix on longer names made `bass` hit
+    if !alias_norm.is_ascii() {
+        // Japanese and Chinese words run together without spaces.
+        return alias_norm.chars().count() >= 2 && needle.contains(alias_norm);
+    }
+    // Short ASCII tokens only. Prefix on longer names made `bass` hit
     // `bassdrum` (Kick) and `shot` hit `rimshot`.
-    needle.len() < MIN_INSTRUMENT_SUBSTRING_LEN
+    needle.is_ascii()
+        && needle.len() >= MIN_PREFIX_NEEDLE_LEN
+        && needle.len() < MIN_INSTRUMENT_SUBSTRING_LEN
         && alias_norm.len() < MIN_INSTRUMENT_SUBSTRING_LEN
         && (alias_norm.starts_with(needle) || needle.starts_with(alias_norm))
 }
@@ -88,8 +170,8 @@ fn is_simple_plural(plural: &str, singular: &str) -> bool {
 
 fn normalize_instrument_term(term: &str) -> String {
     term.chars()
-        .filter(char::is_ascii_alphanumeric)
-        .map(|ch| ch.to_ascii_lowercase())
+        .filter(|ch| ch.is_alphanumeric())
+        .flat_map(char::to_lowercase)
         .collect()
 }
 
@@ -130,11 +212,20 @@ pub fn instrument_hint_from_path(path: &Path) -> Option<String> {
         }
     };
 
+    // A weak alias scores below any real name anywhere in the path, but a weak
+    // alias in the file name still beats one in a folder.
+    let mut consider_token = |base: i32, token: &str| {
+        let length = token.chars().count() as i32;
+        if let Some(label) = hint_label_for_term(token) {
+            consider(base + length, label);
+        } else if let Some(label) = weak_hint_label(token) {
+            consider(base / 100 + length, label);
+        }
+    };
+
     if let Some(stem) = crate::path_util::file_stem_lossy(path) {
         for token in hint_name_tokens(&stem) {
-            if let Some(label) = hint_label_for_term(&token) {
-                consider(1_000 + token.len() as i32, label);
-            }
+            consider_token(1_000, &token);
         }
     }
 
@@ -147,9 +238,7 @@ pub fn instrument_hint_from_path(path: &Path) -> Option<String> {
             continue;
         };
         for token in hint_name_tokens(name) {
-            if let Some(label) = hint_label_for_term(&token) {
-                consider(score_base + token.len() as i32, label);
-            }
+            consider_token(score_base, &token);
         }
     }
 
@@ -321,22 +410,42 @@ fn format_path_segment_as_artist(name: &str) -> String {
         .join(" ")
 }
 
+/// Candidate words in a file or folder name: the whole name, each word (split
+/// at punctuation, spaces, and letter/digit boundaries, so `Kick01` yields
+/// `kick`), and each pair of adjacent words joined (`Bass Drum` -> `bassdrum`).
 pub(crate) fn hint_name_tokens(name: &str) -> Vec<String> {
-    let mut tokens = vec![normalize_instrument_term(name)];
+    let mut words: Vec<String> = Vec::new();
     let mut current = String::new();
     for ch in name.chars() {
-        if ch.is_ascii_alphanumeric() {
-            current.push(ch);
-        } else if !current.is_empty() {
-            tokens.push(normalize_instrument_term(&current));
+        let boundary = current
+            .chars()
+            .last()
+            .is_some_and(|last| last.is_numeric() != ch.is_numeric());
+        if (!ch.is_alphanumeric() || boundary) && !current.is_empty() {
+            words.push(normalize_instrument_term(&current));
             current.clear();
+        }
+        if ch.is_alphanumeric() {
+            current.push(ch);
         }
     }
     if !current.is_empty() {
-        tokens.push(normalize_instrument_term(&current));
+        words.push(normalize_instrument_term(&current));
     }
+
+    let mut tokens = vec![normalize_instrument_term(name)];
+    tokens.extend(words.iter().cloned());
+    tokens.extend(words.windows(2).map(|pair| format!("{}{}", pair[0], pair[1])));
     tokens.retain(|token| !token.is_empty());
     tokens
+}
+
+fn weak_hint_label(term: &str) -> Option<&'static str> {
+    let needle = normalize_instrument_term(term);
+    WEAK_ALIASES
+        .iter()
+        .find(|(alias, _)| *alias == needle)
+        .map(|(_, label)| *label)
 }
 
 pub(crate) fn hint_label_for_term(term: &str) -> Option<&'static str> {

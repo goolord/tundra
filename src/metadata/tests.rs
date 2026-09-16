@@ -753,6 +753,61 @@ fn instrument_hint(path: &Path) -> Option<(String, HintSource)> {
     }
 
     #[test]
+    fn instrument_hint_understands_kit_codes_word_pairs_and_other_languages() {
+        let hint = |path: &str| instrument_hint_from_path(Path::new(path));
+        let cases = [
+            // Drum-machine codes when nothing else names the instrument.
+            (r"F:\Samples\909 Kit\CH 01.wav", Some("Hi-Hat")),
+            (r"F:\Samples\909 Kit\OH.wav", Some("Hi-Hat")),
+            (r"F:\Samples\Kit\RD_02.wav", Some("Cymbal")),
+            (r"F:\Samples\Kit\CP.wav", Some("Clap")),
+            (r"F:\Samples\Kit\LT 3.wav", Some("Tom")),
+            // ...but never over a real name anywhere in the path.
+            (r"F:\Samples\Vocals\Oh Yeah.wav", Some("Vocal")),
+            (r"F:\Samples\Snares\CH.wav", Some("Snare")),
+            (r"F:\Samples\Artist - Night EP\Kicks\hit.wav", Some("Kick")),
+            // Abbreviations, digits glued to words, and word pairs.
+            (r"F:\Samples\KCK_Deep.wav", Some("Kick")),
+            (r"F:\Samples\CRSH 1.wav", Some("Cymbal")),
+            (r"F:\Samples\Kick01.wav", Some("Kick")),
+            (r"F:\Samples\Bass Drum 3.wav", Some("Kick")),
+            (r"F:\Samples\808 Bass.wav", Some("Bass")),
+            (r"F:\Samples\Hi Hat Open.wav", Some("Hi-Hat")),
+            (r"F:\Samples\Finger Snap.wav", Some("Clap")),
+            // Single letters (key names, take letters) are not instruments.
+            (r"F:\Samples\Pads\C major.wav", Some("Synth")),
+            (r"F:\Samples\Snares\Sample A.wav", Some("Snare")),
+            (r"F:\Samples\Misc\Sample A.wav", None),
+            // Other languages.
+            (r"F:\Samples\Caja 01.wav", Some("Snare")),
+            (r"F:\Samples\Bombo.wav", Some("Kick")),
+            (r"F:\Samples\Grosse Caisse.wav", Some("Kick")),
+            (r"F:\Samples\Caisse Claire 2.wav", Some("Snare")),
+            (r"F:\Samples\Platillos\hit.wav", Some("Cymbal")),
+            (r"F:\Samples\Percusión\hit.wav", Some("Percussion")),
+            (r"F:\Samples\Gitarre.wav", Some("Guitar")),
+            (r"F:\Samples\Voz.wav", Some("Vocal")),
+            (r"F:\Samples\キック_01.wav", Some("Kick")),
+            (r"F:\Samples\スネアドラム.wav", Some("Snare")),
+            (r"F:\Samples\ハイハット\01.wav", Some("Hi-Hat")),
+            (r"F:\Samples\底鼓 01.wav", Some("Kick")),
+            (r"F:\Samples\踩镲.wav", Some("Hi-Hat")),
+            (r"F:\Samples\베이스.wav", Some("Bass")),
+        ];
+        for (path, expected) in cases {
+            assert_eq!(hint(path).as_deref(), expected, "{path}");
+        }
+    }
+
+    #[test]
+    fn translated_aliases_widen_search_but_kit_codes_do_not() {
+        assert!(instruments_related("キック", "Kick"));
+        assert!(instruments_related("caja", "snare"));
+        assert!(!instruments_related("ch", "Hi-Hat"));
+        assert!(!instruments_related("ep", "Piano"));
+    }
+
+    #[test]
     fn bass_is_not_related_to_kick() {
         assert!(!instruments_related("Bass", "Kick"));
         assert!(!instruments_related("bass", "bassdrum"));
