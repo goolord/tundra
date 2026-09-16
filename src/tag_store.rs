@@ -65,10 +65,15 @@ fn stamp_matches(path: &Path, entry: &SidecarTag) -> bool {
 }
 
 fn db_path() -> Option<PathBuf> {
+    // Tests only ever see the database `with_test_db` points at.
     #[cfg(test)]
-    if let Some(path) = test_db_path() {
-        return Some(path);
-    }
+    return test_db_path();
+    #[cfg(not(test))]
+    real_db_path()
+}
+
+#[cfg(not(test))]
+fn real_db_path() -> Option<PathBuf> {
     let dest = crate::path_util::tundra_data_dir()?.join("tags.db");
     if let Some(legacy) = crate::path_util::cache_file("tags.db") {
         migrate_legacy_db(&legacy, &dest);
@@ -139,7 +144,10 @@ fn prepare_schema(connection: &Connection) -> Result<(), String> {
         if existing.iter().any(|name| name == column) {
             continue;
         }
-        connection
+        // Adding a column and back-filling it commit together, or a failed
+        // back-fill would never be retried.
+        let transaction = connection.unchecked_transaction().map_err(fail)?;
+        transaction
             .execute(&format!("ALTER TABLE instrument_tags ADD COLUMN {column} {decl}"), [])
             .map_err(fail)?;
         if column == "user_owned" {
@@ -154,6 +162,7 @@ fn prepare_schema(connection: &Connection) -> Result<(), String> {
                 )
                 .map_err(fail)?;
         }
+        transaction.commit().map_err(fail)?;
     }
     Ok(())
 }
@@ -292,10 +301,22 @@ pub fn manual_fields(path: &Path) -> Option<SidecarManualFields> {
 }
 
 fn save(path: &Path, entry: Option<SidecarTag>) -> Result<(), String> {
-    let row_key = key(path);
-    let stored = row_key.to_string_lossy().into_owned();
     with_store(|store| {
         let mut database = lock(&store.database);
+        write_row(store, &mut database, path, entry)
+    })
+}
+
+/// Write one row and mirror it in memory. The caller holds the database lock.
+fn write_row(
+    store: &TagStore,
+    database: &mut Database,
+    path: &Path,
+    entry: Option<SidecarTag>,
+) -> Result<(), String> {
+    let row_key = key(path);
+    let stored = row_key.to_string_lossy().into_owned();
+    {
         let connection = database.connection()?;
         let result = match &entry {
             Some(entry) => connection.execute(
@@ -335,26 +356,38 @@ fn save(path: &Path, entry: Option<SidecarTag>) -> Result<(), String> {
         };
         result.map_err(|err| format!("Failed to save tag for {}: {err}", path.display()))?;
 
-        let mut rows = store
-            .rows
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match entry {
-            Some(entry) => rows.insert(row_key, entry),
-            None => rows.remove(&row_key),
-        };
-        Ok(())
-    })
+    }
+    let mut rows = store
+        .rows
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    match entry {
+        Some(entry) => rows.insert(row_key, entry),
+        None => rows.remove(&row_key),
+    };
+    Ok(())
 }
 
-/// Read-modify-write one row against the file's current stamp.
+/// Read-modify-write one row against the file's current stamp, holding the
+/// database lock throughout so concurrent edits of one file cannot drop
+/// each other's fields.
 fn update(path: &Path, change: impl FnOnce(&mut SidecarTag)) -> Result<(), String> {
-    let (mtime_secs, size) = file_stamp(path).unwrap_or((0, 0));
-    let mut entry = cached(path).unwrap_or_default();
-    entry.mtime_secs = mtime_secs;
-    entry.size = size;
-    change(&mut entry);
-    save(path, Some(entry))
+    with_store(|store| {
+        let mut database = lock(&store.database);
+        let (mtime_secs, size) = file_stamp(path).unwrap_or((0, 0));
+        let mut entry = store
+            .rows
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&key(path))
+            .filter(|entry| (entry.mtime_secs, entry.size) == (mtime_secs, size))
+            .cloned()
+            .unwrap_or_default();
+        entry.mtime_secs = mtime_secs;
+        entry.size = size;
+        change(&mut entry);
+        write_row(store, &mut database, path, Some(entry))
+    })
 }
 
 pub fn set_instrument(path: &Path, instrument: &str, tag_version: u32) -> Result<(), String> {

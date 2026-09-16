@@ -118,6 +118,7 @@ pub fn tundra_config_dir() -> Option<PathBuf> {
     tundra_app_dir(dirs::config_dir(), false)
 }
 
+#[cfg_attr(test, allow(dead_code))]
 pub fn tundra_data_dir() -> Option<PathBuf> {
     tundra_app_dir(dirs::data_dir(), true)
 }
@@ -146,20 +147,28 @@ pub fn read_bincode<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
     bincode::deserialize(&std::fs::read(path).ok()?).ok()
 }
 
-/// Load user data such as settings or favorites. A file that exists but cannot
-/// be read or decoded is moved aside rather than left for the next save to
-/// overwrite, so the user's only copy is never destroyed by a bad load.
-pub fn read_bincode_or_default<T: Default + serde::de::DeserializeOwned>(
-    path: &Path,
-    label: &str,
-) -> T {
-    let err = match std::fs::read(path) {
-        Ok(bytes) => match bincode::deserialize(&bytes) {
-            Ok(value) => return value,
-            Err(err) => err.to_string(),
-        },
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return T::default(),
-        Err(err) => err.to_string(),
+/// Load user data such as settings or favorites.
+///
+/// A file that cannot be decoded is moved aside (`.unreadable-<ts>`) so the
+/// next save cannot destroy the user's only copy. A file that exists but
+/// cannot be read right now (locked by antivirus or a sync client) is left
+/// alone and `writable` comes back false: the caller must not save over it
+/// this session.
+pub fn load_user_data<T: Default + serde::de::DeserializeOwned>(path: &Path, label: &str) -> (T, bool) {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return (T::default(), true),
+        Err(err) => {
+            eprintln!(
+                "Failed to read {label} ({}): {err}; changes will not be saved this session",
+                path.display()
+            );
+            return (T::default(), false);
+        }
+    };
+    let err = match bincode::deserialize(&bytes) {
+        Ok(value) => return (value, true),
+        Err(err) => err,
     };
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -167,17 +176,22 @@ pub fn read_bincode_or_default<T: Default + serde::de::DeserializeOwned>(
         .unwrap_or_default();
     let backup = sidecar(path, &format!(".unreadable-{stamp}"));
     match std::fs::rename(path, &backup) {
-        Ok(()) => eprintln!(
-            "Failed to load {label} ({}): {err}. Kept the file as {}",
-            path.display(),
-            backup.display()
-        ),
-        Err(move_err) => eprintln!(
-            "Failed to load {label} ({}): {err}; could not move it aside: {move_err}",
-            path.display()
-        ),
+        Ok(()) => {
+            eprintln!(
+                "Failed to load {label} ({}): {err}. Kept the file as {}",
+                path.display(),
+                backup.display()
+            );
+            (T::default(), true)
+        }
+        Err(move_err) => {
+            eprintln!(
+                "Failed to load {label} ({}): {err}; could not move it aside ({move_err}), so it will not be overwritten",
+                path.display()
+            );
+            (T::default(), false)
+        }
     }
-    T::default()
 }
 
 /// Move a file from an old location once, atomically, keeping the source

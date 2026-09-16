@@ -1318,15 +1318,17 @@ fn instrument_hint(path: &Path) -> Option<(String, HintSource)> {
                 .expect("save user tags");
         }
 
-        crate::tag_store::set_instrument(&audio, "Kick", 0).expect("stale sidecar");
+        crate::tag_store::with_test_db(dir.join("tags.db"), || {
+            crate::tag_store::set_instrument(&audio, "Kick", 0).expect("stale sidecar");
 
-        let status = auto_tag_field_status(&audio).expect("status");
-        assert!(!status.can_retag_instrument);
-        assert!(
-            !write_auto_tags(&audio, "Kick").expect("user tag write attempt"),
-            "sidecar must not unlock overwrite of a native user instrument"
-        );
-        assert_eq!(instrument_tag(&audio).as_deref(), Some("Snare"));
+            let status = auto_tag_field_status(&audio).expect("status");
+            assert!(!status.can_retag_instrument);
+            assert!(
+                !write_auto_tags(&audio, "Kick").expect("user tag write attempt"),
+                "sidecar must not unlock overwrite of a native user instrument"
+            );
+            assert_eq!(instrument_tag(&audio).as_deref(), Some("Snare"));
+        });
 
         let _ = std::fs::remove_dir_all(dir);
     }

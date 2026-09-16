@@ -2,7 +2,7 @@ use super::common::{
     modal_button_style, modal_error_style, modal_panel_style, modal_shell, truncate_path, Message,
 };
 use crate::path_util::{
-    cache_file, canonical_path, config_file, read_bincode_or_default, write_bincode,
+    cache_file, canonical_path, config_file, load_user_data, write_bincode,
 };
 use iced::widget::{button, container, row, scrollable, text, Column, Space};
 use iced::{Alignment, Border, Element, Length, Theme};
@@ -18,6 +18,9 @@ pub const NO_AUDIO_SELECTED: &str = "No audio file selected";
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AllowedDirectories {
     roots: Vec<PathBuf>,
+    /// Set when the file on disk could not be read; saving would destroy it.
+    #[serde(skip)]
+    read_only: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,10 +35,15 @@ impl AllowedDirectories {
         let Some(path) = settings_file_path() else {
             return Self::default();
         };
-        read_bincode_or_default(&path, "allowed directories")
+        let (mut loaded, writable): (Self, bool) = load_user_data(&path, "allowed directories");
+        loaded.read_only = !writable;
+        loaded
     }
 
     pub fn persist(&self) {
+        if self.read_only {
+            return;
+        }
         let Some(path) = settings_file_path() else {
             return;
         };
@@ -89,6 +97,9 @@ impl AllowedDirectories {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FavoritesStore {
     paths: Vec<PathBuf>,
+    /// Set when the file on disk could not be read; saving would destroy it.
+    #[serde(skip)]
+    read_only: bool,
 }
 
 impl FavoritesStore {
@@ -96,10 +107,15 @@ impl FavoritesStore {
         let Some(path) = favorites_file_path() else {
             return Self::default();
         };
-        read_bincode_or_default(&path, "favorites")
+        let (mut loaded, writable): (Self, bool) = load_user_data(&path, "favorites");
+        loaded.read_only = !writable;
+        loaded
     }
 
     pub fn persist(&self) {
+        if self.read_only {
+            return;
+        }
         let Some(path) = favorites_file_path() else {
             return;
         };
