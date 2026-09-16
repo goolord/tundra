@@ -766,6 +766,10 @@ fn instrument_hint(path: &Path) -> Option<(String, HintSource)> {
             (r"F:\Samples\Vocals\Oh Yeah.wav", Some("Vocal")),
             (r"F:\Samples\Snares\CH.wav", Some("Snare")),
             (r"F:\Samples\Artist - Night EP\Kicks\hit.wav", Some("Kick")),
+            // Kit codes count in the kit folder, not in folders further up.
+            (r"F:\Samples\909 Kit\OH\01.wav", Some("Hi-Hat")),
+            (r"D:\MA\Field Recordings\take_014.wav", None),
+            (r"C:\Users\cr\Music\untitled.wav", None),
             // Abbreviations, digits glued to words, and word pairs.
             (r"F:\Samples\KCK_Deep.wav", Some("Kick")),
             (r"F:\Samples\CRSH 1.wav", Some("Cymbal")),
@@ -793,6 +797,12 @@ fn instrument_hint(path: &Path) -> Option<(String, HintSource)> {
             (r"F:\Samples\底鼓 01.wav", Some("Kick")),
             (r"F:\Samples\踩镲.wav", Some("Hi-Hat")),
             (r"F:\Samples\베이스.wav", Some("Bass")),
+            // Loanwords that merely contain an instrument name.
+            (r"F:\Samples\カスタム\hit.wav", None),
+            (r"F:\Samples\グループA\hit.wav", None),
+            (r"F:\Samples\データベース\hit.wav", None),
+            (r"F:\Samples\タム\01.wav", Some("Tom")),
+            (r"F:\Samples\オープンハイハット.wav", Some("Hi-Hat")),
         ];
         for (path, expected) in cases {
             assert_eq!(hint(path).as_deref(), expected, "{path}");

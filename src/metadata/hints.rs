@@ -131,6 +131,16 @@ const _: () = assert!(INSTRUMENT_ALIAS_GROUPS.len() == INSTRUMENT_HINT_LABELS.le
 const _: () = assert!(INSTRUMENT_ALIAS_GROUPS.len() <= u32::BITS as usize);
 
 const MIN_INSTRUMENT_SUBSTRING_LEN: usize = 4;
+/// Everyday loanwords that contain a katakana or Hangul instrument name
+/// (`カスタム` "custom" contains `タム`, `グループ` "group" contains `ループ`).
+/// They are removed from a word before substring matching.
+const FALSE_FRIENDS: &[&str] = &[
+    "カスタム",
+    "グループ",
+    "データベース",
+    "ブラスト",
+    "데이터베이스",
+];
 /// Shortest word that may match an alias by prefix. One- and two-letter words
 /// are initials or key names (`C`, `A`), not instruments.
 const MIN_PREFIX_NEEDLE_LEN: usize = 3;
@@ -152,8 +162,7 @@ fn instrument_alias_matches(needle: &str, alias_norm: &str) -> bool {
         return true;
     }
     if !alias_norm.is_ascii() {
-        // Japanese and Chinese words run together without spaces.
-        return alias_norm.chars().count() >= 2 && needle.contains(alias_norm);
+        return non_ascii_alias_within(needle, alias_norm);
     }
     // Short ASCII tokens only. Prefix on longer names made `bass` hit
     // `bassdrum` (Kick) and `shot` hit `rimshot`.
@@ -162,6 +171,24 @@ fn instrument_alias_matches(needle: &str, alias_norm: &str) -> bool {
         && needle.len() < MIN_INSTRUMENT_SUBSTRING_LEN
         && alias_norm.len() < MIN_INSTRUMENT_SUBSTRING_LEN
         && (alias_norm.starts_with(needle) || needle.starts_with(alias_norm))
+}
+
+/// Japanese and Chinese words run together without spaces, so non-ASCII
+/// names match inside a longer word. Two-character kana names (`タム`) are too
+/// common inside loanwords and must match a whole word.
+fn non_ascii_alias_within(needle: &str, alias_norm: &str) -> bool {
+    let length = alias_norm.chars().count();
+    let kana = alias_norm
+        .chars()
+        .all(|ch| matches!(ch, '\u{3040}'..='\u{30FF}'));
+    if length < 2 || (kana && length < 3) {
+        return false;
+    }
+    let mut word = needle.to_string();
+    for friend in FALSE_FRIENDS {
+        word = word.replace(friend, " ");
+    }
+    word.contains(alias_norm)
 }
 
 fn is_simple_plural(plural: &str, singular: &str) -> bool {
@@ -213,19 +240,21 @@ pub fn instrument_hint_from_path(path: &Path) -> Option<String> {
     };
 
     // A weak alias scores below any real name anywhere in the path, but a weak
-    // alias in the file name still beats one in a folder.
-    let mut consider_token = |base: i32, token: &str| {
+    // alias in the file name still beats one in a folder. Kit codes only mean
+    // something in the file name or the kit folder holding it; higher up, `MA`
+    // or `CR` is far more likely a user or project name.
+    let mut consider_token = |base: i32, token: &str, allow_weak: bool| {
         let length = token.chars().count() as i32;
         if let Some(label) = hint_label_for_term(token) {
             consider(base + length, label);
-        } else if let Some(label) = weak_hint_label(token) {
+        } else if let Some(label) = weak_hint_label(token).filter(|_| allow_weak) {
             consider(base / 100 + length, label);
         }
     };
 
     if let Some(stem) = crate::path_util::file_stem_lossy(path) {
         for token in hint_name_tokens(&stem) {
-            consider_token(1_000, &token);
+            consider_token(1_000, &token, true);
         }
     }
 
@@ -238,7 +267,7 @@ pub fn instrument_hint_from_path(path: &Path) -> Option<String> {
             continue;
         };
         for token in hint_name_tokens(name) {
-            consider_token(score_base, &token);
+            consider_token(score_base, &token, depth == 0);
         }
     }
 
