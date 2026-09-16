@@ -1,40 +1,36 @@
 name: Release builds
 
 on:
+  push:
+    branches: [master]
+  pull_request:
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag to attach assets to
+        description: Existing draft release tag to attach packages to (e.g. v0.1.0)
         required: true
-        default: v0.1.0-pre-alpha
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  package:
-    name: ${{ matrix.target }}
+  test:
+    name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
-          - os: macos-14
-            target: aarch64-apple-darwin
-          - os: macos-14
-            target: x86_64-apple-darwin
-
+        os: [ubuntu-22.04, windows-latest, macos-14]
     steps:
       - uses: actions/checkout@v4
         with:
           lfs: true
-
-      - uses: astral-sh/setup-uv@v5
-
       - uses: dtolnay/rust-toolchain@stable
-
+      - uses: Swatinem/rust-cache@v2
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
         run: |
@@ -43,15 +39,57 @@ jobs:
             libgtk-3-dev libssl-dev libx11-dev libxcursor-dev libxrandr-dev \
             libxi-dev libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev \
             libvulkan-dev pkg-config
+      - run: cargo test --workspace --locked
 
-      - name: Download ONNX models
+  package:
+    name: package (${{ matrix.target }})
+    if: github.event_name == 'workflow_dispatch'
+    needs: test
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: macos-13
+            target: x86_64-apple-darwin
+    env:
+      TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+          # Build exactly what the tag points at, not the default branch.
+          ref: refs/tags/${{ inputs.tag }}
+      - uses: astral-sh/setup-uv@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev libssl-dev libx11-dev libxcursor-dev libxrandr-dev \
+            libxi-dev libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev \
+            libvulkan-dev pkg-config
+      - name: Verify models
         run: cargo xtask models
-
-      - name: Build release package
-        run: cargo xtask package --version "${{ inputs.tag }}" --target ${{ matrix.target }}
-
-      - name: Upload to GitHub Release
+      - name: Build package
+        shell: bash
+        run: cargo xtask package --version "$TAG" --target "${{ matrix.target }}"
+      - name: Attach to draft release
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload "${{ inputs.tag }}" target/tundra-"${{ inputs.tag }}"-${{ matrix.target }}.* --clobber
+          if [[ "$(gh release view "$TAG" --json isDraft --jq .isDraft)" != "true" ]]; then
+            echo "::error::$TAG is not a draft release; published assets are never replaced"
+            exit 1
+          fi
+          gh release upload "$TAG" target/package/tundra-"$TAG"-"${{ matrix.target }}".* --clobber

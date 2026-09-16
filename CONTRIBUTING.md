@@ -2,85 +2,90 @@
 
 ## Requirements
 
-- Rust 1.85+ (edition 2024)
+- Rust 1.89+ (edition 2024)
 - [uv](https://docs.astral.sh/uv/) (Python classifier runtime)
-- Git LFS (for SVG icons in `resources/`)
+- Git LFS (SVG icons and ONNX models in `resources/`)
 - **Linux:** GTK 3 (folder picker via `rfd`; X11 drag-out via `x11rb`)
-- **Windows:** [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) (MSVC linker for Rust)
+- **Windows:** [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) (MSVC linker)
 - **macOS:** Xcode command-line tools
 
 ### Classifier tiers
 
-| Tier | Engine | Platforms |
-|------|--------|-----------|
-| 1 | Rust ZCR | All |
-| 2 (grey-zone) | ONNX (MTG Jamendo) | All (`onnxruntime` via `cargo xtask setup`) |
-| 2 (fallback) | Librosa spectral | All when ONNX/models unavailable |
+| Tier | Engine | Notes |
+|------|--------|-------|
+| 1 | Rust zero-crossing rate | Always available |
+| 2 | ONNX (MTG Jamendo instrument head) | Needs `onnxruntime` (`cargo xtask setup`) |
+| 2 (fallback) | Librosa spectral heuristic | Used when ONNX is missing; results are not cached |
 
-Classifier Python is pinned to **3.12** on all platforms (`xtask` / `uv sync`).
+Classifier Python is pinned to **3.12** on every platform (`scripts/.python-version`, xtask, and `auto_tag::UV_PYTHON` must agree).
 
-Bundled ONNX weights live in `resources/models/` (Git LFS). `cargo xtask setup` also runs `cargo xtask models` to refresh them.
+The ONNX weights live in `resources/models/` (Git LFS). `cargo xtask models` verifies them against pinned SHA-256 hashes and re-downloads any that are missing or do not match.
 
 ## Build & run
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for module layout.
 
 ```bash
-cargo xtask setup      # LFS assets, ONNX models, Python envs
-cargo xtask build --release
-cargo xtask run --release
-```
-
-Or one shot:
-
-```bash
+cargo xtask setup      # LFS assets, verified models, Python env
 cargo xtask run --release
 ```
 
 Open a specific file while developing:
 
 ```bash
-cargo run --release -- ~/Desktop/snare.flac
 cargo xtask run --release -- ~/Desktop/hat.ogg
+```
+
+Dev builds find `scripts/` and `resources/models/` in the source tree; nothing is copied into `target/`.
+
+```bash
+cargo test --workspace
 ```
 
 ### xtask commands
 
 | Command | What it does |
 |---------|----------------|
-| `cargo xtask setup` | `git lfs pull`, download models, `uv sync` + DL env |
-| `cargo xtask models` | Download bundled ONNX models to `resources/models/` |
-| `cargo xtask classifiers` | Install Python deps (`uv sync`, optional DL on 3.14) |
-| `cargo xtask build` | Setup + `cargo build` |
+| `cargo xtask setup` | `git lfs pull`, verify/download models, `uv sync --locked` with the ONNX group |
+| `cargo xtask models` | Verify models against pinned hashes; download missing or mismatched ones |
+| `cargo xtask classifiers` | `uv sync --locked` for the classifier environment |
+| `cargo xtask build` | Setup + `cargo build --locked` |
 | `cargo xtask run` | Setup + `cargo run` |
-| `cargo xtask package` | Release build + portable archive (exe/binary, models, bundled Python when native) |
+| `cargo xtask package` | Release build + portable archive under `target/package/` |
+| `cargo xtask release` | Package this host and attach it to a draft GitHub release |
 | `cargo xtask cross install-targets` | `rustup target add` for targets buildable from this host |
 | `cargo xtask cross build-all` | `--release` build for every target supported from this host |
 
 Flags:
 
 - `--skip-lfs`: skip `git lfs pull` during setup
-- `--skip-dl`: skip ONNX runtime install (tier 2 falls back to librosa)
+- `--skip-dl`: skip the ONNX runtime (tier 2 falls back to librosa)
 - `--no-setup`: skip setup before build/run
-- `--release`: optimized build (`build`: full release + static CRT on Windows; `run`: fast `release-fast` profile)
-- `--target TRIPLE`: cross-compile (requires `--cross` when OS/arch differs; see Cross-compilation below)
+- `--release`: `build` uses the full release profile; `run` uses `release-fast` (no LTO) for quicker iteration. Do not ship `release-fast` binaries.
+- `--target TRIPLE`: cross-compile (see below)
 - `--cross`: use `cross` instead of `cargo` for the build step
 
-Models are copied next to the binary at build time. SVG icons are embedded in the executable.
+Windows MSVC builds link the C runtime statically in every profile (`.cargo/config.toml`), so release binaries do not need the Visual C++ redistributable. GPU rendering uses `wgpu` with Vulkan on Windows/Linux or Metal on macOS, plus a `tiny-skia` software fallback. DX12 is omitted to avoid a `windows` crate version conflict.
 
-`cargo xtask build --release` uses the full release profile: `opt-level = 3`, thin LTO, stripped symbols, and static CRT on Windows. Ship from `target/release/` (or `target/<triple>/release/`). `cargo xtask run --release` uses the `release-fast` profile (same speed opts, no LTO, dynamic CRT) and runs from `target/release-fast/`. Do not ship that binary. Plain `cargo build --release` on Windows also requires static CRT (`build.rs` enforces it). Debug builds use the dynamic CRT. GPU rendering uses `wgpu` with Vulkan on Windows/Linux or Metal on macOS, plus a `tiny-skia` software fallback when no GPU backend is available. DX12 is omitted to avoid a `windows` crate version conflict in the current dependency graph.
+### Package layout
 
-### Portable layout
+`cargo xtask package [--version vX.Y.Z]` produces `target/package/tundra-<version>-<target>.zip` (Windows) or `.tar.gz`, plus a `.sha256` file. The archive holds one top-level folder:
 
-For a copied build (not running from the source tree), place next to the executable:
+- `tundra` / `tundra.exe`
+- `models/`: the verified ONNX models
+- `scripts/`: `classifier_worker.py`, `tier2_lib.py`
+- `python/`: a standalone CPython 3.12 and `python/site-packages` with the locked dependencies (only when the target matches the build host)
+- `LICENSE`, `EULA.md`, `README.md`
 
-- `models/`: Essentia model files (copied at build time)
-- `scripts/`: classifier `.py` files plus a bundled `.venv` (release packages include `python/` as well)
-- `python/`: portable CPython install (release packages only; dev builds use `cargo xtask setup`)
+The bundled Python is not a virtualenv: a venv records its interpreter's absolute path and breaks once the archive is unpacked elsewhere. The app runs `python/<cpython>/python` with `PYTHONPATH=python/site-packages`.
 
-Release archive: `cargo xtask package --version v0.1.0-pre-alpha` (`.zip` on Windows, `.tar.gz` elsewhere)
+### Releasing
 
-macOS `.app` bundles also look in `Contents/Resources/` (`scripts/`, `models/`).
+1. Bump `version` in `Cargo.toml` and commit. Push to `master`.
+2. `cargo xtask release --ci` on one machine. It refuses a dirty tree or unpushed HEAD, tags `v<version>` (never moving an existing tag), creates a **draft** release, uploads this host's package, and dispatches the workflow to build the other platforms from that tag.
+3. When every platform's archive is attached, publish the draft on GitHub.
+
+Published releases are never modified by the tooling; ship a new version instead.
 
 ### Cross-compilation
 
@@ -91,62 +96,22 @@ cargo install cross --locked
 cargo xtask cross install-targets
 ```
 
-Build for a specific triple (use `--cross` when the target OS/arch differs from the host):
-
 ```bash
 # Linux → Windows (MinGW)
 cargo xtask build --release --target x86_64-pc-windows-gnu --cross
 
 # Linux → Linux (other arch, via cross container)
 cargo xtask build --release --target aarch64-unknown-linux-gnu --cross
-
-# Native Windows MSVC (no --cross)
-cargo xtask build --release --target x86_64-pc-windows-msvc
 ```
 
-Build every target feasible from the current host:
-
-```bash
-cargo xtask cross build-all --cross
-```
-
-Package a cross-built binary (Python bundling only when host triple matches `--target`):
-
-```bash
-cargo xtask package --target x86_64-pc-windows-gnu --cross --version v0.1.0-pre-alpha
-```
-
-Pass `--skip-build --target TRIPLE` when the binary is already built under `target/<triple>/release/`.
-
-### Overwrite the latest GitHub release
-
-From repo root (requires `gh` auth):
-
-```powershell
-# Windows: rebuild host package and replace assets on the latest release tag
-.\scripts\release-latest.ps1
-
-# Also rebuild Linux + macOS via GitHub Actions
-.\scripts\release-latest.ps1 -Ci
-```
-
-```bash
-./scripts/release-latest.sh
-./scripts/release-latest.sh --ci
-```
-
-The script moves the latest release tag to `HEAD`, runs `cargo xtask package`, uploads with `gh release upload --clobber`, and optionally dispatches [`.github/workflows/release.yml`](.github/workflows/release.yml). Pass `-Tag v0.1.0-pre-alpha` (or `--tag`) to target a specific release instead of the most recent one.
-
-| Host | Typical `--cross` targets | Notes |
-|------|---------------------------|-------|
-| Windows | `x86_64-pc-windows-msvc` | Native MSVC; use `--cross` for GNU triple |
+| Host | Typical targets | Notes |
+|------|-----------------|-------|
+| Windows | `x86_64-pc-windows-msvc` | Native MSVC |
 | Linux | `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `x86_64-pc-windows-gnu` | GTK/Vulkan deps via `Cross.toml` |
-| macOS | `x86_64-apple-darwin`, `aarch64-apple-darwin` | Native only; no Linux→macOS cross in CI |
+| macOS | `x86_64-apple-darwin`, `aarch64-apple-darwin` | Native only |
 
-Target-specific linker flags live in [`.cargo/config.toml`](.cargo/config.toml). Windows-gnu linkers and container apt packages for `cross` are in [`Cross.toml`](Cross.toml). `x86_64-unknown-linux-musl` is configured but not supported for this GUI (GTK/rfd need glibc).
+Target-specific linker flags live in [`.cargo/config.toml`](.cargo/config.toml); container packages for `cross` are in [`Cross.toml`](Cross.toml). Cross-built packages ship without a bundled Python.
 
 ## Notes
 
 Files opened from outside configured search directories still play; search and auto-tag stay limited to configured folders.
-
-`resources/*` is stored with git LFS.

@@ -1,29 +1,45 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
-use std::process::{Command, ExitStatus, Stdio};
+use sha2::{Digest, Sha256};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 use std::time::Duration;
 
-const UV_PYTHON: &str = "3.12";
+/// Classifier Python, pinned for every platform. Keep in sync with
+/// `scripts/.python-version` and `auto_tag::UV_PYTHON`.
+const PYTHON_VERSION: &str = "3.12";
 const MODEL_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
+/// Scripts the app runs; everything else under `scripts/` is development-only.
+const RUNTIME_SCRIPTS: [&str; 2] = ["classifier_worker.py", "tier2_lib.py"];
+const PACKAGE_DOCS: [&str; 3] = ["LICENSE", "EULA.md", "README.md"];
 
-const MODELS: [(&str, &str); 3] = [
-    (
-        "discogs-effnet-bsdynamic-1.onnx",
-        "https://essentia.upf.edu/models/feature-extractors/discogs-effnet/discogs-effnet-bsdynamic-1.onnx",
-    ),
-    (
-        "mtg_jamendo_instrument-discogs-effnet-1.onnx",
-        "https://essentia.upf.edu/models/classification-heads/mtg_jamendo_instrument/mtg_jamendo_instrument-discogs-effnet-1.onnx",
-    ),
-    (
-        "mtg_jamendo_instrument-discogs-effnet-1.json",
-        "https://essentia.upf.edu/models/classification-heads/mtg_jamendo_instrument/mtg_jamendo_instrument-discogs-effnet-1.json",
-    ),
+struct Model {
+    name: &'static str,
+    url: &'static str,
+    sha256: &'static str,
+}
+
+const MODELS: [Model; 3] = [
+    Model {
+        name: "discogs-effnet-bsdynamic-1.onnx",
+        url: "https://essentia.upf.edu/models/feature-extractors/discogs-effnet/discogs-effnet-bsdynamic-1.onnx",
+        sha256: "a280825b334797cf677939db8cd5762c0392aedd0ca6415dbc1cd083f045e43c",
+    },
+    Model {
+        name: "mtg_jamendo_instrument-discogs-effnet-1.onnx",
+        url: "https://essentia.upf.edu/models/classification-heads/mtg_jamendo_instrument/mtg_jamendo_instrument-discogs-effnet-1.onnx",
+        sha256: "9ae2d9e763d66bd8eed654d1ac3aa171e6539cb8a0e11f3dcd53df1428980802",
+    },
+    Model {
+        name: "mtg_jamendo_instrument-discogs-effnet-1.json",
+        url: "https://essentia.upf.edu/models/classification-heads/mtg_jamendo_instrument/mtg_jamendo_instrument-discogs-effnet-1.json",
+        sha256: "7d02204c6451b5615e2968ec6364bbae3b915c886e608f05f00d3a38dc5177c4",
+    },
 ];
 
 #[derive(Parser)]
-#[command(name = "xtask", about = "Build and setup tasks for Tundra")]
+#[command(name = "xtask", about = "Build and release tasks for Tundra")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -36,15 +52,15 @@ enum Commands {
         /// Skip `git lfs pull`
         #[arg(long)]
         skip_lfs: bool,
-        /// Skip ONNX DL Python env (`--group dl`)
+        /// Skip the ONNX runtime (`--group dl`); tier 2 falls back to librosa
         #[arg(long)]
         skip_dl: bool,
     },
-    /// Download bundled ONNX models into `resources/models/`.
+    /// Download and verify the bundled ONNX models in `resources/models/`.
     Models,
     /// Install Python classifier dependencies with uv.
     Classifiers {
-        /// Skip ONNX DL Python env (`--group dl`)
+        /// Skip the ONNX runtime (`--group dl`)
         #[arg(long)]
         skip_dl: bool,
     },
@@ -55,13 +71,13 @@ enum Commands {
         /// Rust target triple (e.g. `x86_64-unknown-linux-gnu`)
         #[arg(long)]
         target: Option<String>,
-        /// Use `cross` instead of `cargo` (recommended for non-native Linux/Windows-gnu targets)
+        /// Use `cross` instead of `cargo`
         #[arg(long)]
         cross: bool,
         /// Skip setup step
         #[arg(long)]
         no_setup: bool,
-        /// Skip Essentia DL Python env during setup
+        /// Skip the ONNX runtime during setup
         #[arg(long)]
         skip_dl: bool,
     },
@@ -72,18 +88,19 @@ enum Commands {
         /// Skip setup step
         #[arg(long)]
         no_setup: bool,
-        /// Skip Essentia DL Python env during setup
+        /// Skip the ONNX runtime during setup
         #[arg(long)]
         skip_dl: bool,
         /// Audio paths to open (pass after `--`)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Build release binary and zip a portable package (exe/binary + models + python when native).
+    /// Release build plus a portable archive: binary, models, scripts, and
+    /// (when building for this host) a bundled Python.
     Package {
-        /// Release tag/version used in the zip file name (e.g. v0.1.0-pre-alpha)
-        #[arg(long, default_value = "v0.1.0-pre-alpha")]
-        version: String,
+        /// Version used in the archive name; defaults to `v` + Cargo.toml version
+        #[arg(long)]
+        version: Option<String>,
         /// Rust target triple (defaults to host)
         #[arg(long)]
         target: Option<String>,
@@ -96,6 +113,16 @@ enum Commands {
         /// Skip bundled Python even when host matches target
         #[arg(long)]
         skip_python: bool,
+    },
+    /// Package this host's build and attach it to a draft GitHub release for
+    /// `v<Cargo.toml version>`. Published tags are never moved.
+    Release {
+        /// Also dispatch the CI workflow to build the other platforms
+        #[arg(long)]
+        ci: bool,
+        /// Skip packaging and upload existing archives from `target/`
+        #[arg(long)]
+        skip_build: bool,
     },
     /// Cross-compilation helpers (install toolchains, build all host-supported targets).
     Cross {
@@ -116,15 +143,14 @@ enum CrossCommands {
         /// Skip setup step
         #[arg(long)]
         no_setup: bool,
-        /// Skip Essentia DL Python env during setup
+        /// Skip the ONNX runtime during setup
         #[arg(long)]
         skip_dl: bool,
     },
 }
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
-    match cli.command {
+    match Cli::parse().command {
         Commands::Setup { skip_lfs, skip_dl } => setup(skip_lfs, skip_dl),
         Commands::Models => download_models(),
         Commands::Classifiers { skip_dl } => setup_classifiers(skip_dl),
@@ -157,13 +183,11 @@ fn main() -> Result<()> {
             cross,
             skip_build,
             skip_python,
-        } => package_release(
-            &version,
-            target.as_deref(),
-            cross,
-            skip_build,
-            skip_python,
-        ),
+        } => {
+            let version = version.unwrap_or_else(release_tag);
+            package_release(&version, target.as_deref(), cross, skip_build, skip_python).map(drop)
+        }
+        Commands::Release { ci, skip_build } => release(ci, skip_build),
         Commands::Cross { command } => match command {
             CrossCommands::InstallTargets => install_release_targets(),
             CrossCommands::BuildAll {
@@ -182,13 +206,28 @@ fn project_root() -> PathBuf {
         .to_path_buf()
 }
 
+/// `v` + the app's version from the root Cargo.toml.
+fn release_tag() -> String {
+    let manifest = std::fs::read_to_string(project_root().join("Cargo.toml")).unwrap_or_default();
+    let version = manifest
+        .split("[package]")
+        .nth(1)
+        .and_then(|package| {
+            package.lines().find_map(|line| {
+                let value = line.trim().strip_prefix("version")?.trim().strip_prefix('=')?;
+                Some(value.trim().trim_matches('"').to_string())
+            })
+        })
+        .unwrap_or_else(|| "0.0.0".into());
+    format!("v{version}")
+}
+
 fn setup(skip_lfs: bool, skip_dl: bool) -> Result<()> {
     if !skip_lfs {
         git_lfs_pull()?;
     }
     download_models()?;
-    setup_classifiers(skip_dl)?;
-    Ok(())
+    setup_classifiers(skip_dl)
 }
 
 fn git_lfs_pull() -> Result<()> {
@@ -196,57 +235,76 @@ fn git_lfs_pull() -> Result<()> {
     if !root.join(".git").exists() {
         return Ok(());
     }
-
-    let check = Command::new("git")
+    let available = Command::new("git")
         .args(["lfs", "version"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status();
-
-    match check {
-        Ok(status) if status.success() => {
-            run_command(
-                Command::new("git")
-                    .arg("lfs")
-                    .arg("pull")
-                    .current_dir(&root),
-                "git lfs pull",
-            )?;
-        }
-        _ => eprintln!("warning: git-lfs not installed; SVG resources may be missing"),
+        .status()
+        .is_ok_and(|status| status.success());
+    if !available {
+        eprintln!("warning: git-lfs not installed; SVG resources and models may be missing");
+        return Ok(());
     }
-    Ok(())
+    run(Command::new("git").args(["lfs", "pull"]).current_dir(&root))
 }
 
 fn models_dir() -> PathBuf {
     project_root().join("resources/models")
 }
 
+fn sha256_file(path: &Path) -> Result<String> {
+    let mut file = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher).with_context(|| format!("read {}", path.display()))?;
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// Download any model that is missing, truncated, an LFS pointer, or otherwise
+/// does not match its pinned hash. Downloads land in a `.part` file and are
+/// only renamed into place once verified.
 fn download_models() -> Result<()> {
     let dir = models_dir();
     std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
-
-    for (name, url) in MODELS {
-        let dest = dir.join(name);
-        if dest.is_file() {
-            println!("models: {name} already present");
+    for model in &MODELS {
+        let dest = dir.join(model.name);
+        if dest.is_file() && sha256_file(&dest)? == model.sha256 {
+            println!("models: {} verified", model.name);
             continue;
         }
-        println!("models: downloading {name}");
-        download_file(url, &dest, &format!("download {name}"))?;
+        println!("models: downloading {}", model.name);
+        let part = dir.join(format!("{}.part", model.name));
+        let response = ureq::get(model.url)
+            .timeout(MODEL_DOWNLOAD_TIMEOUT)
+            .call()
+            .with_context(|| format!("GET {}", model.url))?;
+        let mut file = std::fs::File::create(&part)?;
+        std::io::copy(&mut response.into_reader(), &mut file)
+            .with_context(|| format!("write {}", part.display()))?;
+        drop(file);
+        let actual = sha256_file(&part)?;
+        if actual != model.sha256 {
+            let _ = std::fs::remove_file(&part);
+            bail!(
+                "{} has sha256 {actual}, expected {}; refusing to use it",
+                model.name,
+                model.sha256
+            );
+        }
+        std::fs::rename(&part, &dest)?;
     }
     Ok(())
 }
 
-fn download_file(url: &str, dest: &std::path::Path, label: &str) -> Result<()> {
-    let response = ureq::get(url)
-        .timeout(MODEL_DOWNLOAD_TIMEOUT)
-        .call()
-        .with_context(|| format!("{label}: GET {url}"))?;
-    let mut file = std::fs::File::create(dest)
-        .with_context(|| format!("{label}: create {}", dest.display()))?;
-    std::io::copy(&mut response.into_reader(), &mut file)
-        .with_context(|| format!("{label}: write {}", dest.display()))?;
+fn verify_models() -> Result<()> {
+    for model in &MODELS {
+        let path = models_dir().join(model.name);
+        if !path.is_file() || sha256_file(&path)? != model.sha256 {
+            bail!(
+                "{} is missing or does not match its pinned hash; run `cargo xtask models`",
+                path.display()
+            );
+        }
+    }
     Ok(())
 }
 
@@ -255,125 +313,53 @@ fn setup_classifiers(skip_dl: bool) -> Result<()> {
     if !scripts.join("pyproject.toml").is_file() {
         bail!("missing scripts/pyproject.toml");
     }
-
-    ensure_tool("uv")?;
-
-    run_command(
-        Command::new("uv")
-            .args(["python", "install", UV_PYTHON])
-            .current_dir(&scripts),
-        &format!("uv python install {UV_PYTHON}"),
-    )?;
-
+    run(Command::new("uv")
+        .args(["python", "install", PYTHON_VERSION])
+        .current_dir(&scripts))?;
+    let mut sync = Command::new("uv");
+    sync.args(["sync", "--locked", "--python", PYTHON_VERSION])
+        .current_dir(&scripts);
     if skip_dl {
-        run_command(
-            Command::new("uv")
-                .args(["sync", "--python", UV_PYTHON])
-                .current_dir(&scripts),
-            "uv sync (librosa tier)",
-        )?;
-        println!("classifiers: skipped ONNX DL env (--skip-dl)");
-        return Ok(());
+        println!("classifiers: skipping the ONNX runtime (--skip-dl)");
+    } else {
+        sync.args(["--group", "dl"]);
     }
-
-    run_command(
-        Command::new("uv")
-            .args(["sync", "--group", "dl", "--python", UV_PYTHON])
-            .current_dir(&scripts),
-        &format!("uv sync --group dl --python {UV_PYTHON}"),
-    )?;
-
-    Ok(())
+    run(&mut sync)
 }
 
-fn windows_target(target: Option<&str>) -> bool {
-    target.is_some_and(|triple| triple.contains("windows")) || (target.is_none() && cfg!(windows))
-}
-
-fn apply_release_link_flags(cmd: &mut Command, target: Option<&str>) {
-    if !windows_target(target) {
-        return;
-    }
-    const FLAG: &str = "-C target-feature=+crt-static";
-    let flags = match std::env::var("RUSTFLAGS") {
-        Ok(existing) if !existing.trim().is_empty() => format!("{existing} {FLAG}"),
-        _ => FLAG.to_string(),
-    };
-    cmd.env("RUSTFLAGS", flags);
-}
-
-fn host_triple() -> Option<String> {
-    std::env::var("HOST").ok().or_else(|| {
-        Command::new("rustc")
-            .arg("-vV")
-            .output()
-            .ok()
-            .and_then(|output| {
-                String::from_utf8(output.stdout).ok().and_then(|text| {
-                    text.lines()
-                        .find_map(|line| line.strip_prefix("host: "))
-                        .map(str::to_string)
-                })
-            })
+fn host_triple() -> Result<&'static str> {
+    static HOST: OnceLock<Option<String>> = OnceLock::new();
+    HOST.get_or_init(|| {
+        let output = Command::new("rustc").arg("-vV").output().ok()?;
+        String::from_utf8(output.stdout)
+            .ok()?
+            .lines()
+            .find_map(|line| line.strip_prefix("host: "))
+            .map(str::to_string)
     })
+    .as_deref()
+    .context("could not detect the host triple; pass --target explicitly")
 }
 
-fn host_matches_target(target: &str) -> bool {
-    host_triple().as_deref() == Some(target)
+fn is_host(target: &str) -> bool {
+    host_triple().is_ok_and(|host| host == target)
 }
 
-fn resolve_package_target(target: Option<&str>, skip_build: bool) -> Result<String> {
-    if let Some(target) = target {
-        return Ok(target.to_string());
-    }
-    if skip_build {
-        bail!("--skip-build requires --target");
-    }
-    host_triple().ok_or_else(|| {
-        anyhow::anyhow!("could not detect host triple; pass --target explicitly")
-    })
-}
-
-fn should_use_cross_tool(target: Option<&str>, force_cross: bool) -> Result<bool> {
-    let Some(target) = target else {
+/// Whether building `target` from this host needs the `cross` tool.
+fn needs_cross(target: &str) -> Result<bool> {
+    let host = host_triple()?;
+    if host == target || (target.contains("darwin") && host.contains("darwin")) {
         return Ok(false);
-    };
-    if force_cross {
-        return Ok(true);
-    }
-    let host = host_triple().unwrap_or_default();
-    if host == target {
-        return Ok(false);
-    }
-    if target.contains("darwin") && host.contains("darwin") {
-        return Ok(false);
-    }
-    if target.contains("linux") || target.contains("windows") {
-        bail!(
-            "cross-compiling {target} from {host} requires `--cross` (install: cargo install cross --locked)"
-        );
     }
     if target.contains("darwin") {
-        bail!(
-            "cross-compiling {target} from {host} requires a macOS host; build on macOS CI instead"
-        );
+        bail!("{target} can only be built on a macOS host");
     }
-    Ok(false)
-}
-
-fn ensure_rustup_target(target: &str) -> Result<()> {
-    run_command(
-        Command::new("rustup")
-            .args(["target", "add", target])
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit()),
-        &format!("rustup target add {target}"),
-    )
+    Ok(true)
 }
 
 fn install_release_targets() -> Result<()> {
     for target in cross_targets_for_host() {
-        ensure_rustup_target(target)?;
+        run(Command::new("rustup").args(["target", "add", target]))?;
     }
     Ok(())
 }
@@ -399,9 +385,8 @@ fn cross_build_all(cross: bool, no_setup: bool, skip_dl: bool) -> Result<()> {
     install_release_targets()?;
     let mut failures = Vec::new();
     for target in cross_targets_for_host() {
-        let use_cross = cross || should_use_cross_for_target(target);
-        println!("cross: building {target} (cross={use_cross})");
-        if let Err(err) = cargo_build(true, Some(target), use_cross) {
+        println!("cross: building {target}");
+        if let Err(err) = cargo_build(true, Some(target), cross) {
             eprintln!("cross: {target} failed: {err:#}");
             failures.push(target);
         }
@@ -413,329 +398,292 @@ fn cross_build_all(cross: bool, no_setup: bool, skip_dl: bool) -> Result<()> {
     }
 }
 
-fn should_use_cross_for_target(target: &str) -> bool {
-    !host_matches_target(target)
-        && (target.contains("linux") || target.contains("windows"))
-        && !cfg!(windows)
-}
-
-fn cargo_build_command(release: bool, target: Option<&str>, use_cross: bool) -> Result<Command> {
-    let use_cross = if use_cross {
-        true
-    } else {
-        should_use_cross_tool(target, false)?
+fn cargo_build(release: bool, target: Option<&str>, force_cross: bool) -> Result<()> {
+    let use_cross = match target {
+        Some(target) => force_cross || needs_cross(target)?,
+        None => false,
     };
-    if use_cross {
-        ensure_tool("cross")?;
-    }
-    if let Some(target) = target {
-        ensure_rustup_target(target)?;
-    }
-
-    let mut cmd = if use_cross {
-        let mut command = Command::new("cross");
-        command.arg("build");
-        command
-    } else {
-        let mut command = Command::new("cargo");
-        command.arg("build");
-        command
-    };
-    cmd.current_dir(project_root());
+    let mut cmd = Command::new(if use_cross { "cross" } else { "cargo" });
+    cmd.args(["build", "--locked"]).current_dir(project_root());
     if release {
         cmd.arg("--release");
-        apply_release_link_flags(&mut cmd, target);
     }
     if let Some(target) = target {
+        run(Command::new("rustup").args(["target", "add", target]))?;
         cmd.args(["--target", target]);
     }
-    Ok(cmd)
+    run(&mut cmd)
 }
 
-fn cargo_build(release: bool, target: Option<&str>, cross: bool) -> Result<()> {
-    let mut cmd = cargo_build_command(release, target, cross)?;
-    run_command(&mut cmd, "cargo build")
-}
-
-fn cargo_run_command(release: bool) -> Command {
+fn cargo_run(release: bool, extra_args: &[String]) -> Result<()> {
     let mut cmd = Command::new("cargo");
     cmd.arg("run").current_dir(project_root());
     if release {
         cmd.args(["--profile", "release-fast"]);
     }
-    cmd
-}
-
-fn cargo_run(release: bool, extra_args: &[String]) -> Result<()> {
-    let mut cmd = cargo_run_command(release);
     if !extra_args.is_empty() {
-        cmd.arg("--");
-        cmd.args(extra_args);
+        cmd.arg("--").args(extra_args);
     }
-    run_command(&mut cmd, "cargo run")
+    run(&mut cmd)
 }
 
-fn ensure_tool(name: &str) -> Result<()> {
-    let status = Command::new(name)
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .with_context(|| format!("failed to execute {name}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        bail!("required tool `{name}` is not available on PATH")
-    }
-}
-
-fn run_command(command: &mut Command, label: &str) -> Result<()> {
-    command.stdin(Stdio::inherit());
-    let status = command
-        .status()
-        .with_context(|| format!("failed to spawn {label}"))?;
-    check_status(status, label)
-}
-
-fn check_status(status: ExitStatus, label: &str) -> Result<()> {
-    if status.success() {
-        Ok(())
-    } else {
-        bail!("{label} failed with {status}");
-    }
-}
-
-fn release_dir(target: Option<&str>) -> PathBuf {
-    let root = project_root();
-    if let Some(target) = target {
-        return root.join("target").join(target).join("release");
-    }
-    let profile = root.join("target").join("release");
-    if profile.join("tundra.exe").is_file() || profile.join("tundra").is_file() {
-        return profile;
-    }
-    if let Ok(triple) = std::env::var("TARGET") {
-        let triple_dir = root.join("target").join(triple).join("release");
-        if triple_dir.join("tundra.exe").is_file() || triple_dir.join("tundra").is_file() {
-            return triple_dir;
-        }
-    }
-    profile
-}
-
-fn release_binary_name(target: Option<&str>) -> &'static str {
-    if windows_target(target) {
-        "tundra.exe"
-    } else {
-        "tundra"
-    }
-}
-
-fn classifier_python_for_target(target: Option<&str>) -> &'static str {
-    if windows_target(target) {
-        "3.12"
-    } else {
-        UV_PYTHON
-    }
-}
-
-fn package_archive_name(version: &str, target: &str) -> String {
-    if target.contains("windows") {
-        format!("tundra-{version}-{target}.zip")
-    } else {
-        format!("tundra-{version}-{target}.tar.gz")
-    }
-}
-
-fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> Result<()> {
-    std::fs::create_dir_all(dst).with_context(|| format!("create {}", dst.display()))?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
-        if file_type.is_dir() {
-            copy_dir_all(&src_path, &dst_path)?;
-        } else {
-            std::fs::copy(&src_path, &dst_path)
-                .with_context(|| format!("copy {} -> {}", src_path.display(), dst_path.display()))?;
-        }
-    }
-    Ok(())
-}
-
-fn copy_glob(src_dir: &std::path::Path, pattern: &str, dst_dir: &std::path::Path) -> Result<()> {
-    std::fs::create_dir_all(dst_dir)?;
-    for entry in std::fs::read_dir(src_dir)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            continue;
-        };
-        if !name.ends_with(pattern.trim_start_matches('*')) {
-            continue;
-        }
-        std::fs::copy(entry.path(), dst_dir.join(name))?;
-    }
-    Ok(())
-}
-
-fn find_bundled_python(python_root: &std::path::Path) -> Result<PathBuf> {
-    for entry in std::fs::read_dir(python_root)? {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
-            continue;
-        }
-        #[cfg(windows)]
-        let candidate = entry.path().join("python.exe");
-        #[cfg(not(windows))]
-        let candidate = entry.path().join("bin").join("python3");
-        if candidate.is_file() {
-            return Ok(candidate);
-        }
-    }
-    bail!(
-        "no python executable found under {}",
-        python_root.display()
+fn run(command: &mut Command) -> Result<()> {
+    let label = format!(
+        "{} {}",
+        command.get_program().to_string_lossy(),
+        command
+            .get_args()
+            .map(|arg| arg.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(" ")
     );
+    let status = command.stdin(Stdio::inherit()).status().map_err(|err| {
+        if err.kind() == std::io::ErrorKind::NotFound {
+            anyhow::anyhow!("`{label}`: required tool is not installed or not on PATH")
+        } else {
+            anyhow::anyhow!("`{label}`: failed to start: {err}")
+        }
+    })?;
+    if !status.success() {
+        bail!("`{label}` failed with {status}");
+    }
+    Ok(())
 }
 
+fn output(command: &mut Command) -> Result<String> {
+    let result = command
+        .stderr(Stdio::inherit())
+        .output()
+        .with_context(|| format!("run {}", command.get_program().to_string_lossy()))?;
+    if !result.status.success() {
+        bail!(
+            "{} failed with {}",
+            command.get_program().to_string_lossy(),
+            result.status
+        );
+    }
+    Ok(String::from_utf8_lossy(&result.stdout).trim().to_string())
+}
+
+fn copy_file(src: &Path, dst: &Path) -> Result<()> {
+    std::fs::copy(src, dst)
+        .with_context(|| format!("copy {} -> {}", src.display(), dst.display()))?;
+    Ok(())
+}
+
+fn find_bundled_python(python_root: &Path) -> Result<PathBuf> {
+    for entry in std::fs::read_dir(python_root)? {
+        let dir = entry?.path();
+        for candidate in [dir.join("python.exe"), dir.join("bin").join("python3")] {
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
+    }
+    bail!("no python executable found under {}", python_root.display())
+}
+
+/// Install a standalone CPython plus the locked classifier dependencies into
+/// `python/`. Packages go into `python/site-packages` (found via PYTHONPATH at
+/// runtime) instead of a virtualenv, whose absolute interpreter path would
+/// break as soon as the archive is unpacked anywhere else.
+fn bundle_python(staging: &Path) -> Result<()> {
+    let python_root = staging.join("python");
+    std::fs::create_dir_all(&python_root)?;
+    run(Command::new("uv")
+        .args(["python", "install", PYTHON_VERSION])
+        .env("UV_PYTHON_INSTALL_DIR", &python_root))?;
+    let python = find_bundled_python(&python_root)?;
+
+    let requirements = staging.join("requirements.txt");
+    run(Command::new("uv")
+        .args([
+            "export",
+            "--locked",
+            "--group",
+            "dl",
+            "--no-hashes",
+            "--no-emit-project",
+            "--format",
+            "requirements-txt",
+            "--python",
+            PYTHON_VERSION,
+            "--output-file",
+        ])
+        .arg(&requirements)
+        .current_dir(project_root().join("scripts")))?;
+    run(Command::new("uv")
+        .args(["pip", "install", "--python"])
+        .arg(&python)
+        .arg("--target")
+        .arg(python_root.join("site-packages"))
+        .arg("-r")
+        .arg(&requirements))?;
+    std::fs::remove_file(&requirements)?;
+    Ok(())
+}
+
+/// Builds `target/package/tundra-<version>-<target>/` and archives it with that
+/// folder at the top, plus a `.sha256` file. Returns the archive paths.
 fn package_release(
     version: &str,
     target: Option<&str>,
     cross: bool,
     skip_build: bool,
     skip_python: bool,
-) -> Result<()> {
-    let package_target = resolve_package_target(target, skip_build)?;
-    let target_ref = package_target.as_str();
-
+) -> Result<Vec<PathBuf>> {
+    let target = match target {
+        Some(target) => target.to_string(),
+        None if skip_build => bail!("--skip-build requires --target"),
+        None => host_triple()?.to_string(),
+    };
+    verify_models()?;
     if !skip_build {
-        cargo_build(true, Some(target_ref), cross)?;
+        cargo_build(true, Some(&target), cross)?;
     }
 
     let root = project_root();
-    let release = release_dir(Some(target_ref));
-    let bin_name = release_binary_name(Some(target_ref));
-    let exe = release.join(bin_name);
+    let windows = target.contains("windows");
+    let bin_name = if windows { "tundra.exe" } else { "tundra" };
+    let exe = root.join("target").join(&target).join("release").join(bin_name);
     if !exe.is_file() {
         bail!("missing release binary at {}", exe.display());
     }
 
-    let bundle_python = !skip_python && host_matches_target(target_ref);
-    if !skip_python && !host_matches_target(target_ref) {
-        eprintln!(
-            "package: skipping bundled Python (host triple != {target_ref}); ship scripts/ + models/ only"
-        );
-    }
-
-    let staging = root.join("target").join("release-package");
+    let name = format!("tundra-{version}-{target}");
+    let package_dir = root.join("target").join("package");
+    let staging = package_dir.join(&name);
     if staging.exists() {
         std::fs::remove_dir_all(&staging)
             .with_context(|| format!("clean {}", staging.display()))?;
     }
-    std::fs::create_dir_all(&staging)?;
+    std::fs::create_dir_all(staging.join("models"))?;
+    std::fs::create_dir_all(staging.join("scripts"))?;
 
-    std::fs::copy(&exe, staging.join(bin_name))
-        .with_context(|| format!("copy {}", exe.display()))?;
+    copy_file(&exe, &staging.join(bin_name))?;
+    for model in &MODELS {
+        copy_file(&models_dir().join(model.name), &staging.join("models").join(model.name))?;
+    }
+    for script in RUNTIME_SCRIPTS {
+        copy_file(&root.join("scripts").join(script), &staging.join("scripts").join(script))?;
+    }
+    for doc in PACKAGE_DOCS {
+        copy_file(&root.join(doc), &staging.join(doc))?;
+    }
 
-    let models_src = release.join("models");
-    if models_src.is_dir() {
-        copy_dir_all(&models_src, &staging.join("models"))?;
+    if skip_python {
+        println!("package: skipping bundled Python (--skip-python)");
+    } else if is_host(&target) {
+        bundle_python(&staging)?;
     } else {
-        bail!("missing bundled models at {}", models_src.display());
+        eprintln!("package: not bundling Python for {target} (only the host's Python can be bundled)");
     }
 
-    let scripts_src = root.join("scripts");
-    let scripts_dst = staging.join("scripts");
-    std::fs::create_dir_all(&scripts_dst)?;
-    copy_glob(&scripts_src, "*.py", &scripts_dst)?;
-    for name in ["pyproject.toml", "uv.lock", ".python-version"] {
-        let src = scripts_src.join(name);
-        if src.is_file() {
-            std::fs::copy(&src, scripts_dst.join(name))?;
-        }
-    }
-
-    if bundle_python {
-        ensure_tool("uv")?;
-        let python_version = classifier_python_for_target(Some(target_ref));
-        let python_root = staging.join("python");
-        std::fs::create_dir_all(&python_root)?;
-
-        let mut python_install = Command::new("uv");
-        python_install
-            .args(["python", "install", python_version])
-            .env("UV_PYTHON_INSTALL_DIR", &python_root);
-        run_command(
-            &mut python_install,
-            &format!("uv python install {python_version}"),
-        )?;
-
-        let python_exe = find_bundled_python(&python_root)?;
-        let venv_dir = scripts_dst.join(".venv");
-        run_command(
-            Command::new("uv")
-                .args(["venv", "--python"])
-                .arg(&python_exe)
-                .arg(&venv_dir)
-                .current_dir(&scripts_dst),
-            "uv venv",
-        )?;
-        run_command(
-            Command::new("uv")
-                .arg("sync")
-                .current_dir(&scripts_dst),
-            "uv sync",
-        )?;
-    }
-
-    let archive_name = package_archive_name(version, target_ref);
-    let archive_path = root.join("target").join(&archive_name);
-    if archive_path.is_file() {
-        std::fs::remove_file(&archive_path)?;
-    }
-
-    if archive_name.ends_with(".zip") {
-        #[cfg(windows)]
-        {
-            run_command(
-                Command::new("powershell")
-                    .args([
-                        "-NoProfile",
-                        "-Command",
-                        &format!(
-                            "Compress-Archive -Path '{}' -DestinationPath '{}' -Force",
-                            staging.join("*").display(),
-                            archive_path.display()
-                        ),
-                    ]),
-                "Compress-Archive",
-            )?;
-        }
-        #[cfg(not(windows))]
-        {
-            run_command(
-                Command::new("zip")
-                    .arg("-r")
-                    .arg(&archive_path)
-                    .arg(".")
-                    .current_dir(&staging),
-                "zip",
-            )?;
-        }
+    let archive = package_dir.join(if windows {
+        format!("{name}.zip")
     } else {
-        run_command(
-            Command::new("tar")
-                .args(["-czf"])
-                .arg(&archive_path)
-                .arg("-C")
-                .arg(&staging)
-                .arg("."),
-            "tar",
-        )?;
+        format!("{name}.tar.gz")
+    });
+    if archive.is_file() {
+        std::fs::remove_file(&archive)?;
+    }
+    // bsdtar (bundled with Windows 10+ and macOS) picks the format from the
+    // extension with -a; GNU tar handles .tar.gz with -z.
+    let mut tar = Command::new("tar");
+    if windows {
+        tar.arg("-a");
+    } else {
+        tar.arg("-z");
+    }
+    run(tar
+        .arg("-cf")
+        .arg(&archive)
+        .arg("-C")
+        .arg(&package_dir)
+        .arg(&name))?;
+
+    let checksum = PathBuf::from(format!("{}.sha256", archive.display()));
+    let file_name = archive.file_name().expect("archive name").to_string_lossy();
+    std::fs::write(&checksum, format!("{}  {file_name}\n", sha256_file(&archive)?))?;
+    println!("package: {}", archive.display());
+    Ok(vec![archive, checksum])
+}
+
+/// Attach this host's package to a draft release for the Cargo.toml version.
+///
+/// Refuses a dirty tree, an unpushed HEAD, or a tag that already points
+/// somewhere else. The release stays a draft until published by hand, so a
+/// failed CI job never leaves a half-populated public release.
+fn release(ci: bool, skip_build: bool) -> Result<()> {
+    let root = project_root();
+    let tag = release_tag();
+    let git = |args: &[&str]| output(Command::new("git").args(args).current_dir(&root));
+
+    if !git(&["status", "--porcelain"])?.is_empty() {
+        bail!("working tree has uncommitted changes");
+    }
+    let head = git(&["rev-parse", "HEAD"])?;
+    run(Command::new("git").args(["fetch", "--tags", "origin"]).current_dir(&root))?;
+    if git(&["branch", "-r", "--contains", &head])?.is_empty() {
+        bail!("HEAD {head} is not on any remote branch; push it first");
+    }
+    match git(&["rev-parse", &format!("refs/tags/{tag}^{{commit}}")]) {
+        Ok(tagged) if tagged != head => {
+            bail!("{tag} already points at {tagged}; bump the version in Cargo.toml instead of moving it")
+        }
+        Ok(_) => {}
+        Err(_) => {
+            run(Command::new("git").args(["tag", "-a", &tag, "-m", &tag]).current_dir(&root))?;
+            run(Command::new("git").args(["push", "origin", &tag]).current_dir(&root))?;
+        }
     }
 
-    println!("package: {}", archive_path.display());
+    let draft = output(
+        Command::new("gh")
+            .args(["release", "view", &tag, "--json", "isDraft", "--jq", ".isDraft"])
+            .current_dir(&root),
+    );
+    match draft.as_deref() {
+        Ok("true") => {}
+        Ok(_) => bail!("release {tag} is already published; its assets are left untouched"),
+        Err(_) => {
+        run(Command::new("gh")
+            .args(["release", "create", &tag, "--draft", "--verify-tag", "--generate-notes"])
+            .current_dir(&root))?;
+        }
+    }
+
+    let assets = if skip_build {
+        let target = host_triple()?;
+        let dir = root.join("target").join("package");
+        std::fs::read_dir(&dir)
+            .with_context(|| format!("read {}", dir.display()))?
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(&format!("tundra-{tag}-{target}.")))
+            })
+            .collect()
+    } else {
+        package_release(&tag, None, false, false, false)?
+    };
+    if assets.is_empty() {
+        bail!("no packages for {tag} under target/package");
+    }
+    // Uploading to a draft may replace this host's own earlier upload, never a
+    // published asset.
+    run(Command::new("gh")
+        .args(["release", "upload", &tag, "--clobber"])
+        .args(&assets)
+        .current_dir(&root))?;
+
+    if ci {
+        run(Command::new("gh")
+            .args(["workflow", "run", "release.yml", "--ref", &tag, "-f"])
+            .arg(format!("tag={tag}"))
+            .current_dir(&root))?;
+    }
+    println!("release: draft {tag} updated; publish it on GitHub once every platform is attached");
     Ok(())
 }

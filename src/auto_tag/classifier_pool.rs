@@ -4,7 +4,7 @@
 //! protocol stream (a stray print, a reply to an earlier request) retires the
 //! worker, so one file's label can never be attributed to another file.
 
-use super::{bundled_python_exe, configure_classifier_command, scripts_dir, ClassifyError};
+use super::{bundled_python, configure_classifier_command, scripts_dir, ClassifyError};
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
@@ -201,7 +201,7 @@ impl Drop for Worker {
     }
 }
 
-/// Interpreters to try, in order: the bundled venv, `uv run`, then a system
+/// Interpreters to try, in order: the bundled Python, `uv run`, then a system
 /// Python on Unix.
 fn launch_commands() -> Vec<(String, Command)> {
     let scripts_dir = scripts_dir();
@@ -213,8 +213,12 @@ fn launch_commands() -> Vec<(String, Command)> {
         command.arg(&script).current_dir(&scripts_dir);
         command
     };
-    if let Some(bundled) = bundled_python_exe() {
-        commands.push((bundled.display().to_string(), python(&bundled)));
+    if let Some(bundled) = bundled_python() {
+        let mut command = python(&bundled.exe);
+        if let Some(site_packages) = &bundled.site_packages {
+            command.env("PYTHONPATH", site_packages);
+        }
+        commands.push((bundled.exe.display().to_string(), command));
     }
     let mut uv = Command::new("uv");
     uv.current_dir(&scripts_dir)

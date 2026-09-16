@@ -33,18 +33,51 @@ impl ClassifyError {
 }
 
 pub(crate) const INSTALL_HINT: &str =
-    "Install classifiers with: cargo xtask setup (or use a release package with scripts/.venv)";
+    "Install classifiers with `cargo xtask setup`, or use a release package that includes python/";
 
-pub fn bundled_python_exe() -> Option<PathBuf> {
-    #[cfg(windows)]
-    const VENV_REL: &str = "scripts/.venv/Scripts/python.exe";
-    #[cfg(not(windows))]
-    const VENV_REL: &str = "scripts/.venv/bin/python3";
-
-    crate::path_util::find_beside(&[VENV_REL], |candidate| candidate.is_file())
+/// A Python that ships with Tundra, if any: the standalone interpreter plus
+/// `site-packages` from a release package, or the `scripts/.venv` that
+/// `cargo xtask setup` creates for development.
+pub struct BundledPython {
+    pub exe: PathBuf,
+    /// Set as PYTHONPATH so the interpreter finds the packaged dependencies.
+    pub site_packages: Option<PathBuf>,
 }
 
-pub const UV_PYTHON: &str = if cfg!(windows) { "3.12" } else { "3.14" };
+pub fn bundled_python() -> Option<BundledPython> {
+    let packaged = crate::path_util::find_beside(&["python"], |dir| {
+        dir.join("site-packages").is_dir()
+    })
+    .and_then(|python| {
+        let exe = std::fs::read_dir(&python)
+            .ok()?
+            .flatten()
+            .flat_map(|entry| {
+                let dir = entry.path();
+                [dir.join("python.exe"), dir.join("bin").join("python3")]
+            })
+            .find(|candidate| candidate.is_file())?;
+        Some(BundledPython {
+            exe,
+            site_packages: Some(python.join("site-packages")),
+        })
+    });
+    packaged.or_else(|| {
+        #[cfg(windows)]
+        const VENV_REL: &str = "scripts/.venv/Scripts/python.exe";
+        #[cfg(not(windows))]
+        const VENV_REL: &str = "scripts/.venv/bin/python3";
+        crate::path_util::find_beside(&[VENV_REL], |candidate| candidate.is_file()).map(|exe| {
+            BundledPython {
+                exe,
+                site_packages: None,
+            }
+        })
+    })
+}
+
+/// Must match `scripts/.python-version` and xtask's `PYTHON_VERSION`.
+pub const UV_PYTHON: &str = "3.12";
 pub const HIGH_CLASSIFIER_CONFIDENCE: f64 = 0.85;
 
 /// Single-file path persists cache immediately so manual Auto Tag survives app restarts.

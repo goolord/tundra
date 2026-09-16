@@ -6,8 +6,13 @@ resolver = "2"
 name = "tundra"
 version = "0.1.0"
 authors = ["Zachary Churchill <zacharyachurchill@gmail.com>"]
+description = "A fast sample browser for your audio library"
+repository = "https://github.com/goolord/tundra"
+license = "Apache-2.0"
+readme = "README.md"
 edition = "2024"
-build = "build.rs"
+rust-version = "1.89"
+publish = false
 
 [dependencies]
 iced = { version = "0.14", default-features = false, features = ["wgpu-bare", "tiny-skia", "svg", "canvas", "crisp", "web-colors", "thread-pool", "x11", "wayland", "linux-theme-detection"] }

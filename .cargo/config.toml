@@ -1,7 +1,10 @@
 [alias]
 xtask = "run --package xtask --"
 
-# Static CRT is required for the `release` profile on Windows (see build.rs). Dev and `release-fast` use dynamic CRT.
+# Link the C runtime statically on Windows MSVC so release binaries run without
+# the Visual C++ redistributable.
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static"]
 
 # --- Linux (glibc) ---
 [target.x86_64-unknown-linux-gnu]
