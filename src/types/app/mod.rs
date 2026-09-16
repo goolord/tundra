@@ -790,13 +790,12 @@ impl App {
 
     fn reset_file_list(&mut self) {
         if self.file_selector.favorites_only {
-            self.file_selector.file_list = self.favorite_file_buttons();
-            self.file_selector.list_error = None;
+            let favorites = self.favorite_file_buttons();
+            self.file_selector.set_file_list(favorites, None);
             return;
         }
         let (file_list, list_error) = FileList::list_buttons(&self.file_selector.current_dir);
-        self.file_selector.file_list = file_list;
-        self.file_selector.list_error = list_error;
+        self.file_selector.set_file_list(file_list, list_error);
     }
 
     fn favorite_file_buttons(&self) -> Vec<FileButton> {
@@ -888,8 +887,7 @@ impl App {
         }
 
         if favorites_only && favorite_keys.is_empty() {
-            self.file_selector.file_list = Vec::new();
-            self.file_selector.list_error = None;
+            self.file_selector.set_file_list(Vec::new(), None);
             return Task::none();
         }
 
@@ -956,7 +954,6 @@ impl App {
         self.bulk_scan_active = None;
         self.bulk_apply_generation = self.bulk_apply_generation.wrapping_add(1);
         self.bulk_apply_active = None;
-        auto_tag::shutdown_classifier_pool();
     }
 
     fn request_cancel_bulk_apply(&mut self) {
@@ -1412,21 +1409,29 @@ impl App {
                 self.auto_tag.begin_run();
                 Task::perform(
                     async move {
-                        run_blocking(move || auto_tag::classify_file(&path))
-                            .await
-                            .unwrap_or_else(|_| {
-                                Err(auto_tag::ClassifyError::new(
-                                    "Couldn't analyze this file.",
-                                    "Classifier thread stopped unexpectedly.",
-                                ))
-                            })
+                        let result = run_blocking({
+                            let path = path.clone();
+                            move || auto_tag::classify_file(&path)
+                        })
+                        .await
+                        .unwrap_or_else(|_| {
+                            Err(auto_tag::ClassifyError::new(
+                                "Couldn't analyze this file.",
+                                "Classifier thread stopped unexpectedly.",
+                            ))
+                        });
+                        (path, result)
                     },
-                    Message::AutoTagCompleted,
+                    |(path, result)| Message::AutoTagCompleted(path, result),
                 )
             }
 
-            Message::AutoTagCompleted(result) => {
-                self.auto_tag.finish_run(result);
+            Message::AutoTagCompleted(path, result) => {
+                // The modal may have been closed and reopened on another file while
+                // this ran; a label for one file must never be offered for another.
+                if self.auto_tag.running && self.auto_tag.target.as_ref() == Some(&path) {
+                    self.auto_tag.finish_run(result);
+                }
                 Task::none()
             }
 
@@ -1450,20 +1455,15 @@ impl App {
                         .set_error(AUTO_TAG_ALREADY_COMPLETE);
                     return Task::none();
                 }
-                let instrument = if needs.is_some_and(|status| status.needs_instrument) {
+                // A missing or outdated Tundra instrument needs a fresh detection;
+                // re-stamping the old label would mark it current without checking.
+                let instrument = if needs.is_some_and(|status| status.allows_instrument_work()) {
                     let Some(result) = self.auto_tag.result.clone() else {
                         self.auto_tag
                             .set_error("Detect an instrument before applying tags.");
                         return Task::none();
                     };
                     result.instrument
-                } else if needs.is_some_and(|status| status.can_retag_instrument) {
-                    self.auto_tag
-                        .result
-                        .as_ref()
-                        .map(|result| result.instrument.clone())
-                        .or_else(|| instrument_tag(&path))
-                        .unwrap_or_default()
                 } else {
                     instrument_tag(&path).unwrap_or_default()
                 };
@@ -1681,23 +1681,32 @@ impl App {
                 self.bulk_scan_cancel = Some(Arc::clone(&cancel));
                 Task::perform(
                     async move {
-                        (
-                            generation,
-                            bulk_auto_tag::apply_items(&items, Some(&progress), &cancel),
-                        )
+                        let summary = run_blocking(move || {
+                            bulk_auto_tag::apply_items(&items, Some(&progress), &cancel)
+                        })
+                        .await
+                        .unwrap_or_else(|_| bulk_auto_tag::BulkApplySummary {
+                            failed: vec![(
+                                PathBuf::new(),
+                                "Apply stopped unexpectedly; some files may not have been tagged."
+                                    .into(),
+                            )],
+                            ..Default::default()
+                        });
+                        (generation, summary)
                     },
                     |(generation, summary)| Message::BulkAutoTagApplyCompleted { generation, summary },
                 )
             }
 
-            Message::BulkAutoTagApplyCompleted { generation, summary } => {
-                self.bulk_scan_progress = None;
-                for path in &summary.written_paths {
-                    self.merge_path_metadata(path);
-                }
+            Message::BulkAutoTagApplyCompleted { generation, mut summary } => {
+                // Files were written whether or not the user is still watching.
+                self.metadata_cache
+                    .merge(std::mem::take(&mut summary.refreshed));
                 if self.bulk_apply_active != Some(generation) {
                     return Task::none();
                 }
+                self.bulk_scan_progress = None;
                 self.bulk_apply_active = None;
                 if self.bulk_auto_tag.is_open() {
                     self.bulk_auto_tag.finish_apply(summary);
@@ -1824,7 +1833,7 @@ impl App {
                     self.metadata_cache.merge(result.new_metadata);
                     // Search paths are pre-filtered to directories and audio files,
                     // so dir-ness follows from the extension; avoids one stat per result.
-                    self.file_selector.file_list = result
+                    let results = result
                         .paths
                         .iter()
                         .map(|x| {
@@ -1835,8 +1844,7 @@ impl App {
                             )
                         })
                         .collect();
-                    self.file_selector.list_error = None;
-                    self.file_selector.clear_selection();
+                    self.file_selector.set_file_list(results, None);
                 }
                 Task::none()
             }

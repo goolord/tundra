@@ -215,11 +215,13 @@ pub fn groups_start_collapsed(dir_count: usize, file_count: usize) -> bool {
     dir_count > COLLAPSE_DIR_THRESHOLD || file_count > COLLAPSE_FILE_THRESHOLD
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct BulkApplySummary {
     pub written: usize,
     pub unchanged: usize,
-    pub written_paths: Vec<PathBuf>,
+    /// Fresh index entries for written files, read on the apply thread so the
+    /// UI merges them in one step.
+    pub refreshed: HashMap<PathBuf, CachedMetadata>,
     pub failed: Vec<(PathBuf, String)>,
     pub cancelled: bool,
 }
@@ -532,7 +534,7 @@ pub fn apply_items(
 ) -> BulkApplySummary {
     let mut written = 0usize;
     let mut unchanged = 0usize;
-    let mut written_paths = Vec::new();
+    let mut refreshed = HashMap::new();
     let mut failed = Vec::new();
     let mut cancelled = false;
 
@@ -544,7 +546,9 @@ pub fn apply_items(
         match write_auto_tags(&item.path, &item.instrument) {
             Ok(true) => {
                 written += 1;
-                written_paths.push(item.path.clone());
+                if let Some(entry) = crate::metadata::refresh_cached_metadata(&item.path) {
+                    refreshed.insert(crate::path_util::cache_key(item.path.clone()), entry);
+                }
             }
             Ok(false) => unchanged += 1,
             Err(err) => failed.push((item.path.clone(), err)),
@@ -558,7 +562,7 @@ pub fn apply_items(
     BulkApplySummary {
         written,
         unchanged,
-        written_paths,
+        refreshed,
         failed,
         cancelled,
     }

@@ -174,7 +174,6 @@ pub fn auto_tag_view<'a>(
     path_status: Option<crate::metadata::AutoTagFieldStatus>,
 ) -> Element<'a, Message> {
     let needs_any = path_status.is_some_and(|status| status.needs_any());
-    let needs_new_instrument = path_status.is_some_and(|status| status.needs_instrument);
     let allows_instrument_work = path_status.is_some_and(|status| status.allows_instrument_work());
     let can_retag = path_status.is_some_and(|status| status.can_retag_instrument);
 
@@ -258,10 +257,10 @@ pub fn auto_tag_view<'a>(
 
     let can_run = state.target.is_some() && allows_instrument_work && !state.running;
     let can_apply = state.target.is_some()
-        && (needs_any || (can_retag && state.result.is_some()))
+        && (needs_any || can_retag)
         && !state.running
         && !state.applied
-        && (!needs_new_instrument || state.result.is_some());
+        && (!allows_instrument_work || state.result.is_some());
 
     if can_apply {
         body = body.push(

@@ -253,6 +253,45 @@ fn instrument_hint(path: &Path) -> Option<(String, HintSource)> {
     }
 
     #[test]
+    fn tundra_comment_keeps_user_lines_and_replaces_only_its_own() {
+        use super::read::tundra_comment;
+        let marker = format!("Tundra v{TUNDRA_TAG_VERSION}");
+        assert_eq!(tundra_comment(None), marker);
+        assert_eq!(tundra_comment(Some("  ")), marker);
+        assert_eq!(tundra_comment(Some("Recorded live")), "Recorded live");
+        assert_eq!(tundra_comment(Some("Tundra v0")), marker);
+        assert_eq!(
+            tundra_comment(Some("Recorded live\nINSTRUMENT: Kick\nTundra")),
+            format!("Recorded live\n{marker}")
+        );
+    }
+
+    #[test]
+    fn user_instrument_without_comment_is_not_claimed_by_tundra() {
+        use lofty::config::WriteOptions;
+        use lofty::file::AudioFile;
+        use lofty::iff::wav::RiffInfoList;
+
+        let dir = crate::test_fixtures::ScratchDir::new("user-instrument-no-comment");
+        let audio = dir.path().join("snare.wav");
+        write_minimal_wav(&audio);
+        let mut wav = {
+            let mut file = std::fs::File::open(&audio).expect("open");
+            lofty::iff::wav::WavFile::read_from(&mut file, lofty::config::ParseOptions::new())
+                .expect("parse")
+        };
+        let mut info = RiffInfoList::new();
+        info.insert(WAV_INSTRUMENT_KEY.to_string(), "Snare".to_string());
+        wav.set_riff_info(info);
+        wav.save_to_path(&audio, WriteOptions::default()).expect("save");
+
+        let status = auto_tag_field_status(&audio).expect("status");
+        assert!(!status.needs_comment, "a marker would claim the user's instrument");
+        write_auto_tags(&audio, "Snare").expect("auto tag");
+        assert_eq!(riff_info(&audio).get(WAV_COMMENT_KEY), None);
+    }
+
+    #[test]
     fn tundra_tagged_status_allows_retag_but_preserves_user_tags() {
         let dir = unique_temp_dir("tundra_retag_status");
         std::fs::create_dir_all(&dir).expect("temp dir");

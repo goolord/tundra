@@ -50,7 +50,11 @@ impl AutoTagFieldStatus {
             needs_artist: native_writable
                 && file_artist.trim().is_empty()
                 && artist_hint_from_path(path).is_some(),
-            needs_comment: native_writable && needs_auto_tag_comment(comment),
+            // The marker claims the instrument for future upgrades, so it only goes
+            // on files whose instrument Tundra writes or already owns.
+            needs_comment: native_writable
+                && (!has_instrument || tundra_tagged)
+                && needs_auto_tag_comment(comment),
         }
     }
 }

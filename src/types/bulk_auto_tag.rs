@@ -1287,11 +1287,13 @@ pub fn bulk_auto_tag_view<'a>(
                     let lines: Vec<Element<Message>> = summary
                         .failed
                         .iter()
-                        .take(8)
                         .map(|(path, err)| {
-                            text(format!("{} — {err}", truncate_path(path, 42)))
-                                .size(11)
-                                .into()
+                            let line = if path.as_os_str().is_empty() {
+                                err.clone()
+                            } else {
+                                format!("{} — {err}", truncate_path(path, 42))
+                            };
+                            text(line).size(11).into()
                         })
                         .collect();
                     done = done.push(

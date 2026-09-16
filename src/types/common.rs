@@ -207,7 +207,10 @@ pub enum Message {
     AutoTagPickFile,
     AutoTagFilePicked(Option<PathBuf>),
     AutoTagRun,
-    AutoTagCompleted(Result<crate::auto_tag::ClassificationResult, crate::auto_tag::ClassifyError>),
+    AutoTagCompleted(
+        PathBuf,
+        Result<crate::auto_tag::ClassificationResult, crate::auto_tag::ClassifyError>,
+    ),
     AutoTagApply,
     ToggleAutoTagDetails,
     OpenTagEditorFor(PathBuf),

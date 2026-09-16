@@ -1,4 +1,3 @@
-use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -7,10 +6,7 @@ mod classifier_pool;
 mod tier1;
 
 pub use classify_cache::{clear_cache as clear_classify_cache, flush_cache as flush_classify_cache};
-pub use classifier_pool::{
-    shutdown as shutdown_classifier_pool, warm as warm_classifier_pool,
-    worker_count as classifier_worker_count,
-};
+pub use classifier_pool::{warm as warm_classifier_pool, worker_count as classifier_worker_count};
 
 #[derive(Debug, Clone)]
 pub struct ClassificationResult {
@@ -36,15 +32,7 @@ impl ClassifyError {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct Tier2CliResponse {
-    instrument: String,
-    confidence: Option<f64>,
-    zcr: Option<f64>,
-    engine: Option<String>,
-}
-
-const INSTALL_HINT: &str =
+pub(crate) const INSTALL_HINT: &str =
     "Install classifiers with: cargo xtask setup (or use a release package with scripts/.venv)";
 
 pub fn bundled_python_exe() -> Option<PathBuf> {
@@ -56,21 +44,6 @@ pub fn bundled_python_exe() -> Option<PathBuf> {
     crate::path_util::find_beside(&[VENV_REL], |candidate| candidate.is_file())
 }
 
-fn run_python_script(
-    python: &Path,
-    scripts_dir: &Path,
-    script: &str,
-    path: &Path,
-) -> Result<std::process::Output, std::io::Error> {
-    let script_path = scripts_dir.join(script);
-    let mut command = Command::new(python);
-    configure_classifier_command(&mut command);
-    command
-        .arg(&script_path)
-        .current_dir(scripts_dir)
-        .arg(path)
-        .output()
-}
 pub const UV_PYTHON: &str = if cfg!(windows) { "3.12" } else { "3.14" };
 pub const HIGH_CLASSIFIER_CONFIDENCE: f64 = 0.85;
 
@@ -118,8 +91,8 @@ fn classify_file_inner(path: &Path) -> Result<ClassificationResult, ClassifyErro
         return Ok(with_path_hint(path, result));
     }
 
-    let tier2 = classify_tier2(path, tier1.zcr)?;
-    let engine = tier2.engine.as_deref().unwrap_or("essentia");
+    let tier2 = classifier_pool::classify_tier2(path, tier1.zcr)?;
+    let engine = tier2.engine.as_deref().unwrap_or_default();
     let result = ClassificationResult {
         instrument: tier2.instrument.clone(),
         tier: 2,
@@ -137,29 +110,10 @@ fn classify_file_inner(path: &Path) -> Result<ClassificationResult, ClassifyErro
     Ok(with_path_hint(path, result))
 }
 
-fn classify_tier2(
-    path: &Path,
-    tier1_zcr: f64,
-) -> Result<classifier_pool::Tier2Response, ClassifyError> {
-    match classifier_pool::classify_tier2(path, tier1_zcr) {
-        Ok(response) => Ok(response),
-        Err(worker_err) => {
-            eprintln!(
-                "classifier worker failed ({}); falling back to subprocess tier 2",
-                worker_err.details
-            );
-            run_tier2_subprocess(path)
-        }
-    }
-}
-
 fn engine_label(engine: &str) -> &'static str {
     match engine {
         "onnx" => "ONNX",
-        "tensorflow" => "TensorFlow (legacy)",
-        "essentia-spectral" => "Essentia spectral",
-        "librosa-spectral" | "librosa-fallback" => "Librosa spectral",
-        _ => "Essentia",
+        _ => "Librosa spectral",
     }
 }
 
@@ -277,157 +231,13 @@ pub fn configure_classifier_command(command: &mut Command) {
     ] {
         command.env(key, value);
     }
+    // Paths cross the pipe as UTF-8 whatever the system code page is.
+    command.env("PYTHONUTF8", "1").env("PYTHONIOENCODING", "utf-8");
     if let Some(models) = bundled_models_dir() {
         command.env("TUNDRA_MODELS", &models);
-        command.env("ESSENTIA_MODELS", &models);
         command.env("TUNDRA_ONNX_DL", "1");
-        command.env("TUNDRA_ESSENTIA_DL", "1");
     }
     crate::path_util::hide_console(command);
-}
-
-fn run_script(script: &str, path: &Path) -> Result<String, ClassifyError> {
-    let scripts_dir = scripts_dir();
-    let script_path = scripts_dir.join(script);
-    if !script_path.is_file() {
-        return Err(ClassifyError::new(
-            "Couldn't analyze this file.",
-            format!("Missing classifier script: {}", script_path.display()),
-        ));
-    }
-
-    let mut attempts: Vec<String> = Vec::new();
-
-    if let Some(python) = bundled_python_exe() {
-        match run_python_script(&python, &scripts_dir, script, path) {
-            Ok(output) if output.status.success() => {
-                return String::from_utf8(output.stdout)
-                    .map_err(|err| {
-                        ClassifyError::new(
-                            "Couldn't analyze this file.",
-                            format!("Invalid UTF-8 from {script}: {err}"),
-                        )
-                    })
-                    .map(|text| text.trim().to_string());
-            }
-            Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                attempts.push(if stderr.is_empty() {
-                    format!(
-                        "{} {script} exited with status {}",
-                        python.display(),
-                        output.status
-                    )
-                } else {
-                    format!("{} {script}: {stderr}", python.display())
-                });
-            }
-            Err(err) => {
-                attempts.push(format!("{}: {err}", python.display()));
-            }
-        }
-    }
-
-    if let Some(output) = try_uv_run(&scripts_dir, script, path) {
-        match output {
-            Ok(stdout) => return Ok(stdout),
-            Err(err) => attempts.push(format!("uv run: {err}")),
-        }
-    } else {
-        attempts.push("uv not found".to_string());
-    }
-
-    #[cfg(not(windows))]
-    for python in ["python3", "python"] {
-        let mut command = Command::new(python);
-        configure_classifier_command(&mut command);
-        match command
-            .arg(&script_path)
-            .current_dir(&scripts_dir)
-            .arg(path)
-            .output()
-        {
-            Ok(output) if output.status.success() => {
-                return String::from_utf8(output.stdout)
-                    .map_err(|err| {
-                        ClassifyError::new(
-                            "Couldn't analyze this file.",
-                            format!("Invalid UTF-8 from {script}: {err}"),
-                        )
-                    })
-                    .map(|text| text.trim().to_string());
-            }
-            Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                attempts.push(if stderr.is_empty() {
-                    format!("{python} {script} exited with status {}", output.status)
-                } else {
-                    format!("{python} {script}: {stderr}")
-                });
-            }
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                attempts.push(format!("{python} not found"));
-            }
-            Err(err) => {
-                return Err(ClassifyError::new(
-                    "Couldn't analyze this file.",
-                    format!("Failed to launch {python} for {script}: {err}"),
-                ));
-            }
-        }
-    }
-
-    Err(ClassifyError::new(
-        "Couldn't analyze this file.",
-        format!(
-            "Could not run {script}. {INSTALL_HINT}. {}",
-            attempts.join("; ")
-        ),
-    ))
-}
-
-fn try_uv_run(scripts_dir: &Path, script: &str, path: &Path) -> Option<Result<String, String>> {
-    let mut command = Command::new("uv");
-    command
-        .current_dir(scripts_dir)
-        .arg("run")
-        .arg("--python")
-        .arg(UV_PYTHON)
-        .arg(script)
-        .arg(path);
-    configure_classifier_command(&mut command);
-    let output = command.output().ok()?;
-
-    if output.status.success() {
-        Some(
-            String::from_utf8(output.stdout)
-                .map_err(|err| format!("Invalid UTF-8 from uv run {script}: {err}"))
-                .map(|text| text.trim().to_string()),
-        )
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        Some(Err(if stderr.is_empty() {
-            format!("exited with status {}", output.status)
-        } else {
-            stderr
-        }))
-    }
-}
-
-fn run_tier2_subprocess(path: &Path) -> Result<classifier_pool::Tier2Response, ClassifyError> {
-    let stdout = run_script("tier2_essentia.py", path)?;
-    let parsed: Tier2CliResponse = serde_json::from_str(&stdout).map_err(|err| {
-        ClassifyError::new(
-            "Analysis returned unexpected data.",
-            format!("Invalid tier 2 output: {err}"),
-        )
-    })?;
-    Ok(classifier_pool::Tier2Response {
-        instrument: parsed.instrument,
-        confidence: parsed.confidence,
-        zcr: parsed.zcr,
-        engine: parsed.engine,
-    })
 }
 
 #[cfg(test)]

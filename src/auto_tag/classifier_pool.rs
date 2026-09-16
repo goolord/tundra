@@ -1,14 +1,23 @@
+//! Long-lived Python tier-2 workers speaking JSON lines over stdio.
+//!
+//! Every request carries an id that the reply must echo. Anything else on the
+//! protocol stream (a stray print, a reply to an earlier request) retires the
+//! worker, so one file's label can never be attributed to another file.
+
 use super::{bundled_python_exe, configure_classifier_command, scripts_dir, ClassifyError};
 use serde::{Deserialize, Serialize};
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::{Arc, LazyLock, Mutex};
-use std::time::Duration;
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
-const WORKER_READ_TIMEOUT: Duration = Duration::from_secs(120);
+const READY_TIMEOUT: Duration = Duration::from_secs(120);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+/// Each worker holds the ONNX models in memory; release them when unused.
+const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
 #[derive(Debug, Deserialize)]
 struct WorkerReady {
@@ -20,6 +29,7 @@ struct WorkerReady {
 
 #[derive(Debug, Deserialize)]
 struct WorkerResponse {
+    id: Option<u64>,
     ok: bool,
     result: Option<Tier2Response>,
     error: Option<String>,
@@ -35,316 +45,277 @@ pub struct Tier2Response {
 
 #[derive(Debug, Serialize)]
 struct WorkerRequest<'a> {
+    id: u64,
     path: &'a str,
     tier1_zcr: f64,
 }
 
-enum ReaderMsg {
-    Line(String),
-    Closed,
+fn failure(details: impl Into<String>) -> ClassifyError {
+    ClassifyError::new("Couldn't analyze this file.", details)
 }
 
 struct Worker {
     child: Child,
-    stdin: Option<ChildStdin>,
-    line_rx: mpsc::Receiver<ReaderMsg>,
-    _reader: std::thread::JoinHandle<()>,
+    stdin: ChildStdin,
+    lines: mpsc::Receiver<String>,
+    last_used: Instant,
 }
 
 impl Worker {
     fn spawn() -> Result<Self, ClassifyError> {
-        let scripts_dir = scripts_dir();
-        let mut last_error = String::from("no launch attempts");
-
-        if let Some(python) = bundled_python_exe() {
-            match try_spawn_python_worker(&scripts_dir, &python) {
-                Ok(mut worker) => match worker.wait_for_ready() {
-                    Ok(()) => return Ok(worker),
-                    Err(err) => {
-                        let _ = worker.child.kill();
-                        last_error = err.details;
-                    }
-                },
-                Err(err) => last_error = err.details,
+        let mut attempts = Vec::new();
+        for (label, command) in launch_commands() {
+            match Self::start(command).and_then(|mut worker| {
+                worker.wait_for_ready()?;
+                Ok(worker)
+            }) {
+                Ok(worker) => return Ok(worker),
+                Err(err) => attempts.push(format!("{label}: {}", err.details)),
             }
         }
-
-        if let Some(mut worker) = try_spawn_uv_worker(&scripts_dir) {
-            match worker.wait_for_ready() {
-                Ok(()) => return Ok(worker),
-                Err(err) => {
-                    let _ = worker.child.kill();
-                    last_error = err.details;
-                }
-            }
-        }
-
-        #[cfg(not(windows))]
-        for python in ["python3", "python"] {
-            match try_spawn_python_worker(&scripts_dir, Path::new(python)) {
-                Ok(mut worker) => match worker.wait_for_ready() {
-                    Ok(()) => return Ok(worker),
-                    Err(err) => {
-                        let _ = worker.child.kill();
-                        last_error = err.details;
-                    }
-                },
-                Err(err) => last_error = err.details,
-            }
-        }
-
         Err(ClassifyError::new(
             "Couldn't start classifier worker.",
-            last_error,
+            format!("{}. {}", super::INSTALL_HINT, attempts.join("; ")),
         ))
     }
 
-    fn wait_for_ready(&mut self) -> Result<(), ClassifyError> {
-        let deadline = std::time::Instant::now() + WORKER_READ_TIMEOUT;
-        loop {
-            if std::time::Instant::now() >= deadline {
-                let _ = self.child.kill();
-                return Err(ClassifyError::new(
-                    "Classifier worker failed to start.",
-                    "Timed out waiting for worker ready line",
-                ));
+    fn start(mut command: Command) -> Result<Self, ClassifyError> {
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command
+            .spawn()
+            .map_err(|err| failure(format!("Failed to spawn worker: {err}")))?;
+        let stdin = child.stdin.take().expect("stdin piped");
+        let stdout = child.stdout.take().expect("stdout piped");
+        let stderr = child.stderr.take().expect("stderr piped");
+
+        // Drain stderr so a chatty worker can never fill the pipe and stall.
+        std::thread::spawn(move || {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                eprintln!("classifier worker: {line}");
             }
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            let line = match self.line_rx.recv_timeout(remaining) {
-                Ok(ReaderMsg::Line(line)) => line,
-                Ok(ReaderMsg::Closed) => {
-                    return Err(ClassifyError::new(
-                        "Classifier worker failed to start.",
-                        "Worker closed stdout before ready",
-                    ));
+        });
+        let (line_tx, lines) = mpsc::channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                if line_tx.send(line).is_err() {
+                    break;
                 }
-                Err(RecvTimeoutError::Timeout) => {
-                    let _ = self.child.kill();
-                    return Err(ClassifyError::new(
-                        "Classifier worker failed to start.",
-                        "Timed out waiting for worker ready line",
-                    ));
-                }
-                Err(RecvTimeoutError::Disconnected) => {
-                    return Err(ClassifyError::new(
-                        "Classifier worker failed to start.",
-                        "Worker reader disconnected before ready",
-                    ));
-                }
-            };
-            if line.is_empty() {
-                continue;
             }
-            if let Ok(parsed) = serde_json::from_str::<WorkerReady>(&line) {
-                if !parsed.ready {
-                    return Err(ClassifyError::new(
-                        "Classifier worker failed to start.",
-                        parsed.error.unwrap_or_else(|| "unknown worker error".into()),
-                    ));
-                }
-                if !parsed.onnx {
-                    eprintln!(
-                        "classifier worker: ONNX unavailable; grey-zone files use librosa tier 2"
-                    );
-                }
-                return Ok(());
-            }
-            eprintln!("classifier worker stdout (ignored before ready): {line}");
+        });
+
+        Ok(Self {
+            child,
+            stdin,
+            lines,
+            last_used: Instant::now(),
+        })
+    }
+
+    fn next_line(&self, deadline: Instant) -> Result<String, String> {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match self.lines.recv_timeout(remaining) {
+            Ok(line) => Ok(line),
+            Err(RecvTimeoutError::Timeout) => Err("Classifier worker timed out".into()),
+            Err(RecvTimeoutError::Disconnected) => Err("Classifier worker exited".into()),
         }
     }
 
-    fn classify(&mut self, path: &Path, tier1_zcr: f64) -> Result<Tier2Response, ClassifyError> {
-        if self
-            .child
-            .try_wait()
-            .map_err(|err| {
-                ClassifyError::new(
-                    "Couldn't analyze this file.",
-                    format!("Worker status check failed: {err}"),
-                )
-            })?
-            .is_some()
-        {
-            *self = Self::spawn()?;
+    fn wait_for_ready(&mut self) -> Result<(), ClassifyError> {
+        let line = self
+            .next_line(Instant::now() + READY_TIMEOUT)
+            .map_err(failure)?;
+        let ready: WorkerReady = serde_json::from_str(&line)
+            .map_err(|err| failure(format!("Unexpected worker greeting {line:?}: {err}")))?;
+        if !ready.ready {
+            return Err(failure(
+                ready.error.unwrap_or_else(|| "unknown worker error".into()),
+            ));
         }
+        if !ready.onnx {
+            eprintln!("classifier worker: ONNX unavailable; grey-zone files use librosa tier 2");
+        }
+        Ok(())
+    }
+
+    /// The outer `Err` means the worker can no longer be trusted and must be
+    /// replaced; an inner `Err` is an ordinary per-file failure.
+    fn classify(
+        &mut self,
+        path: &Path,
+        tier1_zcr: f64,
+    ) -> Result<Result<Tier2Response, ClassifyError>, ClassifyError> {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        self.last_used = Instant::now();
 
         let path_str = crate::path_util::normalize_path(path.to_path_buf())
             .to_string_lossy()
             .into_owned();
-        if path_str.contains('\n') || path_str.contains('\r') {
-            return Err(ClassifyError::new(
-                "Couldn't analyze this file.",
-                "Path contains unsupported control characters",
-            ));
-        }
-
         let request = WorkerRequest {
+            id,
             path: &path_str,
             tier1_zcr,
         };
-        let payload = serde_json::to_string(&request).map_err(|err| {
-            ClassifyError::new(
-                "Couldn't analyze this file.",
-                format!("Failed to encode worker request: {err}"),
-            )
-        })?;
-        let stdin = self.stdin.as_mut().ok_or_else(|| {
-            ClassifyError::new(
-                "Couldn't analyze this file.",
-                "Classifier worker stdin closed",
-            )
-        })?;
-        stdin
-            .write_all(format!("{payload}\n").as_bytes())
-            .map_err(|err| {
-                ClassifyError::new(
-                    "Couldn't analyze this file.",
-                    format!("Failed to write to classifier worker: {err}"),
-                )
-            })?;
-        stdin.flush().map_err(|err| {
-            ClassifyError::new(
-                "Couldn't analyze this file.",
-                format!("Failed to flush classifier worker stdin: {err}"),
-            )
-        })?;
+        let mut payload = serde_json::to_vec(&request)
+            .map_err(|err| failure(format!("Failed to encode worker request: {err}")))?;
+        payload.push(b'\n');
+        self.stdin
+            .write_all(&payload)
+            .and_then(|()| self.stdin.flush())
+            .map_err(|err| failure(format!("Failed to write to classifier worker: {err}")))?;
 
-        let line = self.read_line()?;
-        let parsed: WorkerResponse = serde_json::from_str(&line).map_err(|err| {
-            ClassifyError::new(
-                "Analysis returned unexpected data.",
-                format!("Invalid worker output: {err}; line={line:?}"),
-            )
-        })?;
-        if parsed.ok {
-            parsed.result.ok_or_else(|| {
-                ClassifyError::new(
-                    "Analysis returned unexpected data.",
-                    "Worker success response missing result",
-                )
-            })
+        let line = self
+            .next_line(Instant::now() + REQUEST_TIMEOUT)
+            .map_err(failure)?;
+        let response: WorkerResponse = serde_json::from_str(&line)
+            .map_err(|err| failure(format!("Invalid worker output {line:?}: {err}")))?;
+        if response.id != Some(id) {
+            return Err(failure(format!(
+                "Worker replied to request {:?} while {id} was pending",
+                response.id
+            )));
+        }
+        self.last_used = Instant::now();
+
+        Ok(if response.ok {
+            response
+                .result
+                .ok_or_else(|| failure("Worker success response missing result"))
         } else {
-            Err(ClassifyError::new(
-                "Couldn't analyze this file.",
-                parsed
-                    .error
-                    .unwrap_or_else(|| "Unknown worker error".into()),
+            Err(failure(
+                response.error.unwrap_or_else(|| "Unknown worker error".into()),
             ))
-        }
-    }
-
-    fn read_line(&mut self) -> Result<String, ClassifyError> {
-        match self.line_rx.recv_timeout(WORKER_READ_TIMEOUT) {
-            Ok(ReaderMsg::Line(line)) => Ok(line),
-            Ok(ReaderMsg::Closed) => Err(ClassifyError::new(
-                "Couldn't analyze this file.",
-                "Classifier worker closed stdout",
-            )),
-            Err(RecvTimeoutError::Timeout) => {
-                let _ = self.child.kill();
-                let _ = self.child.wait();
-                // Dead worker; next `classify` respawns via `try_wait` at entry.
-                Err(ClassifyError::new(
-                    "Couldn't analyze this file.",
-                    "Classifier worker timed out",
-                ))
-            }
-            Err(RecvTimeoutError::Disconnected) => Err(ClassifyError::new(
-                "Couldn't analyze this file.",
-                "Classifier worker reader disconnected",
-            )),
-        }
-    }
-
-    fn shutdown(&mut self) {
-        if let Some(stdin) = self.stdin.as_mut() {
-            let _ = stdin.write_all(b"{\"quit\":true}\n");
-            let _ = stdin.flush();
-        }
-        self.stdin = None;
-        let deadline = std::time::Instant::now() + Duration::from_millis(500);
-        while std::time::Instant::now() < deadline {
-            if self.child.try_wait().ok().flatten().is_some() {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(25));
-        }
-        if self.child.try_wait().ok().flatten().is_none() {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
-        }
+        })
     }
 }
 
 impl Drop for Worker {
     fn drop(&mut self) {
-        self.shutdown();
+        // Closing stdin ends the worker's read loop; kill covers a hung one.
+        let _ = self.stdin.write_all(b"{\"quit\":true}\n");
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 
-struct WorkerSlot {
-    worker: Mutex<Worker>,
+/// Interpreters to try, in order: the bundled venv, `uv run`, then a system
+/// Python on Unix.
+fn launch_commands() -> Vec<(String, Command)> {
+    let scripts_dir = scripts_dir();
+    let script = scripts_dir.join("classifier_worker.py");
+    let mut commands = Vec::new();
+
+    let python = |program: &Path| {
+        let mut command = Command::new(program);
+        command.arg(&script).current_dir(&scripts_dir);
+        command
+    };
+    if let Some(bundled) = bundled_python_exe() {
+        commands.push((bundled.display().to_string(), python(&bundled)));
+    }
+    let mut uv = Command::new("uv");
+    uv.current_dir(&scripts_dir)
+        .args(["run", "--python", super::UV_PYTHON, "classifier_worker.py"]);
+    commands.push(("uv run".to_string(), uv));
+    #[cfg(not(windows))]
+    for system in ["python3", "python"] {
+        commands.push((system.to_string(), python(Path::new(system))));
+    }
+
+    for (_, command) in &mut commands {
+        configure_classifier_command(command);
+    }
+    commands
 }
 
 struct ClassifierPool {
-    workers: Mutex<Vec<Arc<WorkerSlot>>>,
+    slots: Vec<Mutex<Option<Worker>>>,
     next: AtomicUsize,
 }
 
-impl ClassifierPool {
-    fn new() -> Self {
-        Self {
-            workers: Mutex::new(Vec::new()),
-            next: AtomicUsize::new(0),
-        }
+static POOL: LazyLock<ClassifierPool> = LazyLock::new(|| {
+    std::thread::spawn(reap_idle_workers);
+    ClassifierPool {
+        slots: (0..worker_count()).map(|_| Mutex::new(None)).collect(),
+        next: AtomicUsize::new(0),
     }
+});
 
-    fn shutdown(&self) {
-        if let Ok(mut workers) = self.workers.lock() {
-            workers.clear();
+fn reap_idle_workers() {
+    loop {
+        std::thread::sleep(IDLE_TIMEOUT / 4);
+        for slot in &POOL.slots {
+            if let Ok(mut worker) = slot.try_lock() {
+                if worker
+                    .as_ref()
+                    .is_some_and(|worker| worker.last_used.elapsed() >= IDLE_TIMEOUT)
+                {
+                    *worker = None;
+                }
+            }
         }
-    }
-
-    fn ensure_workers(&self, count: usize) -> Result<(), ClassifyError> {
-        let mut workers = self.workers.lock().map_err(|_| {
-            ClassifyError::new(
-                "Couldn't analyze this file.",
-                "Classifier worker pool lock poisoned",
-            )
-        })?;
-        while workers.len() < count {
-            workers.push(Arc::new(WorkerSlot {
-                worker: Mutex::new(Worker::spawn()?),
-            }));
-        }
-        Ok(())
-    }
-
-    fn classify_tier2(&self, path: &Path, tier1_zcr: f64) -> Result<Tier2Response, ClassifyError> {
-        self.ensure_workers(worker_count())?;
-        let worker_index = self.next.fetch_add(1, Ordering::Relaxed) % worker_count();
-        let worker_slot = {
-            let workers = self.workers.lock().map_err(|_| {
-                ClassifyError::new(
-                    "Couldn't analyze this file.",
-                    "Classifier worker pool lock poisoned",
-                )
-            })?;
-            Arc::clone(&workers[worker_index])
-        };
-        let mut worker = worker_slot.worker.lock().map_err(|_| {
-            ClassifyError::new(
-                "Couldn't analyze this file.",
-                "Classifier worker lock poisoned",
-            )
-        })?;
-        worker.classify(path, tier1_zcr)
     }
 }
 
-static CLASSIFIER_POOL: LazyLock<ClassifierPool> = LazyLock::new(ClassifierPool::new);
+impl ClassifierPool {
+    fn lock(slot: &Mutex<Option<Worker>>) -> std::sync::MutexGuard<'_, Option<Worker>> {
+        // A panic mid-request leaves the worker in an unknown state; drop it.
+        slot.lock().unwrap_or_else(|poisoned| {
+            let mut guard = poisoned.into_inner();
+            *guard = None;
+            guard
+        })
+    }
 
-/// Cap at two workers: each loads TensorFlow/librosa and is memory-heavy.
+    /// An idle slot if one is free, otherwise round-robin.
+    fn pick(&self) -> std::sync::MutexGuard<'_, Option<Worker>> {
+        for slot in &self.slots {
+            if let Ok(guard) = slot.try_lock() {
+                return guard;
+            }
+        }
+        let index = self.next.fetch_add(1, Ordering::Relaxed) % self.slots.len();
+        Self::lock(&self.slots[index])
+    }
+
+    fn classify(&self, path: &Path, tier1_zcr: f64) -> Result<Tier2Response, ClassifyError> {
+        let mut slot = self.pick();
+        let mut last_error = None;
+        // A worker that crashed or desynced gets one fresh replacement.
+        for _ in 0..2 {
+            let exited = slot
+                .as_mut()
+                .is_none_or(|worker| !matches!(worker.child.try_wait(), Ok(None)));
+            if exited {
+                *slot = Some(Worker::spawn()?);
+            }
+            let worker = slot.as_mut().expect("worker present");
+            match worker.classify(path, tier1_zcr) {
+                Ok(result) => return result,
+                Err(err) => {
+                    *slot = None;
+                    last_error = Some(err);
+                }
+            }
+        }
+        Err(last_error.expect("loop ran"))
+    }
+
+    fn warm(&self) -> Result<(), ClassifyError> {
+        for slot in &self.slots {
+            let mut worker = Self::lock(slot);
+            if worker.is_none() {
+                *worker = Some(Worker::spawn()?);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Cap at two workers: each loads the ONNX models and is memory-heavy.
 pub fn worker_count() -> usize {
     std::thread::available_parallelism()
         .map(|count| (count.get() / 2).clamp(1, 2))
@@ -352,96 +323,9 @@ pub fn worker_count() -> usize {
 }
 
 pub fn warm() -> Result<(), ClassifyError> {
-    CLASSIFIER_POOL.ensure_workers(worker_count())
+    POOL.warm()
 }
 
 pub fn classify_tier2(path: &Path, tier1_zcr: f64) -> Result<Tier2Response, ClassifyError> {
-    CLASSIFIER_POOL.classify_tier2(path, tier1_zcr)
-}
-
-pub fn shutdown() {
-    CLASSIFIER_POOL.shutdown();
-}
-
-fn spawn_worker(mut command: Command) -> Result<Worker, ClassifyError> {
-    let mut child = command.spawn().map_err(|err| {
-        ClassifyError::new(
-            "Couldn't start classifier worker.",
-            format!("Failed to spawn worker: {err}"),
-        )
-    })?;
-    let stdin = child.stdin.take().ok_or_else(|| {
-        ClassifyError::new(
-            "Couldn't start classifier worker.",
-            "Worker stdin unavailable",
-        )
-    })?;
-    let stdout = child.stdout.take().ok_or_else(|| {
-        ClassifyError::new(
-            "Couldn't start classifier worker.",
-            "Worker stdout unavailable",
-        )
-    })?;
-
-    let (line_tx, line_rx) = mpsc::channel();
-    let reader = std::thread::spawn(move || {
-        use std::io::{BufRead, BufReader};
-        let mut reader = BufReader::new(stdout);
-        loop {
-            let mut line = String::new();
-            match reader.read_line(&mut line) {
-                Ok(0) => {
-                    let _ = line_tx.send(ReaderMsg::Closed);
-                    break;
-                }
-                Ok(_) => {
-                    if line_tx
-                        .send(ReaderMsg::Line(line.trim().to_string()))
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-                Err(_) => {
-                    let _ = line_tx.send(ReaderMsg::Closed);
-                    break;
-                }
-            }
-        }
-    });
-
-    Ok(Worker {
-        child,
-        stdin: Some(stdin),
-        line_rx,
-        _reader: reader,
-    })
-}
-
-fn try_spawn_uv_worker(scripts_dir: &Path) -> Option<Worker> {
-    let mut command = Command::new("uv");
-    command
-        .current_dir(scripts_dir)
-        .arg("run")
-        .arg("--python")
-        .arg(super::UV_PYTHON)
-        .arg("classifier_worker.py")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit());
-    configure_classifier_command(&mut command);
-    spawn_worker(command).ok()
-}
-
-fn try_spawn_python_worker(scripts_dir: &Path, python: &Path) -> Result<Worker, ClassifyError> {
-    let script = scripts_dir.join("classifier_worker.py");
-    let mut command = Command::new(python);
-    command
-        .arg(script)
-        .current_dir(scripts_dir)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit());
-    configure_classifier_command(&mut command);
-    spawn_worker(command)
+    POOL.classify(path, tier1_zcr)
 }

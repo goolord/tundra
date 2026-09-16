@@ -57,43 +57,39 @@ pub(crate) const VORBIS_ARTIST_KEY: &str = "ARTIST";
 pub(crate) const VORBIS_COMMENT_KEY: &str = "COMMENT";
 pub(crate) const ID3_INSTRUMENT_KEY: &str = "INSTRUMENT";
 
+fn marked_instrument_line(line: &str) -> Option<&str> {
+    let line = line.trim();
+    ["INSTRUMENT:", "INSTRUMENT="]
+        .iter()
+        .find_map(|prefix| line.strip_prefix(prefix))
+        .map(str::trim)
+        .filter(|rest| !rest.is_empty())
+}
+
 pub(crate) fn instrument_from_marked_comment(comment: &str) -> Option<String> {
-    for line in comment.lines() {
-        let line = line.trim();
-        for prefix in ["INSTRUMENT:", "INSTRUMENT="] {
-            if let Some(rest) = line.strip_prefix(prefix) {
-                let trimmed = rest.trim();
-                if !trimmed.is_empty() {
-                    return Some(trimmed.to_string());
-                }
-            }
-        }
-    }
-    None
+    comment
+        .lines()
+        .find_map(marked_instrument_line)
+        .map(str::to_string)
 }
 
 fn tundra_comment_marker() -> String {
     format!("Tundra v{TUNDRA_TAG_VERSION}")
 }
 
+fn marker_line_version(line: &str) -> Option<u32> {
+    let line = line.trim();
+    if line.eq_ignore_ascii_case("Tundra") || line.eq_ignore_ascii_case(LEGACY_TUNDRA_AUTO_TAG_COMMENT) {
+        return Some(0);
+    }
+    line.to_ascii_lowercase()
+        .strip_prefix("tundra v")
+        .and_then(|rest| rest.trim().parse().ok())
+}
+
 /// Version recorded in a Tundra marker comment, if any.
 pub(crate) fn parse_tundra_comment_version(comment: &str) -> Option<u32> {
-    for line in comment.lines() {
-        let line = line.trim();
-        if line.eq_ignore_ascii_case("Tundra") {
-            return Some(0);
-        }
-        if line.eq_ignore_ascii_case(LEGACY_TUNDRA_AUTO_TAG_COMMENT) {
-            return Some(0);
-        }
-        let lower = line.to_ascii_lowercase();
-        if let Some(rest) = lower.strip_prefix("tundra v") {
-            if let Ok(version) = rest.trim().parse::<u32>() {
-                return Some(version);
-            }
-        }
-    }
-    None
+    comment.lines().find_map(marker_line_version)
 }
 
 pub(crate) fn file_tundra_tag_version(path: &Path, comment: &str, native_instrument: &str) -> Option<u32> {
@@ -383,17 +379,23 @@ pub(crate) fn read_native_tags(path: &Path) -> Option<NativeTags> {
     read_container_tags(path).map(|tags| tags.native)
 }
 
-/// Tundra's marker comment, preserving a comment the user already wrote.
+/// The comment to write: lines Tundra wrote earlier are replaced by the current
+/// marker, and a comment with no Tundra lines is left exactly as the user wrote
+/// it (Tundra does not claim files whose comment it does not own).
 pub(crate) fn tundra_comment(existing: Option<&str>) -> String {
-    let marker = tundra_comment_marker();
-    let Some(existing) = existing.map(str::trim).filter(|text| !text.is_empty()) else {
-        return marker;
-    };
-    if tundra_owns_tags(existing) {
-        marker
-    } else {
-        existing.to_string()
+    let existing = existing.unwrap_or_default().trim();
+    let is_tundra_line =
+        |line: &&str| marker_line_version(line).is_some() || marked_instrument_line(line).is_some();
+    if !existing.lines().any(|line| is_tundra_line(&line)) && !existing.is_empty() {
+        return existing.to_string();
     }
+    existing
+        .lines()
+        .filter(|line| !is_tundra_line(line) && !line.trim().is_empty())
+        .map(str::to_string)
+        .chain([tundra_comment_marker()])
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn explicit_instrument_from_tag(tag: &Tag) -> Option<String> {

@@ -1314,6 +1314,42 @@ impl FileSelector {
         self.selection_anchor = Some(index);
     }
 
+    /// Swap in a new listing. Selection is carried over by path: row indices
+    /// from the old listing would otherwise point at different files, and
+    /// actions on "the selected file" (auto-tag, tag editor) would hit them.
+    pub fn set_file_list(&mut self, file_list: Vec<FileButton>, list_error: Option<String>) {
+        let key_at = |list: &[FileButton], index: usize| {
+            list.get(index)
+                .map(|entry| crate::path_util::cache_key(entry.file_path.clone()))
+        };
+        let selected: HashSet<PathBuf> = self
+            .selected
+            .iter()
+            .filter_map(|&index| key_at(&self.file_list, index))
+            .collect();
+        let anchor = self
+            .selection_anchor
+            .and_then(|index| key_at(&self.file_list, index));
+
+        self.file_list = file_list;
+        self.list_error = list_error;
+        self.selected.clear();
+        self.selection_anchor = None;
+        self.hovered_file = None;
+        if selected.is_empty() {
+            return;
+        }
+        for (index, entry) in self.file_list.iter().enumerate() {
+            let key = crate::path_util::cache_key(entry.file_path.clone());
+            if selected.contains(&key) {
+                self.selected.insert(index);
+                if anchor.as_ref() == Some(&key) {
+                    self.selection_anchor = Some(index);
+                }
+            }
+        }
+    }
+
     pub fn clear_selection(&mut self) {
         self.selected.clear();
         self.selection_anchor = None;

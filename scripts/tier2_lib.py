@@ -89,31 +89,15 @@ def map_jamendo_class(raw_class: str) -> str:
     return cleaned[:1].upper() + cleaned[1:] if cleaned else "One-Shot"
 
 
-def _env_truthy(*names: str) -> bool:
-    for name in names:
-        if os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}:
-            return True
-    return False
-
-
 def dl_enabled() -> bool:
-    return _env_truthy("TUNDRA_ONNX_DL", "TUNDRA_ESSENTIA_DL")
+    return os.environ.get("TUNDRA_ONNX_DL", "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def bundled_model_dir() -> Path | None:
     candidates: list[Path] = []
-    for env_name in ("TUNDRA_MODELS", "ESSENTIA_MODELS"):
-        if env := os.environ.get(env_name):
-            candidates.append(Path(env))
-    script_dir = Path(__file__).resolve().parent
-    project = script_dir.parent
-    candidates.append(project / "resources" / "models")
-    target_root = project / "target"
-    for profile in ("debug", "release", "release-fast"):
-        candidates.append(target_root / profile / "models")
-        if target_root.is_dir():
-            for child in target_root.iterdir():
-                candidates.append(child / profile / "models")
+    if env := os.environ.get("TUNDRA_MODELS"):
+        candidates.append(Path(env))
+    candidates.append(Path(__file__).resolve().parent.parent / "resources" / "models")
     for candidate in candidates:
         if required_models_present(candidate):
             return candidate
