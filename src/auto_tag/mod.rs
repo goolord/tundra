@@ -104,7 +104,7 @@ fn classify_file_inner(path: &Path) -> Result<ClassificationResult, ClassifyErro
     // the result is stored against the old version and never matches.
     let stamp = classify_cache::FileStamp::of(path);
     let tier1 = tier1::classify(path)?;
-    if tier1.decision == "definitive" {
+    if tier1.instrument.is_some() {
         let instrument = tier1.instrument.ok_or_else(|| {
             ClassifyError::new(
                 "Couldn't determine an instrument.",
