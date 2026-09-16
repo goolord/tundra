@@ -8,8 +8,6 @@ pub use super::waveform::*;
 use futures::channel::mpsc::unbounded;
 use futures::channel::mpsc::UnboundedReceiver;
 use futures::channel::mpsc::UnboundedSender;
-use futures::executor::block_on;
-use futures::StreamExt;
 use iced::widget::button::{Status as ButtonStatus, Style as ButtonStyle};
 use iced::widget::slider::{Handle, HandleShape, Rail, Status as SliderStatus, Style as SliderStyle};
 use iced::widget::scrollable::{Direction, Scrollbar};
@@ -407,24 +405,30 @@ pub struct Player {
     cmd_sender: Option<UnboundedSender<PlayerCommand>>,
     msg_sender: Option<UnboundedSender<PlayerMsg>>,
     pending_commands: Vec<PlayerCommand>,
+    /// Id of the loaded track; also read by its peak builder to stop early.
+    track_id: sync::Arc<sync::atomic::AtomicU64>,
 }
 
+/// Track ids tie asynchronous events to the file that caused them, so a late
+/// event from the previous file is ignored instead of acting on the new one.
 enum PlayerCommand {
-    Load(PlaybackData, sync::Arc<PlaybackPosition>),
+    Load(PlaybackData, sync::Arc<PlaybackPosition>, u64),
     Play,
     Pause,
     Stop,
     Seek(f64, bool),
     SetVolume(f32),
-    LoopRestart,
+    /// Sent by the audio callback when a segment of track `id` runs out.
+    Ended(u64),
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum PlayerMsg {
-    SinkEmpty,
-    StreamFailed,
-    WaveformPeaksReady,
-    Looped,
+    Ended(u64),
+    Looped(u64),
+    WaveformPeaksReady(u64),
+    DeviceUnavailable,
+    FileFailed(String),
 }
 
 pub struct Controls {
@@ -443,7 +447,6 @@ pub struct PlaybackProgress {
 
 struct PlaybackData {
     path: PathBuf,
-    channels: u16,
     sample_rate: u32,
     total_frames: u64,
 }
@@ -686,6 +689,7 @@ impl Player {
             cmd_sender: None,
             msg_sender: None,
             pending_commands: Vec::new(),
+            track_id: Default::default(),
         }
     }
 
@@ -804,18 +808,23 @@ impl Player {
         self.current_file = Some(file_path.to_path_buf());
         self.waveform = Some(loaded.waveform);
 
+        let id = self.track_id.fetch_add(1, Ordering::SeqCst) + 1;
         if let Some(msg_sender) = self.msg_sender.clone() {
-            let peaks = loaded.peaks.clone();
-            let path = file_path.to_path_buf();
-            let hint = total_frames as usize;
-            spawn_peak_build(path, hint, peaks, move || {
-                let _ = msg_sender.unbounded_send(PlayerMsg::WaveformPeaksReady);
-            });
+            let track_id = sync::Arc::clone(&self.track_id);
+            spawn_peak_build(
+                file_path.to_path_buf(),
+                total_frames as usize,
+                loaded.peaks.clone(),
+                move || track_id.load(Ordering::SeqCst) != id,
+                move || {
+                    let _ = msg_sender.unbounded_send(PlayerMsg::WaveformPeaksReady(id));
+                },
+            );
         }
 
         send_command(
             cmd_sender,
-            PlayerCommand::Load(loaded.playback, playback_position),
+            PlayerCommand::Load(loaded.playback, playback_position, id),
         );
         self.play();
         Ok(())
@@ -851,6 +860,11 @@ impl Player {
             self.controls.track_duration =
                 Some(total_frames as f64 / f64::from(waveform.sample_rate()));
         }
+    }
+
+    /// Whether an event for track `id` still applies.
+    pub fn is_current_track(&self, id: u64) -> bool {
+        self.track_id.load(Ordering::SeqCst) == id
     }
 
     pub fn on_ended(&mut self) {
@@ -961,8 +975,157 @@ struct OutputFormat {
     sample_rate: u32,
 }
 
+/// The loaded track on the audio thread.
+struct Track {
+    data: PlaybackData,
+    position: sync::Arc<PlaybackPosition>,
+    id: u64,
+}
+
+/// Owns the output stream. Every start, seek, and loop builds a fresh `Sink`
+/// and drops the previous one, which stops it without blocking: no queue to
+/// drain, and an old segment's end-of-track callback never fires.
+struct AudioWorker {
+    stream: rodio::OutputStream,
+    output: OutputFormat,
+    volume: f32,
+    sink: Option<rodio::Sink>,
+    track: Option<Track>,
+    /// Where to resume, as a fraction of the track.
+    offset: f64,
+    cmd_sender: UnboundedSender<PlayerCommand>,
+    msg_sender: UnboundedSender<PlayerMsg>,
+    is_playing: sync::Arc<sync::atomic::AtomicBool>,
+    looping: sync::Arc<sync::atomic::AtomicBool>,
+}
+
+impl AudioWorker {
+    fn send(&self, msg: PlayerMsg) {
+        let _ = self.msg_sender.unbounded_send(msg);
+    }
+
+    fn set_playing(&self, playing: bool) {
+        self.is_playing.store(playing, Ordering::SeqCst);
+    }
+
+    /// Start a new segment of the current track at `offset`.
+    fn start(&mut self, offset: f64, play: bool) {
+        self.sink = None;
+        let Some(track) = &self.track else {
+            self.set_playing(false);
+            return;
+        };
+        self.offset = offset.clamp(0.0, 1.0);
+
+        let sink = rodio::Sink::connect_new(self.stream.mixer());
+        sink.set_volume(self.volume);
+        if !play {
+            sink.pause();
+        }
+        prime_output_queue(&sink, self.output);
+        if let Err(err) = append_stream(
+            &sink,
+            &track.data.path,
+            self.offset,
+            track.position.total_frames(),
+            Some(sync::Arc::clone(&track.position)),
+            self.output.channels,
+            self.output.sample_rate,
+        ) {
+            self.set_playing(false);
+            self.send(PlayerMsg::FileFailed(err));
+            return;
+        }
+
+        let (id, cmd_sender) = (track.id, self.cmd_sender.clone());
+        sink.append(Callback::new(
+            Box::new(move |()| {
+                let _ = cmd_sender.unbounded_send(PlayerCommand::Ended(id));
+            }),
+            (),
+            self.output.sample_rate,
+        ));
+        self.sink = Some(sink);
+        self.set_playing(play);
+    }
+
+    fn handle(&mut self, command: PlayerCommand) {
+        match command {
+            PlayerCommand::Load(data, position, id) => {
+                position.reset();
+                self.track = Some(Track { data, position, id });
+                self.start(0.0, false);
+            }
+            PlayerCommand::Play => {
+                let Some(track) = &self.track else {
+                    self.set_playing(false);
+                    return;
+                };
+                let finished = self.sink.as_ref().is_none_or(rodio::Sink::empty)
+                    || playback_exhausted(self.offset, track.position.total_frames());
+                if finished {
+                    let restart = playback_exhausted(track.position.progress(), track.position.total_frames());
+                    let offset = if restart { 0.0 } else { self.offset };
+                    self.start(offset, true);
+                } else if let Some(sink) = &self.sink {
+                    sink.play();
+                    self.set_playing(true);
+                }
+            }
+            PlayerCommand::Pause => {
+                if let Some(track) = &self.track {
+                    self.offset = track.position.progress();
+                }
+                if let Some(sink) = &self.sink {
+                    sink.pause();
+                }
+                self.set_playing(false);
+            }
+            PlayerCommand::Stop => {
+                self.sink = None;
+                self.offset = 0.0;
+                if let Some(track) = &self.track {
+                    track.position.reset();
+                }
+                self.set_playing(false);
+            }
+            PlayerCommand::Seek(progress, resume) => {
+                if let Some(track) = &self.track {
+                    let total = track.position.total_frames();
+                    track
+                        .position
+                        .set_frame((progress.clamp(0.0, 1.0) * total as f64).round() as u64);
+                }
+                self.start(progress, resume);
+            }
+            PlayerCommand::Ended(id) => {
+                if self.track.as_ref().is_none_or(|track| track.id != id) {
+                    return;
+                }
+                if self.looping.load(Ordering::Acquire) {
+                    if let Some(track) = &self.track {
+                        track.position.reset();
+                    }
+                    self.start(0.0, true);
+                    self.send(PlayerMsg::Looped(id));
+                } else {
+                    self.sink = None;
+                    self.set_playing(false);
+                    self.send(PlayerMsg::Ended(id));
+                }
+            }
+            PlayerCommand::SetVolume(volume) => {
+                self.volume = clamp_volume(volume);
+                if let Some(sink) = &self.sink {
+                    sink.set_volume(self.volume);
+                }
+            }
+        }
+    }
+}
+
 fn run_audio_worker(
-    mut cmd_receiver: UnboundedReceiver<PlayerCommand>,
+    cmd_receiver: UnboundedReceiver<PlayerCommand>,
     cmd_sender: UnboundedSender<PlayerCommand>,
     msg_sender: UnboundedSender<PlayerMsg>,
     is_playing: sync::Arc<sync::atomic::AtomicBool>,
@@ -974,174 +1137,29 @@ fn run_audio_worker(
         Err(err) => {
             eprintln!("Audio output unavailable: {err}");
             is_playing.store(false, Ordering::SeqCst);
-            let _ = msg_sender.unbounded_send(PlayerMsg::StreamFailed);
+            let _ = msg_sender.unbounded_send(PlayerMsg::DeviceUnavailable);
             return;
         }
     };
-
-    let sink = rodio::Sink::connect_new(stream.mixer());
-    sink.set_volume(clamp_volume(initial_volume));
     let output = OutputFormat {
         channels: stream.config().channel_count(),
         sample_rate: stream.config().sample_rate(),
     };
-    let mut playback: Option<PlaybackData> = None;
-    let mut playback_position: Option<sync::Arc<PlaybackPosition>> = None;
-    let mut play_offset = 0.0_f64;
-    let mut playback_revision: u64 = 0;
-    let mut sink_revision: u64 = 0;
-
-    block_on(async move {
-        while let Some(command) = cmd_receiver.next().await {
-            match command {
-                PlayerCommand::Load(data, position) => {
-                    position.reset();
-                    playback_position = Some(position);
-                    playback = Some(data);
-                    play_offset = 0.0;
-                    playback_revision = playback_revision.wrapping_add(1);
-                    sink.clear();
-                    prime_output_queue(&sink, output);
-                    if let Some(data) = playback.as_ref() {
-                        append_playback(
-                            &sink,
-                            data,
-                            play_offset,
-                            playback_position.as_ref(),
-                            &cmd_sender,
-                            &msg_sender,
-                            &looping,
-                            output,
-                        );
-                        sink_revision = playback_revision;
-                    }
-                    is_playing.store(false, Ordering::SeqCst);
-                }
-                PlayerCommand::Play => {
-                    let Some(data) = playback.as_ref() else {
-                        is_playing.store(false, Ordering::Release);
-                        continue;
-                    };
-                    let exhausted = playback_exhausted(
-                        play_offset,
-                        playback_total_frames(playback_position.as_ref()),
-                    );
-                    let stale = sink_revision != playback_revision;
-                    if stale || should_reappend_on_play(sink.empty(), exhausted) {
-                        if exhausted {
-                            play_offset = 0.0;
-                            if let Some(position) = &playback_position {
-                                position.reset();
-                            }
-                        }
-                        if !sink.empty() {
-                            sink.clear();
-                        }
-                        prime_output_queue(&sink, output);
-                        append_playback(
-                            &sink,
-                            data,
-                            play_offset,
-                            playback_position.as_ref(),
-                            &cmd_sender,
-                            &msg_sender,
-                            &looping,
-                            output,
-                        );
-                        sink_revision = playback_revision;
-                    }
-                    sink.play();
-                    is_playing.store(true, Ordering::Release);
-                }
-                PlayerCommand::Pause => {
-                    if let Some(position) = &playback_position {
-                        play_offset = position.progress();
-                    }
-                    sink.pause();
-                    is_playing.store(false, Ordering::Release);
-                }
-                PlayerCommand::Stop => {
-                    play_offset = 0.0;
-                    if let Some(position) = &playback_position {
-                        position.reset();
-                    }
-                    sink.clear();
-                    is_playing.store(false, Ordering::Release);
-                }
-                PlayerCommand::Seek(p, resume) => {
-                    let Some(data) = playback.as_ref() else {
-                        is_playing.store(false, Ordering::Release);
-                        continue;
-                    };
-                    play_offset = p.clamp(0.0, 1.0);
-                    if let Some(position) = &playback_position {
-                        let total = position.total_frames();
-                        let frame = if total > 0 {
-                            (play_offset * total as f64).round() as u64
-                        } else {
-                            0
-                        };
-                        position.set_frame(frame);
-                    }
-                    sink.clear();
-                    prime_output_queue(&sink, output);
-                    append_playback(
-                        &sink,
-                        data,
-                        play_offset,
-                        playback_position.as_ref(),
-                        &cmd_sender,
-                        &msg_sender,
-                        &looping,
-                        output,
-                    );
-                    if resume {
-                        sink.play();
-                    } else {
-                        sink.pause();
-                    }
-                    sink_revision = playback_revision;
-                    is_playing.store(resume, Ordering::Release);
-                }
-                PlayerCommand::LoopRestart => {
-                    let Some(data) = playback.as_ref() else {
-                        continue;
-                    };
-                    if !looping.load(Ordering::Acquire) {
-                        is_playing.store(false, Ordering::Release);
-                        let _ = msg_sender.unbounded_send(PlayerMsg::SinkEmpty);
-                        continue;
-                    }
-                    play_offset = 0.0;
-                    if let Some(position) = &playback_position {
-                        position.reset();
-                    }
-                    sink.clear();
-                    prime_output_queue(&sink, output);
-                    let _ = msg_sender.unbounded_send(PlayerMsg::Looped);
-                    append_playback(
-                        &sink,
-                        data,
-                        play_offset,
-                        playback_position.as_ref(),
-                        &cmd_sender,
-                        &msg_sender,
-                        &looping,
-                        output,
-                    );
-                    sink.play();
-                    is_playing.store(true, Ordering::Release);
-                }
-                PlayerCommand::SetVolume(next) => {
-                    sink.set_volume(clamp_volume(next));
-                }
-            }
-        }
-    });
-}
-
-fn should_reappend_on_play(sink_empty: bool, exhausted: bool) -> bool {
-    sink_empty || exhausted
+    let mut worker = AudioWorker {
+        stream,
+        output,
+        volume: clamp_volume(initial_volume),
+        sink: None,
+        track: None,
+        offset: 0.0,
+        cmd_sender,
+        msg_sender,
+        is_playing,
+        looping,
+    };
+    for command in futures::executor::block_on_stream(cmd_receiver) {
+        worker.handle(command);
+    }
 }
 
 fn prime_output_queue(sink: &rodio::Sink, output: OutputFormat) {
@@ -1149,13 +1167,9 @@ fn prime_output_queue(sink: &rodio::Sink, output: OutputFormat) {
     if channels == 0 || output.sample_rate == 0 {
         return;
     }
-    // Tag the rodio queue at the device rate after clear (default filler is 44100 Hz).
+    // Tag the rodio queue at the device rate (its default filler is 44100 Hz).
     let silence = vec![0.0_f32; channels];
     sink.append(SamplesBuffer::new(output.channels, output.sample_rate, silence));
-}
-
-fn playback_total_frames(position: Option<&sync::Arc<PlaybackPosition>>) -> u64 {
-    position.map(|position| position.total_frames()).unwrap_or(0)
 }
 
 fn playback_exhausted(offset: f64, total_frames: u64) -> bool {
@@ -1169,50 +1183,6 @@ fn playback_exhausted(offset: f64, total_frames: u64) -> bool {
     skip_frames >= total_frames
 }
 
-fn append_playback(
-    sink: &rodio::Sink,
-    data: &PlaybackData,
-    offset: f64,
-    position: Option<&sync::Arc<PlaybackPosition>>,
-    cmd_sender: &UnboundedSender<PlayerCommand>,
-    msg_sender: &UnboundedSender<PlayerMsg>,
-    looping: &sync::Arc<sync::atomic::AtomicBool>,
-    output: OutputFormat,
-) {
-    if data.channels == 0 {
-        return;
-    }
-
-    if let Err(err) = append_stream(
-        sink,
-        &data.path,
-        offset,
-        playback_total_frames(position),
-        position.cloned(),
-        output.channels,
-        output.sample_rate,
-    ) {
-        eprintln!("Stream append failed: {err}");
-        let _ = msg_sender.unbounded_send(PlayerMsg::StreamFailed);
-        return;
-    }
-
-    let cmd_sender = cmd_sender.clone();
-    let msg_sender = msg_sender.clone();
-    let looping = sync::Arc::clone(looping);
-    sink.append(Callback::new(
-        Box::new(move |_| {
-            if looping.load(Ordering::Acquire) {
-                let _ = cmd_sender.unbounded_send(PlayerCommand::LoopRestart);
-            } else {
-                let _ = msg_sender.unbounded_send(PlayerMsg::SinkEmpty);
-            }
-        }),
-        (),
-        output.sample_rate,
-    ));
-}
-
 fn load_audio(path: &Path) -> Result<LoadedAudio, String> {
     let info = probe_decoder(path)?;
     let sample_count = info.total_frames as usize;
@@ -1222,7 +1192,6 @@ fn load_audio(path: &Path) -> Result<LoadedAudio, String> {
         waveform,
         playback: PlaybackData {
             path: path.to_path_buf(),
-            channels: info.channels,
             sample_rate: info.sample_rate,
             total_frames: info.total_frames,
         },
@@ -1233,24 +1202,6 @@ fn load_audio(path: &Path) -> Result<LoadedAudio, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn prime_silence_frame_len(channels: u16) -> usize {
-        channels as usize
-    }
-
-    #[test]
-    fn prime_silence_matches_output_channels() {
-        assert_eq!(prime_silence_frame_len(2), 2);
-        assert_eq!(prime_silence_frame_len(1), 1);
-    }
-
-    #[test]
-    fn play_reappend_when_sink_empty_or_exhausted() {
-        assert!(should_reappend_on_play(true, false));
-        assert!(should_reappend_on_play(false, true));
-        assert!(should_reappend_on_play(true, true));
-        assert!(!should_reappend_on_play(false, false));
-    }
 
     #[test]
     fn play_from_start_when_offset_at_end() {

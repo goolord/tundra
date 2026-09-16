@@ -21,7 +21,6 @@ pub fn probe_decoder(path: &Path) -> Result<StreamInfo, String> {
 }
 
 pub struct StreamInfo {
-    pub channels: u16,
     pub sample_rate: u32,
     pub total_frames: u64,
 }
@@ -40,7 +39,6 @@ fn stream_info_from_decoder(decoder: &Decoder<BufReader<File>>) -> Result<Stream
         .map(|duration| frames_from_duration(duration, sample_rate))
         .unwrap_or(0);
     Ok(StreamInfo {
-        channels,
         sample_rate,
         total_frames,
     })

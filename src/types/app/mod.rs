@@ -66,8 +66,6 @@ pub struct App {
     search_generation: u64,
     pub dir_cache: DirCache,
     metadata_cache: MetadataCache,
-    player_msgs: Option<Arc<futures::channel::mpsc::UnboundedReceiver<super::PlayerMsg>>>,
-    player_events_started: bool,
     drag_over: bool,
     dialog: Option<Dialog>,
     /// File or folder the OS asked us to open on startup.
@@ -220,8 +218,6 @@ impl Default for App {
             search_generation: 0,
             dir_cache,
             metadata_cache,
-            player_msgs: None,
-            player_events_started: false,
             drag_over: false,
             dialog: None,
             pending_launch_path: None,
@@ -654,7 +650,7 @@ impl App {
                     Task::none()
                 };
                 self.file_selector.sync_selection_for_path(file_path);
-                Task::batch([refresh, self.ensure_player_events()])
+                refresh
             }
             Err(err) => {
                 self.show_error(err);
@@ -671,26 +667,6 @@ impl App {
 
     fn show_notice(&mut self, message: impl Into<String>) {
         self.dialog = Some(Dialog::notice(message.into()));
-    }
-
-    fn ensure_player_events(&mut self) -> Task<Message> {
-        if !self.player_events_started {
-            self.player_events_started = true;
-            if let Some(recv) = self.player_msgs.take() {
-                match Arc::try_unwrap(recv) {
-                    Ok(recv) => {
-                        return Task::perform(recv.into_future(), |x| {
-                            Message::PlayerMsg((x.0, Arc::new(x.1)))
-                        });
-                    }
-                    Err(recv) => {
-                        eprintln!("ensure_player_events: Arc::try_unwrap failed");
-                        self.player_msgs = Some(recv);
-                    }
-                }
-            }
-        }
-        Task::none()
     }
 
     fn ensure_drag() -> Task<Message> {
@@ -1918,12 +1894,12 @@ impl App {
 
             Message::PlayerWorkerReady(worker, receiver) => {
                 self.player.attach_worker(worker);
-                match Arc::try_unwrap(receiver) {
-                    Ok(recv) => self.player_msgs = Some(Arc::new(recv)),
-                    Err(recv) => self.player_msgs = Some(recv),
-                }
-                self.maybe_open_pending_launch()
-                    .unwrap_or_else(Task::none)
+                let events = match Arc::try_unwrap(receiver) {
+                    Ok(receiver) => Task::run(receiver, Message::Player),
+                    Err(_) => Task::none(),
+                };
+                let launch = self.maybe_open_pending_launch().unwrap_or_else(Task::none);
+                Task::batch([events, launch])
             }
 
             Message::InsertDircache((parent_dir, children)) => {
@@ -1953,35 +1929,28 @@ impl App {
                 Task::batch([warm, search])
             }
 
-            Message::PlayerMsg((msg, recv)) => {
+            Message::Player(msg) => {
                 match msg {
-                    Some(PlayerMsg::SinkEmpty) => {
+                    PlayerMsg::Ended(id) if self.player.is_current_track(id) => {
                         self.player.on_ended();
                     }
-                    Some(PlayerMsg::Looped) => {
+                    PlayerMsg::Looped(id) if self.player.is_current_track(id) => {
                         if let Some(state) = &mut self.player.controls.playback_progress {
                             state.progress = 0.0;
                         }
                     }
-                    Some(PlayerMsg::StreamFailed) => {
-                        self.show_error(
-                            "Audio output unavailable. Check your sound device.".into(),
-                        );
-                    }
-                    Some(PlayerMsg::WaveformPeaksReady) => {
+                    PlayerMsg::WaveformPeaksReady(id) if self.player.is_current_track(id) => {
                         self.player.on_waveform_peaks_ready();
                     }
-                    None => return Task::none(),
-                }
-                match Arc::into_inner(recv) {
-                    None => {
-                        eprintln!("Message::PlayerMsg Arc::into_inner failed");
-                        Task::none()
+                    PlayerMsg::DeviceUnavailable => {
+                        self.show_error("Audio output unavailable. Check your sound device.".into());
                     }
-                    Some(recv) => Task::perform(recv.into_future(), |x| {
-                        Message::PlayerMsg((x.0, Arc::new(x.1)))
-                    }),
+                    PlayerMsg::FileFailed(err) => {
+                        self.show_error(format!("Couldn't play this file. {err}"));
+                    }
+                    PlayerMsg::Ended(_) | PlayerMsg::Looped(_) | PlayerMsg::WaveformPeaksReady(_) => {}
                 }
+                Task::none()
             }
 
             Message::WaveformViewChanged(view) => {

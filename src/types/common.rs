@@ -1,4 +1,3 @@
-use futures::channel::mpsc::UnboundedReceiver;
 use futures::future::Aborted;
 use crate::metadata::{SearchResult, TagField};
 use iced::widget::button::{Status as ButtonStatus, Style as ButtonStyle};
@@ -138,10 +137,7 @@ pub enum Message {
     SidebarResizeStart,
     SidebarResizeMove(f32),
     SidebarResizeEnd,
-    PlayerMsg((
-        Option<super::PlayerMsg>,
-        Arc<UnboundedReceiver<super::PlayerMsg>>,
-    )),
+    Player(super::PlayerMsg),
     TogglePlaying,
     ToggleLoop,
     StopPlayback,
