@@ -72,6 +72,10 @@ where
     /// Entries loaded from disk at start-up. Anything recorded before the load
     /// finished is newer and wins.
     pub(crate) fn finish_loading(&mut self, loaded: HashMap<PathBuf, V>) {
+        // Already cleared by the user while loading: the file is stale.
+        if self.loaded.load(Ordering::SeqCst) {
+            return;
+        }
         self.update(|map| {
             for (key, value) in loaded {
                 map.entry(key).or_insert(value);
@@ -100,6 +104,17 @@ where
         let persistable: HashMap<&PathBuf, &V> =
             map.iter().filter(|(_, value)| value.worth_saving()).collect();
         crate::path_util::write_bincode(path, &persistable, &path.display().to_string());
+    }
+
+    /// Write now, on this thread. Used on exit, when a pending background save
+    /// would be killed with the process.
+    pub(crate) fn flush(&self) {
+        if self.loaded.load(Ordering::SeqCst)
+            && self.save_pending.swap(false, Ordering::SeqCst)
+            && let Some(path) = crate::path_util::cache_file(self.file)
+        {
+            Self::persist_map_to(&path, &self.snapshot());
+        }
     }
 
     /// Schedule a save. Calls within `SAVE_DELAY` share one write, and saves
@@ -160,11 +175,17 @@ impl MetadataCache {
         Self::empty(METADATA_CACHE_FILE)
     }
 
+    /// Add entries, never replacing a newer one: a search that read a file
+    /// before a tag save may finish after it.
     pub(crate) fn merge(&mut self, entries: MetadataMap) {
         if entries.is_empty() {
             return;
         }
-        self.update(|map| map.extend(entries));
+        self.update(|map| {
+            for (key, entry) in entries {
+                keep_newer(map, key, entry);
+            }
+        });
         self.persist();
     }
 
@@ -205,6 +226,15 @@ impl MetadataCache {
     }
 }
 
+fn keep_newer(map: &mut MetadataMap, key: PathBuf, entry: CachedMetadata) {
+    match map.get(&key) {
+        Some(existing) if existing.mtime_secs > entry.mtime_secs => {}
+        _ => {
+            map.insert(key, entry);
+        }
+    }
+}
+
 fn load_map<V: serde::de::DeserializeOwned>(file: &str) -> HashMap<PathBuf, V> {
     crate::path_util::cache_file(file)
         .and_then(|path| crate::path_util::read_bincode(&path))
@@ -225,10 +255,54 @@ pub(crate) fn load_startup_caches(allowed: AllowedDirectories) -> PersistedCache
         .into_iter()
         .map(|(key, listing)| (crate::path_util::cache_key(key), listing))
         .collect();
-    let mut metadata: MetadataMap = load_map(METADATA_CACHE_FILE);
+    // Older builds also stored raw path spellings next to cache keys; fold them
+    // into one entry per file, keeping the newest.
+    let mut metadata = MetadataMap::new();
+    for (key, entry) in load_map::<CachedMetadata>(METADATA_CACHE_FILE) {
+        keep_newer(&mut metadata, crate::path_util::cache_key(key), entry);
+    }
     if !allowed.is_empty() {
         dirs.retain(|path, _| allowed.contains_cached_path(path));
         metadata.retain(|path, _| allowed.contains_cached_path(path));
     }
     PersistedCaches { dirs, metadata }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(mtime_secs: u64, title: &str) -> CachedMetadata {
+        CachedMetadata {
+            mtime_secs,
+            fields: TagFields {
+                title: title.into(),
+                ..TagFields::default()
+            },
+        }
+    }
+
+    #[test]
+    fn merges_never_replace_newer_entries() {
+        let mut cache = MetadataCache::new();
+        let path = PathBuf::from("/samples/kick.wav");
+        cache.merge_path(&path, entry(20, "saved"));
+        cache.merge_path(&path, entry(10, "stale search result"));
+        assert_eq!(cache.cached_fields(&path).map(|fields| fields.title), Some("saved".into()));
+        cache.merge_path(&path, entry(30, "edited again"));
+        assert_eq!(
+            cache.cached_fields(&path).map(|fields| fields.title),
+            Some("edited again".into())
+        );
+    }
+
+    #[test]
+    fn legacy_spellings_fold_into_the_newest_entry() {
+        let mut map = MetadataMap::new();
+        let raw = PathBuf::from(r"C:\Samples\Kick.wav");
+        keep_newer(&mut map, crate::path_util::cache_key(raw.clone()), entry(50, "new"));
+        keep_newer(&mut map, crate::path_util::cache_key(raw), entry(40, "old raw spelling"));
+        assert_eq!(map.len(), 1);
+        assert_eq!(map.values().next().map(|cached| cached.fields.title.as_str()), Some("new"));
+    }
 }

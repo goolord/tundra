@@ -128,6 +128,8 @@ pub enum Message {
     ),
     InsertDircache((PathBuf, Vec<PathBuf>)),
     InvalidateDircache,
+    /// A directory walk panicked; the key lets it be retried.
+    WalkFailed(PathBuf),
     VolumeChanged(f32),
     VolumeCommit,
     WaveformScrub(f64),

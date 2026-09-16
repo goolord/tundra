@@ -130,6 +130,7 @@ pub fn app() {
         .level(window_level(always_on_top))
         .decorations(false)
         .resizable(true)
+        .exit_on_close_request(false)
         .run()
         .unwrap()
 }
@@ -517,6 +518,7 @@ impl App {
             Subscription::none()
         };
 
+        let close_requests = window::close_requests().map(|_| Message::Quit);
         let window_resize = window::resize_events().map(|(_id, _size)| Message::SyncWindowMaximized);
 
         let waveform_scrub = if state.waveform_scrubbing {
@@ -544,6 +546,7 @@ impl App {
             file_drag_tick,
             bulk_scan_tick,
             window_resize,
+            close_requests,
             waveform_scrub,
         ])
     }
@@ -565,7 +568,8 @@ impl App {
 
     /// Walk `dir` on a background thread unless a walk of it is already running.
     fn walk_task(&mut self, dir: PathBuf) -> Task<Message> {
-        if !self.walks_in_progress.insert(crate::path_util::cache_key(dir.clone())) {
+        let key = crate::path_util::cache_key(dir.clone());
+        if !self.walks_in_progress.insert(key.clone()) {
             return Task::none();
         }
         Task::perform(
@@ -573,7 +577,7 @@ impl App {
                 let children = walk_directory(&dir);
                 (dir, children)
             }),
-            |walked| walked.map_or(Message::NoOp, Message::InsertDircache),
+            move |walked| walked.map_or_else(|()| Message::WalkFailed(key.clone()), Message::InsertDircache),
         )
     }
 
@@ -1097,7 +1101,11 @@ impl App {
                 self.start_file_search()
             }
 
-            Message::Quit => iced::exit(),
+            Message::Quit => {
+                self.dir_cache.flush();
+                self.metadata_cache.flush();
+                iced::exit()
+            }
 
             Message::WindowTitleBarPress => {
                 self.title_bar.drag_armed = true;
@@ -1134,6 +1142,11 @@ impl App {
             Message::WindowResize(direction) => on_window(move |id| window::drag_resize(id, direction)),
 
             Message::NoOp => Task::none(),
+
+            Message::WalkFailed(key) => {
+                self.walks_in_progress.remove(&key);
+                Task::none()
+            }
 
             Message::About => {
                 self.dialog = Some(Dialog::about(format!(
