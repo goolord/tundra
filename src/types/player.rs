@@ -418,8 +418,8 @@ enum PlayerCommand {
     Stop,
     Seek(f64, bool),
     SetVolume(f32),
-    /// Sent by the audio callback when a segment of track `id` runs out.
-    Ended(u64),
+    /// Sent by the audio callback when `segment` of track `track` runs out.
+    Ended { track: u64, segment: u64 },
 }
 
 #[derive(Debug, Clone)]
@@ -428,7 +428,7 @@ pub enum PlayerMsg {
     Looped(u64),
     WaveformPeaksReady(u64),
     DeviceUnavailable,
-    FileFailed(String),
+    FileFailed(u64, String),
 }
 
 pub struct Controls {
@@ -991,6 +991,9 @@ struct AudioWorker {
     volume: f32,
     sink: Option<rodio::Sink>,
     track: Option<Track>,
+    /// Counts started segments; a late end event from an earlier segment of
+    /// the same track (before a seek or restart) is ignored.
+    segment: u64,
     /// Where to resume, as a fraction of the track.
     offset: f64,
     cmd_sender: UnboundedSender<PlayerCommand>,
@@ -1033,14 +1036,15 @@ impl AudioWorker {
             self.output.sample_rate,
         ) {
             self.set_playing(false);
-            self.send(PlayerMsg::FileFailed(err));
+            self.send(PlayerMsg::FileFailed(track.id, err));
             return;
         }
 
-        let (id, cmd_sender) = (track.id, self.cmd_sender.clone());
+        self.segment += 1;
+        let (track, segment, cmd_sender) = (track.id, self.segment, self.cmd_sender.clone());
         sink.append(Callback::new(
             Box::new(move |()| {
-                let _ = cmd_sender.unbounded_send(PlayerCommand::Ended(id));
+                let _ = cmd_sender.unbounded_send(PlayerCommand::Ended { track, segment });
             }),
             (),
             self.output.sample_rate,
@@ -1098,8 +1102,8 @@ impl AudioWorker {
                 }
                 self.start(progress, resume);
             }
-            PlayerCommand::Ended(id) => {
-                if self.track.as_ref().is_none_or(|track| track.id != id) {
+            PlayerCommand::Ended { track: id, segment } => {
+                if segment != self.segment || self.track.as_ref().is_none_or(|track| track.id != id) {
                     return;
                 }
                 if self.looping.load(Ordering::Acquire) {
@@ -1151,6 +1155,7 @@ fn run_audio_worker(
         volume: clamp_volume(initial_volume),
         sink: None,
         track: None,
+        segment: 0,
         offset: 0.0,
         cmd_sender,
         msg_sender,

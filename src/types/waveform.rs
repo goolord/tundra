@@ -295,8 +295,10 @@ impl WaveFormView {
         -overscroll * width * 0.55
     }
 
+    /// A residue at or below the stop threshold (a slow pan past the edge)
+    /// is visually nothing and must not keep the uncached draw path on.
     fn content_transform_active(&self) -> bool {
-        self.overscroll != 0.0
+        self.overscroll_active()
     }
 
     /// Scale anchor for overscroll bounce: pin the visible edge so rubber-band

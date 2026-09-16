@@ -634,8 +634,11 @@ fn release(ci: bool, skip_build: bool) -> Result<()> {
         Ok(_) => {}
         Err(_) => {
             run(Command::new("git").args(["tag", "-a", &tag, "-m", &tag]).current_dir(&root))?;
-            run(Command::new("git").args(["push", "origin", &tag]).current_dir(&root))?;
         }
+    }
+    // Also covers a rerun after the push failed but the local tag was created.
+    if git(&["ls-remote", "--tags", "origin", &format!("refs/tags/{tag}")])?.is_empty() {
+        run(Command::new("git").args(["push", "origin", &tag]).current_dir(&root))?;
     }
 
     let draft = output(
@@ -647,9 +650,9 @@ fn release(ci: bool, skip_build: bool) -> Result<()> {
         Ok("true") => {}
         Ok(_) => bail!("release {tag} is already published; its assets are left untouched"),
         Err(_) => {
-        run(Command::new("gh")
-            .args(["release", "create", &tag, "--draft", "--verify-tag", "--generate-notes"])
-            .current_dir(&root))?;
+            run(Command::new("gh")
+                .args(["release", "create", &tag, "--draft", "--verify-tag", "--generate-notes"])
+                .current_dir(&root))?;
         }
     }
 

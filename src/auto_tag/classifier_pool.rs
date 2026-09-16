@@ -238,13 +238,19 @@ fn launch_commands() -> Vec<(String, Command)> {
 struct ClassifierPool {
     slots: Vec<Mutex<Option<Worker>>>,
     next: AtomicUsize,
+    /// A recent start-up failure, reused so a broken Python setup fails each
+    /// file at once instead of timing out on every grey-zone file of a scan.
+    last_spawn_failure: Mutex<Option<(Instant, ClassifyError)>>,
 }
+
+const SPAWN_RETRY_AFTER: Duration = Duration::from_secs(60);
 
 static POOL: LazyLock<ClassifierPool> = LazyLock::new(|| {
     std::thread::spawn(reap_idle_workers);
     ClassifierPool {
         slots: (0..worker_count()).map(|_| Mutex::new(None)).collect(),
         next: AtomicUsize::new(0),
+        last_spawn_failure: Mutex::new(None),
     }
 });
 
@@ -274,6 +280,26 @@ impl ClassifierPool {
         })
     }
 
+    fn spawn(&self) -> Result<Worker, ClassifyError> {
+        let mut failure = self
+            .last_spawn_failure
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((at, err)) = failure.as_ref()
+            && at.elapsed() < SPAWN_RETRY_AFTER
+        {
+            return Err(err.clone());
+        }
+        *failure = None;
+        drop(failure);
+        Worker::spawn().inspect_err(|err| {
+            *self
+                .last_spawn_failure
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((Instant::now(), err.clone()));
+        })
+    }
+
     /// An idle slot if one is free, otherwise round-robin.
     fn pick(&self) -> std::sync::MutexGuard<'_, Option<Worker>> {
         for slot in &self.slots {
@@ -294,7 +320,7 @@ impl ClassifierPool {
                 .as_mut()
                 .is_none_or(|worker| !matches!(worker.child.try_wait(), Ok(None)));
             if exited {
-                *slot = Some(Worker::spawn()?);
+                *slot = Some(self.spawn()?);
             }
             let worker = slot.as_mut().expect("worker present");
             match worker.classify(path, tier1_zcr) {
@@ -312,7 +338,7 @@ impl ClassifierPool {
         for slot in &self.slots {
             let mut worker = Self::lock(slot);
             if worker.is_none() {
-                *worker = Some(Worker::spawn()?);
+                *worker = Some(self.spawn()?);
             }
         }
         Ok(())

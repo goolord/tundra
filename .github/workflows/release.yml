@@ -58,7 +58,9 @@ jobs:
             target: x86_64-pc-windows-msvc
           - os: macos-14
             target: aarch64-apple-darwin
-          - os: macos-13
+          # No Intel runner: built on Apple silicon, so this package ships
+          # without a bundled Python (auto-tag tier 2 needs uv on the machine).
+          - os: macos-14
             target: x86_64-apple-darwin
     env:
       TAG: ${{ inputs.tag }}

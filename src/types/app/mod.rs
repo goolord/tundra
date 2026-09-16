@@ -799,6 +799,16 @@ impl App {
     }
 
     fn open_tag_editor_for(&mut self, path: PathBuf) -> Task<Message> {
+        // Reopening a file whose save is still running shows that save rather
+        // than reloading tags it is about to replace.
+        if self.tag_editor.saving && self.tag_editor.target.as_ref() == Some(&path) {
+            self.modal = Modal::TagEditor;
+            return Task::none();
+        }
+        // First-run settings must be completed before anything else opens.
+        if self.modal == Modal::Settings && self.settings_first_run {
+            return Task::none();
+        }
         self.prepare_feature_modal();
         self.modal = Modal::TagEditor;
         if let Some(err) = self.allowed_audio_error(&path) {
@@ -1164,6 +1174,10 @@ impl App {
             }
 
             Message::OpenSettings => {
+                // First-run settings must be completed before anything else opens.
+                if self.modal == Modal::Settings && self.settings_first_run {
+                    return Task::none();
+                }
                 self.prepare_feature_modal();
                 self.modal = Modal::Settings;
                 self.settings_error = None;
@@ -1286,6 +1300,10 @@ impl App {
             }
 
             Message::OpenAutoTag => {
+                // First-run settings must be completed before anything else opens.
+                if self.modal == Modal::Settings && self.settings_first_run {
+                    return Task::none();
+                }
                 self.prepare_feature_modal();
                 self.modal = Modal::AutoTag;
                 let target = self.file_selector.selected_audio_path();
@@ -1294,6 +1312,10 @@ impl App {
             }
 
             Message::OpenAutoTagFor(path) => {
+                // First-run settings must be completed before anything else opens.
+                if self.modal == Modal::Settings && self.settings_first_run {
+                    return Task::none();
+                }
                 self.prepare_feature_modal();
                 self.modal = Modal::AutoTag;
                 if let Some(err) = self.allowed_audio_error(&path) {
@@ -1314,7 +1336,9 @@ impl App {
 
             Message::CloseTagEditor => {
                 self.modal = Modal::None;
-                self.tag_editor = TagEditorState::default();
+                if !self.tag_editor.saving {
+                    self.tag_editor = TagEditorState::default();
+                }
                 Task::none()
             }
 
@@ -1506,6 +1530,9 @@ impl App {
             }
 
             Message::OpenBulkAutoTag => {
+                if self.modal == Modal::Settings && self.settings_first_run {
+                    return Task::none();
+                }
                 self.dialog = None;
                 self.modal = Modal::None;
                 self.abort_bulk_scan();
@@ -1953,10 +1980,13 @@ impl App {
                     PlayerMsg::DeviceUnavailable => {
                         self.show_error("Audio output unavailable. Check your sound device.".into());
                     }
-                    PlayerMsg::FileFailed(err) => {
+                    PlayerMsg::FileFailed(id, err) if self.player.is_current_track(id) => {
                         self.show_error(format!("Couldn't play this file. {err}"));
                     }
-                    PlayerMsg::Ended(_) | PlayerMsg::Looped(_) | PlayerMsg::WaveformPeaksReady(_) => {}
+                    PlayerMsg::Ended(_)
+                    | PlayerMsg::Looped(_)
+                    | PlayerMsg::WaveformPeaksReady(_)
+                    | PlayerMsg::FileFailed(..) => {}
                 }
                 Task::none()
             }
