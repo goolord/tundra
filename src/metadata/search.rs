@@ -210,22 +210,14 @@ pub(crate) fn path_match_scores(
     query.scores(&query.text(path))
 }
 
+// Both fold case the same way matching does, so a name that matched
+// case-insensitively also earns its exact or prefix bonus.
 fn text_eq(a: &str, b: &str, case_sensitive: bool) -> bool {
-    if case_sensitive {
-        a == b
-    } else {
-        a.eq_ignore_ascii_case(b)
-    }
+    fold(a, case_sensitive) == fold(b, case_sensitive)
 }
 
 fn text_starts_with(haystack: &str, needle: &str, case_sensitive: bool) -> bool {
-    if case_sensitive {
-        return haystack.starts_with(needle);
-    }
-    // `get` rather than slicing: the cut may fall inside a multi-byte character.
-    haystack
-        .get(..needle.len())
-        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(needle))
+    fold(haystack, case_sensitive).starts_with(&*fold(needle, case_sensitive))
 }
 
 /// A query term for instrument filters, with its alias expansion computed once.
@@ -539,6 +531,7 @@ mod tests {
         assert!(!text_starts_with("ベースkick", "kick", false));
         assert!(!text_starts_with("éa", "e", false));
         assert!(text_starts_with("Kick 01", "kick", false));
+        assert!(text_eq("ÉCLAT", "éclat", false));
 
         let paths = vec![PathBuf::from("/samples/ベースkick.wav")];
         let result = collect_file_matches(&paths, "kick", &[], false, true, Arc::new(HashMap::new()));

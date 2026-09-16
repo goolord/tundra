@@ -90,7 +90,8 @@ pub fn build_peaks(
         return Some(WaveformPeaks::new(0));
     }
     let peaks = decode_peaks(path, Some(sample_count), cancelled)?;
-    let tolerance = (sample_count / 200).max(1);
+    // About 0.05%: a coarser tolerance let long files drift seconds from the playhead.
+    let tolerance = (sample_count / 2000).max(1);
     if peaks.sample_count > 0 && peaks.sample_count.abs_diff(sample_count) > tolerance {
         return decode_peaks(path, Some(peaks.sample_count), cancelled);
     }
