@@ -589,7 +589,7 @@ pub fn is_empty_scan(summary: &BulkScanSummary) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metadata::{index_paths, tag_search_paths, TagField, TagFilter};
+    use crate::metadata::{collect_tag_matches, index_paths, TagField, TagFilter};
     use std::sync::Arc;
 
     const FORMATS: [&str; 5] = ["wav", "flac", "mp3", "ogg", "aiff"];
@@ -619,7 +619,7 @@ mod tests {
     /// Mirrors the app: index the files, then search the index.
     fn instrument_hits(paths: &[PathBuf], value: &str) -> usize {
         let indexed = Arc::new(index_paths(paths, Arc::new(HashMap::new())));
-        tag_search_paths(
+        collect_tag_matches(
             paths,
             &[TagFilter {
                 field: TagField::Instrument,

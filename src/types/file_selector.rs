@@ -1458,7 +1458,7 @@ impl FileSelector {
                 self.is_selected(index),
                 self.hovered_file == Some(index),
                 search_enabled,
-                favorites.contains(&button.file_path),
+                favorites.contains_listed(&button.file_path),
                 modifiers,
             ));
         }
@@ -1743,7 +1743,6 @@ impl FileButton {
                 path: self.file_path.to_owned(),
                 from_file_list: true,
             })
-            .on_move(|point| Message::CursorMoved(point))
             .on_enter(Message::FileRowHover(index))
             .on_exit(Message::FileRowLeave)
             .interaction(iced::mouse::Interaction::Grab);

@@ -114,8 +114,16 @@ impl FavoritesStore {
         crate::path_util::favorite_lookup_key(path)
     }
 
+    #[cfg(test)]
     pub fn contains(&self, path: &Path) -> bool {
         let key = Self::stored_key(path);
+        self.paths.iter().any(|stored| *stored == key)
+    }
+
+    /// `contains` for rows from a directory listing, whose paths are already
+    /// resolved; skips the filesystem so it is cheap enough for every frame.
+    pub fn contains_listed(&self, path: &Path) -> bool {
+        let key = crate::path_util::cache_key(path.to_path_buf());
         self.paths.iter().any(|stored| *stored == key)
     }
 

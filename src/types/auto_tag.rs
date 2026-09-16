@@ -14,6 +14,8 @@ use std::path::PathBuf;
 pub struct AutoTagState {
     pub target: Option<PathBuf>,
     pub existing_instrument: Option<String>,
+    /// Read when the target changes or is written, not on every frame.
+    pub path_status: Option<crate::metadata::AutoTagFieldStatus>,
     pub running: bool,
     pub status: String,
     pub result: Option<ClassificationResult>,
@@ -24,13 +26,9 @@ pub struct AutoTagState {
 }
 
 impl AutoTagState {
-    pub fn reset_for_target(
-        &mut self,
-        target: Option<PathBuf>,
-        existing_instrument: Option<String>,
-    ) {
+    pub fn reset_for_target(&mut self, target: Option<PathBuf>) {
         self.target = target;
-        self.existing_instrument = existing_instrument;
+        self.refresh_from_disk();
         self.running = false;
         self.status = String::new();
         self.result = None;
@@ -38,6 +36,15 @@ impl AutoTagState {
         self.error_details = None;
         self.details_open = false;
         self.applied = false;
+    }
+
+    /// Re-read the target's current instrument and auto-tag status.
+    pub fn refresh_from_disk(&mut self) {
+        self.existing_instrument = self.target.as_deref().and_then(crate::metadata::instrument_tag);
+        self.path_status = self
+            .target
+            .as_deref()
+            .and_then(crate::metadata::auto_tag_field_status);
     }
 
     pub fn set_error(&mut self, message: impl Into<String>) {
@@ -169,10 +176,8 @@ fn details_disclosure<'a>(state: &'a AutoTagState) -> Element<'a, Message> {
     section.into()
 }
 
-pub fn auto_tag_view<'a>(
-    state: &'a AutoTagState,
-    path_status: Option<crate::metadata::AutoTagFieldStatus>,
-) -> Element<'a, Message> {
+pub fn auto_tag_view(state: &AutoTagState) -> Element<'_, Message> {
+    let path_status = state.path_status;
     let needs_any = path_status.is_some_and(|status| status.needs_any());
     let allows_instrument_work = path_status.is_some_and(|status| status.allows_instrument_work());
     let can_retag = path_status.is_some_and(|status| status.can_retag_instrument);

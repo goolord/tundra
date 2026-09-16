@@ -793,7 +793,10 @@ impl Player {
         let playback_position = PlaybackPosition::new(total_frames);
         loaded
             .waveform
-            .set_playback_position(sync::Arc::clone(&playback_position));
+            .set_playback(
+                sync::Arc::clone(&playback_position),
+                sync::Arc::clone(&self.controls.is_playing),
+            );
         loaded.waveform.set_sample_rate(loaded.playback.sample_rate);
         self.controls.playback_position = Some(sync::Arc::clone(&playback_position));
         self.controls.track_duration = Some(total_frames as f64 / f64::from(loaded.playback.sample_rate));

@@ -1,10 +1,11 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::metadata::{
-    index_paths, search_paths, tag_field_best_match, CachedMetadata, SearchResult, TagFilter,
+    index_paths, search_with_lookup, tag_field_best_match, CachedMetadata, MetadataLookup,
+    SearchResult, TagFilter,
 };
 use iced::keyboard::Modifiers;
 use iced::Point;
@@ -106,8 +107,8 @@ pub(crate) fn cached_paths_for_root(
 pub(crate) async fn execute_file_search(
     debounce_ms: u64,
     allowed_roots: Vec<PathBuf>,
-    dir_cache: Arc<RwLock<HashMap<PathBuf, Vec<PathBuf>>>>,
-    metadata_cache: Arc<RwLock<HashMap<PathBuf, CachedMetadata>>>,
+    dir_cache: super::cache::Shared<Vec<PathBuf>>,
+    metadata_cache: super::cache::Shared<CachedMetadata>,
     file_query: String,
     tag_filters: Vec<TagFilter>,
     case_sensitive: bool,
@@ -121,7 +122,7 @@ pub(crate) async fn execute_file_search(
     let mut paths = Vec::new();
     let mut cached_roots = HashMap::new();
     let missing_roots = {
-        let cache = dir_cache.read().unwrap();
+        let cache = Arc::clone(&dir_cache.read().unwrap_or_else(std::sync::PoisonError::into_inner));
         let mut missing = Vec::new();
         for root in &allowed_roots {
             let (cached, found) = cached_paths_for_root(&cache, root);
@@ -137,7 +138,7 @@ pub(crate) async fn execute_file_search(
         missing
     };
 
-    let metadata_map = metadata_cache.read().unwrap().clone();
+    let metadata_map = Arc::clone(&metadata_cache.read().unwrap_or_else(std::sync::PoisonError::into_inner));
 
     let mut walked = Vec::new();
     for root in missing_roots {
@@ -189,34 +190,23 @@ pub(crate) async fn execute_file_search(
         paths.retain(|path| is_audio(path));
     }
 
-    let metadata_snapshot = Arc::new(metadata_map);
-    // Tag-only reads the index as-is except for roots we just walked: those need
-    // `index_paths` or the persisted listing would skip-walk forever with no tags.
-    let (metadata, preindexed) = if tag_filters.is_empty() {
-        (metadata_snapshot, HashMap::new())
-    } else if tag_only {
-        if walked.is_empty() {
-            (metadata_snapshot, HashMap::new())
-        } else {
-            let indexed = index_paths(&walked, Arc::clone(&metadata_snapshot));
-            let mut merged = (*metadata_snapshot).clone();
-            merged.extend(indexed.clone());
-            (Arc::new(merged), indexed)
-        }
+    // Tag-only search answers from the index, except for roots just walked:
+    // those need indexing or a persisted listing would skip-walk forever with
+    // no tags. A filename query reads tags lazily for the paths it matches.
+    let indexed = if tag_only && !walked.is_empty() {
+        index_paths(&walked, Arc::clone(&metadata_map))
     } else {
-        let indexed = index_paths(&paths, Arc::clone(&metadata_snapshot));
-        let mut merged = (*metadata_snapshot).clone();
-        merged.extend(indexed.clone());
-        (Arc::new(merged), indexed)
+        HashMap::new()
     };
+    let lookup = MetadataLookup::with_new_entries(metadata_map, indexed);
 
-    let mut result = search_paths(
+    let mut result = search_with_lookup(
         &paths,
         &file_query,
         &tag_filters,
         case_sensitive,
         show_directories,
-        metadata,
+        lookup,
     );
     if favorites_only {
         result.paths.retain(|path| {
@@ -229,7 +219,6 @@ pub(crate) async fn execute_file_search(
         .into_iter()
         .map(|path| crate::path_util::resolve_open_path(&path, known.iter().map(|p| p.as_path())))
         .collect();
-    result.new_metadata.extend(preindexed);
     result.cached_roots = cached_roots;
     result
 }
@@ -265,6 +254,7 @@ pub(crate) fn tag_search_can_autocomplete(input: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::super::cache::Shared;
     use super::{cached_paths_for_root, execute_file_search, walk_directory};
     use crate::metadata::{file_mtime_secs, CachedMetadata, TagField, TagFields, TagFilter};
     use std::collections::{HashMap, HashSet};
@@ -299,7 +289,7 @@ mod tests {
         assert_eq!(crate::test_fixtures::count_tundra_sidecars(&drums), 0);
     }
 
-    fn library_with_tagged_kick() -> (PathBuf, PathBuf, Arc<RwLock<HashMap<PathBuf, CachedMetadata>>>)
+    fn library_with_tagged_kick() -> (PathBuf, PathBuf, Shared<CachedMetadata>)
     {
         let root = std::env::temp_dir().join(format!(
             "tundra_tag_search_{}_{}",
@@ -327,12 +317,12 @@ mod tests {
             },
         );
 
-        (root, audio, Arc::new(RwLock::new(metadata)))
+        (root, audio, Arc::new(RwLock::new(Arc::new(metadata))))
     }
 
     fn run_search_result(
         root: &PathBuf,
-        metadata: Arc<RwLock<HashMap<PathBuf, CachedMetadata>>>,
+        metadata: Shared<CachedMetadata>,
         file_query: &str,
         filter_value: &str,
     ) -> crate::metadata::SearchResult {
@@ -344,7 +334,7 @@ mod tests {
         futures::executor::block_on(execute_file_search(
             0,
             vec![root.clone()],
-            Arc::new(RwLock::new(HashMap::new())),
+            Arc::new(RwLock::new(Arc::new(HashMap::new()))),
             metadata,
             file_query.to_string(),
             filters,
@@ -358,7 +348,7 @@ mod tests {
 
     fn run_search(
         root: &PathBuf,
-        metadata: Arc<RwLock<HashMap<PathBuf, CachedMetadata>>>,
+        metadata: Shared<CachedMetadata>,
         file_query: &str,
         filter_value: &str,
     ) -> Vec<PathBuf> {
@@ -370,10 +360,10 @@ mod tests {
     /// metadata pass can surface it.
     fn add_unwalkable_tagged_file(
         root: &PathBuf,
-        metadata: &Arc<RwLock<HashMap<PathBuf, CachedMetadata>>>,
+        metadata: &Shared<CachedMetadata>,
     ) -> PathBuf {
         let ghost = root.join("Drums").join("ghost.wav");
-        metadata.write().unwrap().insert(
+        Arc::make_mut(&mut metadata.write().unwrap()).insert(
             crate::path_util::cache_key(ghost.clone()),
             CachedMetadata {
                 mtime_secs: 0,
@@ -453,7 +443,7 @@ mod tests {
         let result = futures::executor::block_on(execute_file_search(
             0,
             vec![known.clone(), cold.clone()],
-            Arc::new(RwLock::new(HashMap::new())),
+            Arc::new(RwLock::new(Arc::new(HashMap::new()))),
             metadata,
             String::new(),
             filters,

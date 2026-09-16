@@ -10,6 +10,7 @@ use iced::alignment;
 use iced::widget::canvas::Text;
 use iced::{Color, Pixels, Point, Rectangle, Renderer, Size, Theme, Vector};
 use std::cell::Cell;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use crate::source::arc_samples::PlaybackPosition;
@@ -188,12 +189,14 @@ impl WaveFormView {
         }
     }
 
+    /// One spring step. Settles to exactly zero: a residue below the stop
+    /// threshold would end the spring ticks yet keep the uncached draw path on.
     pub fn spring_overscroll(&mut self) -> bool {
-        if self.overscroll.abs() < OVERSCROLL_STOP {
+        self.overscroll *= OVERSCROLL_SPRING;
+        if self.overscroll.abs() <= OVERSCROLL_STOP {
             self.overscroll = 0.0;
             return false;
         }
-        self.overscroll *= OVERSCROLL_SPRING;
         true
     }
 
@@ -407,6 +410,7 @@ pub struct WaveForm {
     view: WaveFormView,
     sample_rate: u32,
     playback_position: Option<Arc<PlaybackPosition>>,
+    is_playing: Option<Arc<AtomicBool>>,
     scrub_progress: Option<f64>,
     ui_scrubbing: Cell<bool>,
     modifiers: Modifiers,
@@ -507,6 +511,7 @@ impl WaveForm {
             view: WaveFormView::default(),
             sample_rate: 0,
             playback_position: None,
+            is_playing: None,
             scrub_progress: None,
             ui_scrubbing: Cell::new(false),
             modifiers: Modifiers::default(),
@@ -571,8 +576,15 @@ impl WaveForm {
         self.sample_rate
     }
 
-    pub fn set_playback_position(&mut self, position: Arc<PlaybackPosition>) {
+    pub fn set_playback(&mut self, position: Arc<PlaybackPosition>, is_playing: Arc<AtomicBool>) {
         self.playback_position = Some(position);
+        self.is_playing = Some(is_playing);
+    }
+
+    fn is_playing(&self) -> bool {
+        self.is_playing
+            .as_ref()
+            .is_some_and(|playing| playing.load(std::sync::atomic::Ordering::Relaxed))
     }
 
     pub fn set_scrub_progress(&mut self, progress: Option<f64>) {
@@ -1750,6 +1762,12 @@ impl Program<Message> for WaveForm {
         bounds: Rectangle,
         cursor: Cursor,
     ) -> Option<Action<Message>> {
+        // The playhead reads the shared position directly, so while playing the
+        // canvas redraws itself every frame without rebuilding the app view.
+        if let Event::Window(iced::window::Event::RedrawRequested(_)) = event {
+            return self.is_playing().then(Action::request_redraw);
+        }
+
         if state.tracked_samples != self.sample_count() {
             state.tracked_samples = self.sample_count();
             state.wheel_lines = 0.0;

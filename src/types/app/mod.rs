@@ -74,6 +74,7 @@ pub struct App {
     pending_launch_path: Option<PathBuf>,
     allowed_directories: AllowedDirectories,
     favorites: FavoritesStore,
+    search_enabled_memo: std::cell::RefCell<Option<(PathBuf, Vec<PathBuf>, bool)>>,
     settings_open: bool,
     settings_first_run: bool,
     settings_error: Option<String>,
@@ -226,6 +227,7 @@ impl Default for App {
             pending_launch_path: None,
             allowed_directories,
             favorites: FavoritesStore::load(),
+            search_enabled_memo: Default::default(),
             settings_open,
             settings_first_run,
             settings_error: None,
@@ -296,8 +298,13 @@ impl App {
 
         let playing = state.player.controls.is_playing.load(Ordering::Relaxed)
             && state.player.waveform.is_some();
+        // Only the time label needs this; the waveform animates its own playhead.
         let playback_tick = if playing {
-            window::frames().map(|_| Message::PlaybackTick)
+            Subscription::run(|| {
+                StreamExt::map(async_io::Timer::interval(Duration::from_millis(250)), |_| {
+                    Message::PlaybackTick
+                })
+            })
         } else {
             Subscription::none()
         };
@@ -562,16 +569,9 @@ impl App {
     }
 
     fn open_path(&mut self, path: &Path) -> Task<Message> {
-        let known: Vec<PathBuf> = self
-            .dir_cache
-            .share()
-            .read()
-            .unwrap()
-            .values()
-            .flatten()
-            .cloned()
-            .collect();
-        let path = crate::path_util::resolve_open_path(path, known.iter().map(|p| p.as_path()));
+        let listings = self.dir_cache.snapshot();
+        let known = listings.values().flatten().map(PathBuf::as_path);
+        let path = crate::path_util::resolve_open_path(path, known);
         let defocus = self.release_filter_focus();
         if path.is_dir() {
             return Task::batch([defocus, self.navigate_directory(path)]);
@@ -603,9 +603,22 @@ impl App {
         Some(self.open_path(&path))
     }
 
+    /// Whether the current folder is inside an allowed root. Resolving the path
+    /// touches the filesystem and `view` asks every frame, so the answer is
+    /// memoized per folder and root list.
     fn search_enabled(&self) -> bool {
-        self.allowed_directories
-            .contains_path(&self.file_selector.current_dir)
+        let dir = &self.file_selector.current_dir;
+        let roots = self.allowed_directories.roots();
+        let mut memo = self.search_enabled_memo.borrow_mut();
+        if let Some((memo_dir, memo_roots, enabled)) = memo.as_ref()
+            && memo_dir == dir
+            && memo_roots.as_slice() == roots
+        {
+            return *enabled;
+        }
+        let enabled = self.allowed_directories.contains_path(dir);
+        *memo = Some((dir.clone(), roots.to_vec(), enabled));
+        enabled
     }
 
     fn navigate_directory(&mut self, dir: PathBuf) -> Task<Message> {
@@ -633,9 +646,15 @@ impl App {
     fn play_audio(&mut self, file_path: &Path) -> Task<Message> {
         match self.player.play_file(file_path) {
             Ok(()) => {
-                self.merge_path_metadata(file_path);
+                // Playing a file only re-runs the search when its tags turned out
+                // to be stale; otherwise the list (and selection) stay put.
+                let refresh = if self.merge_path_metadata(file_path) {
+                    self.refresh_search_if_active()
+                } else {
+                    Task::none()
+                };
                 self.file_selector.sync_selection_for_path(file_path);
-                Task::batch([self.refresh_search_if_active(), self.ensure_player_events()])
+                Task::batch([refresh, self.ensure_player_events()])
             }
             Err(err) => {
                 self.show_error(err);
@@ -760,10 +779,14 @@ impl App {
             .unwrap_or_else(Task::none)
     }
 
-    fn merge_path_metadata(&mut self, path: &Path) {
-        if let Some(cached) = refresh_cached_metadata(path) {
-            self.metadata_cache.merge_path(path, cached);
-        }
+    /// Re-read `path`'s tags into the index. True when they changed.
+    fn merge_path_metadata(&mut self, path: &Path) -> bool {
+        let Some(cached) = refresh_cached_metadata(path) else {
+            return false;
+        };
+        let changed = self.metadata_cache.cached_fields(path).as_ref() != Some(&cached.fields);
+        self.metadata_cache.merge_path(path, cached);
+        changed
     }
 
     fn refresh_search_if_active(&mut self) -> Task<Message> {
@@ -1306,8 +1329,7 @@ impl App {
                 self.tag_editor_open = false;
                 self.auto_tag_open = true;
                 let target = self.file_selector.selected_audio_path();
-                let existing = target.as_ref().and_then(|path| instrument_tag(path));
-                self.auto_tag.reset_for_target(target, existing);
+                self.auto_tag.reset_for_target(target);
                 Task::none()
             }
 
@@ -1316,12 +1338,11 @@ impl App {
                 self.tag_editor_open = false;
                 self.auto_tag_open = true;
                 if let Some(err) = self.allowed_audio_error(&path) {
-                    self.auto_tag.reset_for_target(None, None);
+                    self.auto_tag.reset_for_target(None);
                     self.auto_tag.set_error(err);
                     return Task::none();
                 }
-                let existing = instrument_tag(&path);
-                self.auto_tag.reset_for_target(Some(path), existing);
+                self.auto_tag.reset_for_target(Some(path));
                 Task::none()
             }
 
@@ -1382,8 +1403,7 @@ impl App {
                     if let Some(err) = self.allowed_audio_error(&candidate) {
                         self.auto_tag.set_error(err);
                     } else {
-                        let existing = instrument_tag(&candidate);
-                        self.auto_tag.reset_for_target(Some(candidate), existing);
+                        self.auto_tag.reset_for_target(Some(candidate));
                     }
                 }
                 Task::none()
@@ -1469,9 +1489,7 @@ impl App {
                 };
                 match write_auto_tags(&path, &instrument) {
                     Ok(written) => {
-                        if let Some(existing) = instrument_tag(&path) {
-                            self.auto_tag.existing_instrument = Some(existing);
-                        }
+                        self.auto_tag.refresh_from_disk();
                         if written {
                             self.merge_path_metadata(&path);
                         }
@@ -1880,8 +1898,8 @@ impl App {
             }
 
             Message::StartupCachesReady(caches) => {
-                self.dir_cache = DirCache::from_map(caches.dirs);
-                self.metadata_cache = MetadataCache::from_map(caches.metadata);
+                self.dir_cache.finish_loading(caches.dirs);
+                self.metadata_cache.finish_loading(caches.metadata);
                 self.caches_ready = true;
                 let warm = self.warm_allowed_caches();
                 let search = if self.search_pending {
@@ -1927,10 +1945,8 @@ impl App {
             }
 
             Message::InvalidateDircache => {
-                self.dir_cache = DirCache::new();
-                self.dir_cache.persist();
-                self.metadata_cache = MetadataCache::new();
-                self.metadata_cache.persist();
+                self.dir_cache.clear();
+                self.metadata_cache.clear();
                 auto_tag::clear_classify_cache();
                 let warm = self.warm_allowed_caches();
                 let search = self.refresh_search_if_active();
@@ -2806,7 +2822,8 @@ impl App {
             .player
             .current_file
             .as_ref()
-            .map(|path| control_bar_tags(&self.metadata_cache.tag_fields_for(path)))
+            .and_then(|path| self.metadata_cache.cached_fields(path))
+            .map(|fields| control_bar_tags(&fields))
             .unwrap_or_default();
 
         let player = container(if self.drag_over {
@@ -2864,15 +2881,7 @@ impl App {
         } else if self.tag_editor_open {
             Self::with_dim_overlay(workspace.into(), tag_editor_view(&self.tag_editor))
         } else if self.auto_tag_open {
-            let path_status = self
-                .auto_tag
-                .target
-                .as_ref()
-                .and_then(|path| auto_tag_field_status(path));
-            Self::with_dim_overlay(
-                workspace.into(),
-                auto_tag_view(&self.auto_tag, path_status),
-            )
+            Self::with_dim_overlay(workspace.into(), auto_tag_view(&self.auto_tag))
         } else if let Some(dialog) = &self.dialog {
             Self::with_dialog(workspace.into(), dialog)
         } else {

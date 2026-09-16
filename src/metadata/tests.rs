@@ -381,7 +381,7 @@ fn instrument_hint(path: &Path) -> Option<(String, HintSource)> {
         let mut lookup = MetadataLookup::new(Arc::clone(&metadata));
         assert_eq!(lookup.tag_fields(&audio).explicit_instrument, "Snare");
 
-        let hits = tag_search_paths(
+        let hits = collect_tag_matches(
             std::slice::from_ref(&audio),
             &[TagFilter {
                 field: TagField::Instrument,
@@ -1048,7 +1048,7 @@ fn instrument_hint(path: &Path) -> Option<(String, HintSource)> {
     fn finds_by_instrument(path: &Path, query: &str) -> bool {
         let paths = vec![path.to_path_buf()];
         let indexed = Arc::new(index_paths(&paths, Arc::new(HashMap::new())));
-        tag_search_paths(
+        collect_tag_matches(
             &paths,
             &[TagFilter {
                 field: TagField::Instrument,

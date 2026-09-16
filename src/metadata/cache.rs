@@ -35,10 +35,14 @@ pub struct MetadataLookup {
 
 impl MetadataLookup {
     pub fn new(cache: Arc<HashMap<PathBuf, CachedMetadata>>) -> Self {
-        Self {
-            cache,
-            new_entries: HashMap::new(),
-        }
+        Self::with_new_entries(cache, HashMap::new())
+    }
+
+    pub fn with_new_entries(
+        cache: Arc<HashMap<PathBuf, CachedMetadata>>,
+        new_entries: HashMap<PathBuf, CachedMetadata>,
+    ) -> Self {
+        Self { cache, new_entries }
     }
 
     pub fn into_new_entries(self) -> HashMap<PathBuf, CachedMetadata> {

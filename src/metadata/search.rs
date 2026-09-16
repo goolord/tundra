@@ -3,11 +3,14 @@ use fuzzy_matcher::FuzzyMatcher;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
 use std::sync::Arc;
 
 use crate::types::is_audio;
 
-use super::cache::{CachedMetadata, MetadataLookup, SearchResult};
+#[cfg(test)]
+use super::cache::CachedMetadata;
+use super::cache::{MetadataLookup, SearchResult};
 use super::fields::{TagField, TagFilter, TagFields};
 use super::hints::{instrument_group_mask, instrument_search_terms};
 
@@ -195,6 +198,7 @@ impl<'a> FileQuery<'a> {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn path_match_scores(
     matcher: &SkimMatcherV2,
     path: &Path,
@@ -358,6 +362,7 @@ impl<'a> TagQuery<'a> {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn tag_field_score(
     matcher: &SkimMatcherV2,
     fields: &TagFields,
@@ -397,14 +402,18 @@ fn into_result(mut matches: Vec<SearchRank>, lookup: MetadataLookup, limit: usiz
     }
 }
 
+#[cfg(test)]
 pub(crate) fn collect_tag_matches(
     paths: &[PathBuf],
     tag_filters: &[TagFilter],
     metadata: Arc<HashMap<PathBuf, CachedMetadata>>,
 ) -> SearchResult {
+    tag_matches(paths, tag_filters, MetadataLookup::new(metadata))
+}
+
+fn tag_matches(paths: &[PathBuf], tag_filters: &[TagFilter], mut lookup: MetadataLookup) -> SearchResult {
     let matcher = tag_search_matcher();
     let mut tags = TagQuery::new(&matcher, tag_filters);
-    let mut lookup = MetadataLookup::new(metadata);
     let matches = paths
         .iter()
         .filter_map(|path| {
@@ -419,14 +428,6 @@ pub(crate) fn collect_tag_matches(
 }
 
 #[cfg(test)]
-pub(crate) fn tag_search_paths(
-    paths: &[PathBuf],
-    tag_filters: &[TagFilter],
-    metadata: Arc<HashMap<PathBuf, CachedMetadata>>,
-) -> SearchResult {
-    collect_tag_matches(paths, tag_filters, metadata)
-}
-
 pub fn search_paths(
     paths: &[PathBuf],
     file_query: &str,
@@ -435,19 +436,33 @@ pub fn search_paths(
     show_directories: bool,
     metadata: Arc<HashMap<PathBuf, CachedMetadata>>,
 ) -> SearchResult {
-    if !tag_filters.is_empty() && file_query.trim().is_empty() {
-        return collect_tag_matches(paths, tag_filters, metadata);
-    }
-    collect_file_matches(
+    search_with_lookup(
         paths,
         file_query,
         tag_filters,
         case_sensitive,
         show_directories,
-        metadata,
+        MetadataLookup::new(metadata),
     )
 }
 
+/// Search with tags from `lookup`, whose new entries (freshly indexed files)
+/// overlay the shared index without copying it.
+pub fn search_with_lookup(
+    paths: &[PathBuf],
+    file_query: &str,
+    tag_filters: &[TagFilter],
+    case_sensitive: bool,
+    show_directories: bool,
+    lookup: MetadataLookup,
+) -> SearchResult {
+    if !tag_filters.is_empty() && file_query.trim().is_empty() {
+        return tag_matches(paths, tag_filters, lookup);
+    }
+    file_matches(paths, file_query, tag_filters, case_sensitive, show_directories, lookup)
+}
+
+#[cfg(test)]
 pub(crate) fn collect_file_matches(
     paths: &[PathBuf],
     file_query: &str,
@@ -456,13 +471,24 @@ pub(crate) fn collect_file_matches(
     show_directories: bool,
     metadata: Arc<HashMap<PathBuf, CachedMetadata>>,
 ) -> SearchResult {
+    let lookup = MetadataLookup::new(metadata);
+    file_matches(paths, file_query, tag_filters, case_sensitive, show_directories, lookup)
+}
+
+fn file_matches(
+    paths: &[PathBuf],
+    file_query: &str,
+    tag_filters: &[TagFilter],
+    case_sensitive: bool,
+    show_directories: bool,
+    mut lookup: MetadataLookup,
+) -> SearchResult {
     let file_matcher = file_search_matcher(case_sensitive);
     let tag_matcher = tag_search_matcher();
     let tag_active = !tag_filters.is_empty();
     let filename_only = tag_active && file_query.trim().len() < FILE_SEARCH_MIN_QUERY_LEN;
     let query = FileQuery::new(&file_matcher, file_query, case_sensitive, filename_only);
     let mut tags = TagQuery::new(&tag_matcher, tag_filters);
-    let mut lookup = MetadataLookup::new(metadata);
     let mut matches = Vec::new();
 
     for path in paths {
