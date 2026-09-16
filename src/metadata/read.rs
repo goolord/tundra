@@ -5,7 +5,7 @@ use std::path::Path;
 
 use crate::types::is_audio;
 
-use super::fields::{ManualTagEdits, TagFields};
+use super::fields::TagFields;
 use super::hints::artist_hint_from_path;
 
 pub(crate) fn push_field(value: &mut String, source: Option<impl AsRef<str>>) {
@@ -55,7 +55,7 @@ pub(crate) const WAV_GENRE_KEY: &str = "IGNR";
 pub(crate) const VORBIS_INSTRUMENT_KEY: &str = "INSTRUMENT";
 pub(crate) const VORBIS_ARTIST_KEY: &str = "ARTIST";
 pub(crate) const VORBIS_COMMENT_KEY: &str = "COMMENT";
-const ID3_INSTRUMENT_KEY: &str = "INSTRUMENT";
+pub(crate) const ID3_INSTRUMENT_KEY: &str = "INSTRUMENT";
 
 pub(crate) fn instrument_from_marked_comment(comment: &str) -> Option<String> {
     for line in comment.lines() {
@@ -140,7 +140,17 @@ impl Container {
                 return Some(container);
             }
         }
-        Self::from_staged_name(path).or_else(|| Self::sniff(path))
+        Self::sniff(path)
+    }
+
+    /// Content first, extension second: a write must use the parser that matches
+    /// the bytes, whatever the file is called.
+    pub(crate) fn detect(path: &Path) -> Option<Self> {
+        Self::sniff(path).or_else(|| {
+            path.extension()
+                .and_then(|ext| ext.to_str())
+                .and_then(Self::from_extension)
+        })
     }
 
     fn from_extension(ext: &str) -> Option<Self> {
@@ -152,22 +162,6 @@ impl Container {
             "aiff" | "aif" => Some(Self::Aiff),
             _ => None,
         }
-    }
-
-    fn from_staged_name(path: &Path) -> Option<Self> {
-        let name = path.file_name()?.to_str()?;
-        for marker in [".tundra-tag-", ".tundra-replace-"] {
-            if let Some(original) = name.split(marker).next() {
-                if let Some(container) = Path::new(original)
-                    .extension()
-                    .and_then(|ext| ext.to_str())
-                    .and_then(Self::from_extension)
-                {
-                    return Some(container);
-                }
-            }
-        }
-        None
     }
 
     fn sniff(path: &Path) -> Option<Self> {
@@ -185,7 +179,9 @@ impl Container {
         if header.starts_with(b"OggS") {
             return Some(Self::Ogg);
         }
-        if header.starts_with(b"ID3") || header.starts_with(&[0xFF, 0xFB]) {
+        // ID3v2 tag, or an MPEG audio frame sync with a non-reserved layer.
+        let frame_sync = header[0] == 0xFF && header[1] & 0xE0 == 0xE0 && header[1] & 0x06 != 0;
+        if header.starts_with(b"ID3") || frame_sync {
             return Some(Self::Mp3);
         }
         if header.starts_with(b"FORM") && header.get(8..12) == Some(b"AIFF") {
@@ -250,16 +246,6 @@ fn riff_get(info: &lofty::iff::wav::RiffInfoList, key: &str) -> Option<String> {
         .and_then(|(_, value)| non_empty(Some(&value)))
 }
 
-fn apply_aiff_text_tags(text: &mut lofty::iff::aiff::AiffTextChunks, tags: &NativeTags) {
-    use lofty::tag::Accessor;
-    if let Some(artist) = &tags.artist {
-        text.set_artist(artist.clone());
-    }
-    if let Some(comment) = &tags.comment {
-        text.set_comment(comment.clone());
-    }
-}
-
 fn vorbis_native_tags(vorbis: Option<&VorbisComments>) -> NativeTags {
     NativeTags {
         instrument: vorbis.and_then(|tag| non_empty(tag.get(VORBIS_INSTRUMENT_KEY))),
@@ -268,23 +254,10 @@ fn vorbis_native_tags(vorbis: Option<&VorbisComments>) -> NativeTags {
     }
 }
 
-pub(crate) fn apply_vorbis_tags(vorbis: &mut VorbisComments, tags: &NativeTags) {
-    for (key, value) in [
-        (VORBIS_INSTRUMENT_KEY, &tags.instrument),
-        (VORBIS_ARTIST_KEY, &tags.artist),
-        (VORBIS_COMMENT_KEY, &tags.comment),
-    ] {
-        if let Some(value) = value {
-            let _removed: Vec<_> = vorbis.remove(key).collect();
-            vorbis.insert(key.to_string(), value.clone());
-        }
-    }
-}
-
 /// Canonical native keys plus generic tags from one parse.
 pub(crate) struct FileTags {
-    native: NativeTags,
-    generic: Vec<Tag>,
+    pub native: NativeTags,
+    pub generic: Vec<Tag>,
 }
 
 fn collect(tags: [Option<Tag>; 2]) -> Vec<Tag> {
@@ -292,10 +265,13 @@ fn collect(tags: [Option<Tag>; 2]) -> Vec<Tag> {
 }
 
 fn read_container_tags(path: &Path) -> Option<FileTags> {
+    read_container_tags_as(path, Container::of(path)?)
+}
+
+pub(crate) fn read_container_tags_as(path: &Path, container: Container) -> Option<FileTags> {
     use lofty::file::AudioFile;
     use lofty::tag::Accessor;
 
-    let container = Container::of(path)?;
     let mut file = std::fs::File::open(path).ok()?;
     let options = tag_parse_options();
 
@@ -407,325 +383,6 @@ pub(crate) fn read_native_tags(path: &Path) -> Option<NativeTags> {
     read_container_tags(path).map(|tags| tags.native)
 }
 
-/// Writes the populated fields of `tags` to the container's canonical keys.
-pub(crate) fn write_native_tags(path: &Path, tags: &NativeTags) -> Result<(), String> {
-    if tags.is_empty() {
-        return Ok(());
-    }
-    stage_and_replace(path, |staged| apply_native_tags_staged(staged, tags))
-}
-
-fn apply_id3_native_tags(id3: &mut lofty::id3::v2::Id3v2Tag, tags: &NativeTags) {
-    use lofty::tag::Accessor;
-    if let Some(instrument) = &tags.instrument {
-        id3.insert_user_text(ID3_INSTRUMENT_KEY.to_string(), instrument.clone());
-    }
-    if let Some(artist) = &tags.artist {
-        id3.set_artist(artist.clone());
-    }
-    if let Some(comment) = &tags.comment {
-        id3.set_comment(comment.clone());
-    }
-}
-
-pub(crate) fn apply_native_tags_staged(staged: &Path, tags: &NativeTags) -> Result<(), String> {
-    use lofty::config::WriteOptions;
-    use lofty::file::AudioFile;
-
-    let container = Container::of(staged)
-        .ok_or_else(|| format!("Unsupported file type: {}", staged.display()))?;
-    let options = write_parse_options();
-    let read_error =
-        |err: lofty::error::FileParseError| crate::path_util::path_io_error("read", staged, err);
-    let write_error = |err: lofty::error::FileEncodingError| {
-        crate::path_util::path_io_error("write tags to", staged, err)
-    };
-    let open = || crate::path_util::open_file(staged);
-
-    match container {
-        Container::Wav => write_wav_info_preserving_chunks(staged, Some(tags), None),
-        Container::Flac => {
-            let mut flac = {
-                let mut file = open()?;
-                lofty::flac::FlacFile::read_from(&mut file, options).map_err(read_error)?
-            };
-            let mut vorbis = flac.remove_vorbis_comments().unwrap_or_default();
-            apply_vorbis_tags(&mut vorbis, tags);
-            flac.set_vorbis_comments(vorbis);
-            flac.save_to_path(staged, WriteOptions::default())
-                .map_err(write_error)
-        }
-        Container::Ogg => {
-            let mut ogg = {
-                let mut file = open()?;
-                lofty::ogg::VorbisFile::read_from(&mut file, options).map_err(read_error)?
-            };
-            apply_vorbis_tags(ogg.vorbis_comments_mut(), tags);
-            ogg.save_to_path(staged, WriteOptions::default())
-                .map_err(write_error)
-        }
-        Container::Mp3 => {
-            let mut mp3 = {
-                let mut file = open()?;
-                lofty::mpeg::MpegFile::read_from(&mut file, options).map_err(read_error)?
-            };
-            let mut id3 = mp3.remove_id3v2().unwrap_or_default();
-            apply_id3_native_tags(&mut id3, tags);
-            mp3.set_id3v2(id3);
-            mp3.save_to_path(staged, WriteOptions::default())
-                .map_err(write_error)
-        }
-        Container::Aiff => {
-            let mut aiff = {
-                let mut file = open()?;
-                lofty::iff::aiff::AiffFile::read_from(&mut file, options).map_err(read_error)?
-            };
-            let mut text = aiff.remove_text_chunks().unwrap_or_default();
-            apply_aiff_text_tags(&mut text, tags);
-            aiff.set_text_chunks(text);
-            let mut id3 = aiff.remove_id3v2().unwrap_or_default();
-            apply_id3_native_tags(&mut id3, tags);
-            aiff.set_id3v2(id3);
-            aiff.save_to_path(staged, WriteOptions::default())
-                .map_err(write_error)
-        }
-    }
-}
-
-/// Rewrite only the LIST INFO chunk so `smpl` / `cue ` / `inst` / ACID survive.
-pub(crate) fn write_wav_info_preserving_chunks(
-    path: &Path,
-    native: Option<&NativeTags>,
-    generic: Option<&ManualTagEdits>,
-) -> Result<(), String> {
-    if native.is_none() && generic.is_none() {
-        return Ok(());
-    }
-    let bytes = std::fs::read(path)
-        .map_err(|err| crate::path_util::path_io_error("read", path, err))?;
-    let mut chunks = parse_riff_wave_chunks(&bytes)?;
-    upsert_wav_list_info_chunk(&mut chunks, native, generic);
-    let encoded = encode_riff_wave(&chunks);
-    std::fs::write(path, encoded)
-        .map_err(|err| crate::path_util::path_io_error("write tags to", path, err))
-}
-
-pub(crate) fn parse_riff_wave_chunks(bytes: &[u8]) -> Result<Vec<([u8; 4], Vec<u8>)>, String> {
-    if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
-        return Err("Not a RIFF WAVE file".into());
-    }
-    let mut offset = 12usize;
-    let mut chunks = Vec::new();
-    while offset + 8 <= bytes.len() {
-        let id: [u8; 4] = bytes[offset..offset + 4]
-            .try_into()
-            .map_err(|_| "Invalid WAV chunk id".to_string())?;
-        let size = u32::from_le_bytes(
-            bytes[offset + 4..offset + 8]
-                .try_into()
-                .map_err(|_| "Invalid WAV chunk size".to_string())?,
-        ) as usize;
-        offset += 8;
-        if offset + size > bytes.len() {
-            return Err("Truncated WAV chunk".into());
-        }
-        chunks.push((id, bytes[offset..offset + size].to_vec()));
-        offset += size;
-        if size % 2 == 1 {
-            offset += 1;
-        }
-    }
-    Ok(chunks)
-}
-
-fn upsert_wav_list_info_chunk(
-    chunks: &mut Vec<([u8; 4], Vec<u8>)>,
-    native: Option<&NativeTags>,
-    generic: Option<&ManualTagEdits>,
-) {
-    let mut fields = match chunks.iter().find(|(id, data)| {
-        id == b"LIST" && data.len() >= 4 && &data[..4] == b"INFO"
-    }) {
-        Some((_, data)) => parse_info_fields(&data[4..]),
-        None => Vec::new(),
-    };
-    if let Some(tags) = native {
-        for (key, value) in [
-            (WAV_INSTRUMENT_KEY, &tags.instrument),
-            (WAV_ARTIST_KEY, &tags.artist),
-            (WAV_COMMENT_KEY, &tags.comment),
-        ] {
-            if let Some(value) = value {
-                upsert_info_field(&mut fields, key, value);
-            }
-        }
-    }
-    if let Some(edits) = generic {
-        upsert_or_remove_info_field(&mut fields, WAV_TITLE_KEY, &edits.title);
-        upsert_or_remove_info_field(&mut fields, WAV_GENRE_KEY, &edits.genre);
-    }
-    if fields.is_empty() {
-        chunks.retain(|(id, data)| !(id == b"LIST" && data.len() >= 4 && &data[..4] == b"INFO"));
-        return;
-    }
-    let encoded = encode_info_fields(&fields);
-    if let Some(index) = chunks
-        .iter()
-        .position(|(id, data)| id == b"LIST" && data.len() >= 4 && &data[..4] == b"INFO")
-    {
-        chunks[index] = (*b"LIST", encoded);
-    } else {
-        chunks.push((*b"LIST", encoded));
-    }
-}
-
-fn parse_info_fields(bytes: &[u8]) -> Vec<([u8; 4], Vec<u8>)> {
-    let mut offset = 0usize;
-    let mut fields = Vec::new();
-    while offset + 8 <= bytes.len() {
-        let Ok(id) = bytes[offset..offset + 4].try_into() else {
-            break;
-        };
-        let Ok(size_bytes) = bytes[offset + 4..offset + 8].try_into() else {
-            break;
-        };
-        let size = u32::from_le_bytes(size_bytes) as usize;
-        offset += 8;
-        if offset + size > bytes.len() {
-            break;
-        }
-        fields.push((id, bytes[offset..offset + size].to_vec()));
-        offset += size;
-        if size % 2 == 1 {
-            offset += 1;
-        }
-    }
-    fields
-}
-
-fn upsert_info_field(fields: &mut Vec<([u8; 4], Vec<u8>)>, key: &str, value: &str) {
-    let mut id = [b' '; 4];
-    for (index, byte) in key.as_bytes().iter().take(4).enumerate() {
-        id[index] = *byte;
-    }
-    let mut data = value.as_bytes().to_vec();
-    data.push(0);
-    if let Some(existing) = fields.iter_mut().find(|(found, _)| found == &id) {
-        existing.1 = data;
-    } else {
-        fields.push((id, data));
-    }
-}
-
-fn info_field_id(key: &str) -> [u8; 4] {
-    let mut id = [b' '; 4];
-    for (index, byte) in key.as_bytes().iter().take(4).enumerate() {
-        id[index] = *byte;
-    }
-    id
-}
-
-fn remove_info_field(fields: &mut Vec<([u8; 4], Vec<u8>)>, key: &str) {
-    let id = info_field_id(key);
-    fields.retain(|(found, _)| found != &id);
-}
-
-fn upsert_or_remove_info_field(fields: &mut Vec<([u8; 4], Vec<u8>)>, key: &str, value: &str) {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        remove_info_field(fields, key);
-    } else {
-        upsert_info_field(fields, key, trimmed);
-    }
-}
-
-fn encode_info_fields(fields: &[([u8; 4], Vec<u8>)]) -> Vec<u8> {
-    let mut body = Vec::from(*b"INFO");
-    for (id, data) in fields {
-        body.extend_from_slice(id);
-        body.extend_from_slice(&(data.len() as u32).to_le_bytes());
-        body.extend_from_slice(data);
-        if data.len() % 2 == 1 {
-            body.push(0);
-        }
-    }
-    body
-}
-
-pub(crate) fn encode_riff_wave(chunks: &[([u8; 4], Vec<u8>)]) -> Vec<u8> {
-    let mut body = Vec::from(*b"WAVE");
-    for (id, data) in chunks {
-        body.extend_from_slice(id);
-        body.extend_from_slice(&(data.len() as u32).to_le_bytes());
-        body.extend_from_slice(data);
-        if data.len() % 2 == 1 {
-            body.push(0);
-        }
-    }
-    let mut bytes = Vec::from(*b"RIFF");
-    bytes.extend_from_slice(&(body.len() as u32).to_le_bytes());
-    bytes.extend(body);
-    bytes
-}
-
-/// Edits a copy, then swaps it in, so a failed write never truncates the original.
-pub(crate) fn stage_and_replace(
-    path: &Path,
-    edit: impl FnOnce(&Path) -> Result<(), String>,
-) -> Result<(), String> {
-    let original_perms = std::fs::metadata(path).ok().map(|meta| meta.permissions());
-    let restore_perms = || {
-        if let Some(perms) = original_perms.clone() {
-            if path.exists() {
-                let _ = std::fs::set_permissions(path, perms);
-            }
-        }
-    };
-    let tmp = crate::path_util::unique_sidecar(path, "tag");
-    if let Err(err) = std::fs::copy(path, &tmp) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(format!("Failed to stage {}: {err}", path.display()));
-    }
-    if let Err(err) = crate::path_util::ensure_writable(&tmp) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(format!(
-            "Failed to prepare tagged file {}: {err}",
-            path.display()
-        ));
-    }
-
-    if let Err(err) = edit(&tmp) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(err);
-    }
-    if let Err(err) = crate::path_util::sync_file(&tmp) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(format!("Failed to sync tagged file {}: {err}", tmp.display()));
-    }
-    if let Err(err) = crate::path_util::ensure_writable(path) {
-        let _ = std::fs::remove_file(&tmp);
-        restore_perms();
-        return Err(format!(
-            "Cannot write tags to read-only file {}: {err}",
-            path.display()
-        ));
-    }
-    if let Err(err) = crate::path_util::replace_file(&tmp, path) {
-        if path.exists() {
-            restore_perms();
-            let _ = std::fs::remove_file(&tmp);
-        } else {
-            let _ = std::fs::rename(&tmp, path);
-            restore_perms();
-        }
-        return Err(format!("Failed to replace {}: {err}", path.display()));
-    }
-
-    let _ = crate::path_util::sync_parent_dir(path);
-    restore_perms();
-    Ok(())
-}
-
 /// Tundra's marker comment, preserving a comment the user already wrote.
 pub(crate) fn tundra_comment(existing: Option<&str>) -> String {
     let marker = tundra_comment_marker();
@@ -808,24 +465,8 @@ pub(crate) fn overlay_sidecar_manual_fields(
     }
 }
 
-/// Returns `None` when nothing at all could be read, so callers do not cache a
-/// transient failure as "this file has no tags".
-pub fn read_tag_fields(path: &Path) -> Option<TagFields> {
-    if !is_audio(path) {
-        return None;
-    }
-
-    let file_tags = read_file_tags(path);
-    let sidecar_instrument = crate::tag_store::instrument(path);
-    let sidecar_manual = crate::tag_store::manual_fields(path);
-    if file_tags.is_none() && sidecar_instrument.is_none() && sidecar_manual.is_none() {
-        return None;
-    }
-    let (native, tags) = file_tags
-        .map(|tags| (tags.native, tags.generic))
-        .unwrap_or_default();
-    let tags = tags.as_slice();
-
+/// Fields lofty maps consistently across tag types, first non-empty value wins.
+pub(crate) fn generic_tag_fields(tags: &[Tag]) -> TagFields {
     let mut fields = TagFields::default();
     for tag in tags {
         push_field(&mut fields.title, tag.title());
@@ -845,6 +486,28 @@ pub fn read_tag_fields(path: &Path) -> Option<TagFields> {
         push_field(&mut fields.bpm, tag.get_string(ItemKey::IntegerBpm));
         push_field(&mut fields.key, tag.get_string(ItemKey::InitialKey));
     }
+    fields
+}
+
+/// Returns `None` when nothing at all could be read, so callers do not cache a
+/// transient failure as "this file has no tags".
+pub fn read_tag_fields(path: &Path) -> Option<TagFields> {
+    if !is_audio(path) {
+        return None;
+    }
+
+    let file_tags = read_file_tags(path);
+    let sidecar_instrument = crate::tag_store::instrument(path);
+    let sidecar_manual = crate::tag_store::manual_fields(path);
+    if file_tags.is_none() && sidecar_instrument.is_none() && sidecar_manual.is_none() {
+        return None;
+    }
+    let (native, tags) = file_tags
+        .map(|tags| (tags.native, tags.generic))
+        .unwrap_or_default();
+    let tags = tags.as_slice();
+
+    let mut fields = generic_tag_fields(tags);
 
     if let Some(instrument) = durable_instrument(path, &native, Some(tags)) {
         fields.explicit_instrument = instrument.clone();

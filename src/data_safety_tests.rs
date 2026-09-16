@@ -175,3 +175,215 @@ fn metadata_cache_persist_recovers_from_crash_aside() {
     crate::types::MetadataCache::persist_map_to(&path, &map);
     assert_eq!(dir.sidecar_count(), 0);
 }
+
+// ---------------------------------------------------------------------------
+// Tag writes: every container keeps its audio and reads back what was written.
+// ---------------------------------------------------------------------------
+
+use crate::metadata::{read_tag_fields, write_manual_tags, ManualTagEdits};
+
+fn fixture_copy(dir: &ScratchDir, ext: &str) -> std::path::PathBuf {
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/assets")
+        .join(format!("tone.{ext}"));
+    let dest = dir.path().join(format!("tone.{ext}"));
+    fs::copy(&fixture, &dest).expect("copy fixture");
+    dest
+}
+
+fn decoded_samples(path: &std::path::Path) -> Vec<f32> {
+    let file = fs::File::open(path).expect("open audio");
+    rodio::Decoder::try_from(file).expect("decode audio").collect()
+}
+
+fn full_edits() -> ManualTagEdits {
+    ManualTagEdits {
+        instrument: "Snare".into(),
+        artist: "Tundra Test".into(),
+        title: "Crack".into(),
+        bpm: "128".into(),
+        key: "F#m".into(),
+        genre: "Drums".into(),
+        comment: "hand tagged".into(),
+    }
+}
+
+#[test]
+fn manual_tags_round_trip_in_every_container_without_touching_audio() {
+    for ext in ["wav", "flac", "mp3", "ogg", "aiff"] {
+        let dir = ScratchDir::new(&format!("round-trip-{ext}"));
+        let audio = fixture_copy(&dir, ext);
+        let before = decoded_samples(&audio);
+
+        crate::tag_store::with_test_db(dir.path().join("tags.db"), || {
+            write_manual_tags(&audio, &full_edits()).unwrap_or_else(|err| panic!("{ext}: {err}"));
+            assert!(
+                crate::tag_store::manual_fields(&audio).is_none(),
+                "{ext}: a native write must not leave sidecar fields behind"
+            );
+
+            let fields = read_tag_fields(&audio).expect("read back");
+            let edits = full_edits();
+            assert_eq!(fields.instrument, edits.instrument, "{ext} instrument");
+            assert_eq!(fields.artist, edits.artist, "{ext} artist");
+            assert_eq!(fields.title, edits.title, "{ext} title");
+            assert_eq!(fields.bpm, edits.bpm, "{ext} bpm");
+            assert_eq!(fields.key, edits.key, "{ext} key");
+            assert_eq!(fields.genre, edits.genre, "{ext} genre");
+            assert_eq!(fields.comment, edits.comment, "{ext} comment");
+        });
+        assert_eq!(decoded_samples(&audio), before, "{ext}: audio must be unchanged");
+        assert_eq!(dir.sidecar_count(), 0, "{ext}: no temp files left");
+    }
+}
+
+#[test]
+fn clearing_manual_fields_removes_them() {
+    for ext in ["wav", "flac", "mp3", "ogg", "aiff"] {
+        let dir = ScratchDir::new(&format!("clear-{ext}"));
+        let audio = fixture_copy(&dir, ext);
+        crate::tag_store::with_test_db(dir.path().join("tags.db"), || {
+            write_manual_tags(&audio, &full_edits()).expect("seed");
+            let cleared = ManualTagEdits {
+                title: String::new(),
+                bpm: String::new(),
+                key: String::new(),
+                genre: String::new(),
+                ..full_edits()
+            };
+            write_manual_tags(&audio, &cleared).expect("clear");
+
+            let fields = read_tag_fields(&audio).expect("read back");
+            assert_eq!(fields.title, "", "{ext} title");
+            assert_eq!(fields.bpm, "", "{ext} bpm");
+            assert_eq!(fields.key, "", "{ext} key");
+            assert_eq!(fields.genre, "", "{ext} genre");
+            assert_eq!(fields.instrument, "Snare", "{ext} instrument kept");
+        });
+    }
+}
+
+#[test]
+fn mp3_write_keeps_id3_frames_tundra_does_not_manage() {
+    use lofty::config::{ParseOptions, WriteOptions};
+    use lofty::file::AudioFile;
+    use lofty::mpeg::MpegFile;
+
+    let dir = ScratchDir::new("mp3-foreign-frames");
+    let audio = fixture_copy(&dir, "mp3");
+    {
+        let mut file = fs::File::open(&audio).expect("open");
+        let mut mp3 = MpegFile::read_from(&mut file, ParseOptions::new()).expect("parse");
+        drop(file);
+        let mut id3 = mp3.remove_id3v2().unwrap_or_default();
+        id3.insert_user_text("DAW_PROJECT".into(), "session-42".into());
+        mp3.set_id3v2(id3);
+        mp3.save_to_path(&audio, WriteOptions::default())
+            .expect("seed foreign frame");
+    }
+
+    crate::tag_store::with_test_db(dir.path().join("tags.db"), || {
+        write_manual_tags(&audio, &full_edits()).expect("manual write");
+    });
+
+    let mut file = fs::File::open(&audio).expect("open");
+    let mp3 = MpegFile::read_from(&mut file, ParseOptions::new()).expect("parse");
+    assert_eq!(
+        mp3.id3v2().and_then(|tag| tag.get_user_text("DAW_PROJECT")),
+        Some("session-42")
+    );
+}
+
+#[test]
+fn wav_bpm_and_key_go_to_an_id3_chunk_and_sampler_chunks_survive() {
+    let dir = ScratchDir::new("wav-id3-chunk");
+    let audio = dir.path().join("loop.wav");
+    let mut bytes = crate::test_fixtures::minimal_wav_bytes();
+    let smpl = [0x5A_u8; 36];
+    bytes.extend_from_slice(b"smpl");
+    bytes.extend_from_slice(&(smpl.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(&smpl);
+    let riff_len = (bytes.len() - 8) as u32;
+    bytes[4..8].copy_from_slice(&riff_len.to_le_bytes());
+    fs::write(&audio, &bytes).expect("wav");
+
+    crate::tag_store::with_test_db(dir.path().join("tags.db"), || {
+        write_manual_tags(&audio, &full_edits()).expect("manual write");
+    });
+
+    let tagged = fs::read(&audio).expect("read");
+    let chunks = crate::metadata::parse_riff_wave_chunks(&tagged).expect("parse");
+    assert!(chunks.iter().any(|(id, data)| id == b"smpl" && data[..] == smpl[..]));
+    assert!(chunks.iter().any(|(id, _)| id == b"id3 "));
+    let fields = read_tag_fields(&audio).expect("read back");
+    assert_eq!((fields.bpm.as_str(), fields.key.as_str()), ("128", "F#m"));
+}
+
+#[test]
+fn write_refuses_when_the_file_changes_mid_write() {
+    let dir = ScratchDir::new("changed-mid-write");
+    let dest = dir.path().join("kick.wav");
+    write_minimal_wav(&dest);
+
+    let err = crate::metadata::stage_and_replace(&dest, |_| {
+        fs::write(&dest, b"another program saved this").expect("external write");
+        Ok(())
+    })
+    .expect_err("concurrent change must abort the write");
+
+    assert!(err.contains("changed on disk"), "{err}");
+    assert_eq!(fs::read(&dest).expect("dest"), b"another program saved this");
+    assert_eq!(dir.sidecar_count(), 0);
+}
+
+#[test]
+fn write_does_not_resurrect_a_file_deleted_mid_write() {
+    let dir = ScratchDir::new("deleted-mid-write");
+    let dest = dir.path().join("kick.wav");
+    write_minimal_wav(&dest);
+
+    let result = crate::metadata::stage_and_replace(&dest, |_| {
+        fs::remove_file(&dest).expect("user deletes file");
+        Ok(())
+    });
+
+    assert!(result.is_err());
+    assert!(!dest.exists());
+    assert_eq!(dir.sidecar_count(), 0);
+}
+
+#[test]
+fn sidecar_instrument_survives_a_native_write_of_other_fields() {
+    let dir = ScratchDir::new("sidecar-restamp");
+    let audio = fixture_copy(&dir, "flac");
+
+    crate::tag_store::with_test_db(dir.path().join("tags.db"), || {
+        crate::tag_store::set_instrument(&audio, "Kick", TUNDRA_TAG_VERSION).expect("sidecar");
+        let edits = ManualTagEdits {
+            title: "Boom".into(),
+            ..ManualTagEdits::default()
+        };
+        write_manual_tags(&audio, &edits).expect("native write");
+        assert_eq!(
+            crate::tag_store::instrument(&audio).as_deref(),
+            Some("Kick"),
+            "Tundra's own write must not orphan the sidecar row"
+        );
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn tags_are_written_through_a_symlink() {
+    let dir = ScratchDir::new("symlink-write");
+    let real = fixture_copy(&dir, "flac");
+    let link = dir.path().join("link.flac");
+    std::os::unix::fs::symlink(&real, &link).expect("symlink");
+
+    crate::tag_store::with_test_db(dir.path().join("tags.db"), || {
+        write_manual_tags(&link, &full_edits()).expect("write through link");
+    });
+
+    assert!(fs::symlink_metadata(&link).expect("link").file_type().is_symlink());
+    assert_eq!(read_tag_fields(&real).expect("real").title, "Crack");
+}

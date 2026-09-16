@@ -61,7 +61,7 @@ fn key(path: &Path) -> PathBuf {
     crate::path_util::cache_key(path.to_path_buf())
 }
 
-fn file_stamp(path: &Path) -> Option<(u64, u64)> {
+pub(crate) fn file_stamp(path: &Path) -> Option<(u64, u64)> {
     let meta = std::fs::metadata(path).ok()?;
     let mtime_secs = meta
         .modified()
@@ -509,6 +509,33 @@ pub fn clear_manual_fields(path: &Path) -> Result<(), String> {
         entry.genre.clear();
         entry.comment.clear();
     })
+}
+
+/// Move a row that matched `previous` onto the file's current stamp. Called after
+/// Tundra itself rewrote the file, which changes mtime and size but not identity.
+pub(crate) fn restamp(path: &Path, previous: (u64, u64)) {
+    let Some(current) = file_stamp(path) else {
+        return;
+    };
+    if current == previous {
+        return;
+    }
+    let entry = {
+        let store = cache()
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match &*store {
+            Store::Ready(map) => map.get(&key(path)).cloned(),
+            Store::Missing | Store::Failed(_) => None,
+        }
+    };
+    let Some(mut entry) = entry.filter(|entry| (entry.mtime_secs, entry.size) == previous) else {
+        return;
+    };
+    (entry.mtime_secs, entry.size) = current;
+    if let Err(err) = write_sidecar_entry(path, entry) {
+        eprintln!("tundra: {err}");
+    }
 }
 
 pub fn remove_sidecar(path: &Path) -> Result<(), String> {

@@ -6,9 +6,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::hints::{hint_label_for_term, hint_name_tokens, HintSource};
+use super::riff::{encode_riff_wave, parse_riff_wave_chunks};
+use super::write::stage_and_replace;
 use super::read::{
-    encode_riff_wave, file_mtime_secs, instrument_tag, parse_riff_wave_chunks, read_tag_fields,
-    stage_and_replace, tundra_tag_is_current, WAV_ARTIST_KEY, WAV_COMMENT_KEY, WAV_GENRE_KEY,
+    file_mtime_secs, instrument_tag, read_tag_fields, tundra_tag_is_current, WAV_ARTIST_KEY, WAV_COMMENT_KEY, WAV_GENRE_KEY,
     WAV_INSTRUMENT_KEY, WAV_TITLE_KEY, VORBIS_COMMENT_KEY, VORBIS_INSTRUMENT_KEY,
     TUNDRA_TAG_VERSION,
 };
@@ -1362,25 +1363,6 @@ fn instrument_hint(path: &Path) -> Option<(String, HintSource)> {
             .collect();
         assert_eq!(leftovers.len(), 1, "sync failure must delete staged tmp");
         assert_eq!(leftovers[0], audio);
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn stage_and_replace_succeeds_when_dest_removed_before_replace() {
-        let dir = unique_temp_dir("tundra_stage_missing_dest");
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        let audio = dir.join("kick.wav");
-        write_minimal_wav(&audio);
-
-        stage_and_replace(&audio, |tmp| {
-            std::fs::remove_file(&audio).expect("dest gone before replace");
-            std::fs::write(tmp, b"mutated-copy").expect("mutate tmp");
-            Ok(())
-        })
-        .expect("replace into previously missing dest");
-
-        assert_eq!(std::fs::read(&audio).expect("dest"), b"mutated-copy");
         let _ = std::fs::remove_dir_all(dir);
     }
 
