@@ -10,6 +10,13 @@ use crate::path_util::REPLACE_OLD_SUFFIX;
 /// PID guaranteed dead on all platforms (`u32::MAX - 1`).
 pub const DEAD_PID: u32 = 4294967294;
 
+/// The temp dir as the OS reports it may be a symlink (`/var` on macOS) or an
+/// 8.3 short name (`RUNNER~1` on Windows CI). The app canonicalizes library
+/// roots, so fixtures standing in for a library must use the same spelling.
+pub fn canonical_temp_path(dir: PathBuf) -> PathBuf {
+    crate::path_util::canonical_path(&dir).expect("canonical scratch dir")
+}
+
 pub struct ScratchDir(PathBuf);
 
 impl ScratchDir {
@@ -21,7 +28,7 @@ impl ScratchDir {
             std::process::id()
         ));
         fs::create_dir_all(&dir).expect("scratch dir");
-        Self(dir)
+        Self(canonical_temp_path(dir))
     }
 
     pub fn path(&self) -> &Path {

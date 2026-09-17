@@ -348,7 +348,7 @@ mod tests {
             confidence: Some(0.90),
             summary: "Tier 1 · Kick (90%)".into(),
         };
-        let result = with_path_hint(Path::new(r"F:\Samples\Bongo\hit_01.wav"), result);
+        let result = with_path_hint(Path::new("/Samples/Bongo/hit_01.wav"), result);
         assert_eq!(result.instrument, "Percussion");
         assert!(result.summary.contains("Path hint"));
     }
@@ -362,7 +362,7 @@ mod tests {
             confidence: Some(0.9),
             summary: "Tier 1 · Closed Hat (90%)".into(),
         };
-        let result = with_path_hint(Path::new(r"C:\hats\tight_01.wav"), result);
+        let result = with_path_hint(Path::new("/hats/tight_01.wav"), result);
         assert_eq!(result.instrument, "Closed Hat");
         assert!(!result.summary.contains("overridden"));
     }

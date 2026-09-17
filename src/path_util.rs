@@ -645,6 +645,16 @@ mod tests {
     use std::fs;
 
     #[test]
+    fn is_under_matches_whole_components() {
+        let root = Path::new("/Samples");
+        assert!(is_under(Path::new("/Samples/Snare/01_Snare.flac"), root));
+        assert!(is_under(root, root));
+        assert!(!is_under(Path::new("/Samples Old/snare.flac"), root));
+        assert!(!is_under(Path::new("/Other/snare.flac"), root));
+    }
+
+    #[test]
+    #[cfg(windows)]
     fn is_under_ignores_verbatim_prefix_and_case() {
         let root = PathBuf::from(r"\\?\F:\Samples");
         let child = PathBuf::from(r"F:\Samples\ADM Samples - Copy\Snare\01_Snare.flac");
@@ -697,9 +707,20 @@ mod tests {
         let file = dir.path().join("kick.wav");
         fs::write(&file, b"wav").unwrap();
         let stored = favorite_lookup_key(&file);
-        let verbatim = PathBuf::from(format!(r"\\?\{}", file.display()));
-        assert_eq!(favorite_lookup_key(&verbatim), stored);
         assert_eq!(favorite_lookup_key(&stored), stored);
+
+        // The temp dir as the OS reports it can differ from its canonical form:
+        // a symlink (`/var` -> `/private/var` on macOS) or an 8.3 short name on Windows.
+        let reported = std::env::temp_dir()
+            .join(dir.path().file_name().unwrap())
+            .join("kick.wav");
+        assert_eq!(favorite_lookup_key(&reported), stored);
+
+        #[cfg(windows)]
+        {
+            let verbatim = PathBuf::from(format!(r"\\?\{}", file.display()));
+            assert_eq!(favorite_lookup_key(&verbatim), stored);
+        }
     }
 
     #[test]

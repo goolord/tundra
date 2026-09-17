@@ -46,7 +46,7 @@ fn instrument_hint(path: &Path) -> Option<(String, HintSource)> {
     #[test]
     fn file_search_matches_snare_in_filename() {
         let matcher = file_search_matcher(false);
-        let path = PathBuf::from(r"C:\Samples\Snare Drum 01.wav");
+        let path = PathBuf::from("/Samples/Snare Drum 01.wav");
         let (name_score, path_score) = path_match_scores(&matcher, &path, "snare", false, false);
         assert!(name_score > 0 || path_score > 0, "expected snare to match filename");
     }
@@ -54,7 +54,7 @@ fn instrument_hint(path: &Path) -> Option<(String, HintSource)> {
     #[test]
     fn file_search_requires_all_terms() {
         let matcher = file_search_matcher(false);
-        let path = PathBuf::from(r"C:\Samples\Snare Drum 01.wav");
+        let path = PathBuf::from("/Samples/Snare Drum 01.wav");
         let (both, _) = path_match_scores(&matcher, &path, "snare drum", false, false);
         let (snare_only, _) = path_match_scores(&matcher, &path, "snare", false, false);
         let (missing, _) = path_match_scores(&matcher, &path, "snare kick", false, false);
@@ -66,7 +66,7 @@ fn instrument_hint(path: &Path) -> Option<(String, HintSource)> {
     #[test]
     fn file_search_rejects_weak_fuzzy_matches() {
         let matcher = file_search_matcher(false);
-        let path = PathBuf::from(r"C:\Samples\Synth Pad 01.wav");
+        let path = PathBuf::from("/Samples/Synth Pad 01.wav");
         let (weak, _) = path_match_scores(&matcher, &path, "snare", false, false);
         assert_eq!(weak, 0, "unrelated fuzzy matches should be rejected");
     }
@@ -74,11 +74,11 @@ fn instrument_hint(path: &Path) -> Option<(String, HintSource)> {
     #[test]
     fn file_search_confident_cap_skips_fuzzy_only_matches() {
         let paths = vec![
-            PathBuf::from(r"C:\Samples\01 Snare.wav"),
-            PathBuf::from(r"C:\Samples\Synth Pad 01.wav"),
+            PathBuf::from("/Samples/01 Snare.wav"),
+            PathBuf::from("/Samples/Synth Pad 01.wav"),
         ];
         let confident: Vec<_> = (0..FILE_SEARCH_CONFIDENT_RESULT_CAP)
-            .map(|index| PathBuf::from(format!(r"C:\Samples\snare-{index:04}.wav")))
+            .map(|index| PathBuf::from(format!("/Samples/snare-{index:04}.wav")))
             .collect();
         let mut all_paths = confident;
         all_paths.extend(paths);
@@ -701,52 +701,52 @@ fn instrument_hint(path: &Path) -> Option<(String, HintSource)> {
 
     #[test]
     fn instrument_hint_reads_folder_and_prefers_filename() {
-        let folder_hint = instrument_hint_from_path(Path::new(r"F:\Samples\ADM Samples - Copy\snares\tight_01.wav"));
+        let folder_hint = instrument_hint_from_path(Path::new("/Samples/ADM Samples - Copy/snares/tight_01.wav"));
         assert_eq!(folder_hint.as_deref(), Some("Snare"));
 
-        let file_hint = instrument_hint_from_path(Path::new(r"F:\Samples\snares\cymbal_roll.wav"));
+        let file_hint = instrument_hint_from_path(Path::new("/Samples/snares/cymbal_roll.wav"));
         assert_eq!(file_hint.as_deref(), Some("Cymbal"));
 
-        let kick_hint = instrument_hint_from_path(Path::new(r"C:\Drums\Kicks\808_kick_01.wav"));
+        let kick_hint = instrument_hint_from_path(Path::new("/Drums/Kicks/808_kick_01.wav"));
         assert_eq!(kick_hint.as_deref(), Some("Kick"));
 
         assert_eq!(
-            instrument_hint_from_path(Path::new(r"C:\Drums\808_hat.wav")).as_deref(),
+            instrument_hint_from_path(Path::new("/Drums/808_hat.wav")).as_deref(),
             Some("Hi-Hat")
         );
         assert_eq!(
-            instrument_hint_from_path(Path::new(r"C:\Drums\snow_01.wav")),
+            instrument_hint_from_path(Path::new("/Drums/snow_01.wav")),
             None
         );
         assert_eq!(
-            instrument_hint_from_path(Path::new(r"C:\hats\tight_01.wav")).as_deref(),
+            instrument_hint_from_path(Path::new("/hats/tight_01.wav")).as_deref(),
             Some("Hi-Hat")
         );
 
         let deep_hint = instrument_hint_from_path(Path::new(
-            r"F:\Libraries\Pack A\Drums\One Shots\Snares\tight_01.wav",
+            "/Libraries/Pack A/Drums/One Shots/Snares/tight_01.wav",
         ));
         assert_eq!(deep_hint.as_deref(), Some("Snare"));
 
         assert_eq!(
-            instrument_hint_from_path(Path::new(r"F:\Samples\Bongo\hit_01.wav")).as_deref(),
+            instrument_hint_from_path(Path::new("/Samples/Bongo/hit_01.wav")).as_deref(),
             Some("Percussion")
         );
         assert_eq!(
-            instrument_hint_from_path(Path::new(r"F:\Samples\Bongos\layer.wav")).as_deref(),
+            instrument_hint_from_path(Path::new("/Samples/Bongos/layer.wav")).as_deref(),
             Some("Percussion")
         );
         assert_eq!(
-            instrument_hint_from_path(Path::new(r"F:\Samples\ADM\Perc\tight.wav")).as_deref(),
+            instrument_hint_from_path(Path::new("/Samples/ADM/Perc/tight.wav")).as_deref(),
             Some("Percussion")
         );
         assert_eq!(
-            instrument_hint_from_path(Path::new(r"F:\Samples\Perc\01.wav")).as_deref(),
+            instrument_hint_from_path(Path::new("/Samples/Perc/01.wav")).as_deref(),
             Some("Percussion"),
             "Perc must not false-match Kick"
         );
         assert_eq!(
-            instrument_hint_from_path(Path::new(r"F:\Samples\Bass\low.wav")).as_deref(),
+            instrument_hint_from_path(Path::new("/Samples/Bass/low.wav")).as_deref(),
             Some("Bass"),
             "Bass must not false-match Kick via bassdrum"
         );
@@ -757,52 +757,52 @@ fn instrument_hint(path: &Path) -> Option<(String, HintSource)> {
         let hint = |path: &str| instrument_hint_from_path(Path::new(path));
         let cases = [
             // Drum-machine codes when nothing else names the instrument.
-            (r"F:\Samples\909 Kit\CH 01.wav", Some("Hi-Hat")),
-            (r"F:\Samples\909 Kit\OH.wav", Some("Hi-Hat")),
-            (r"F:\Samples\Kit\RD_02.wav", Some("Cymbal")),
-            (r"F:\Samples\Kit\CP.wav", Some("Clap")),
-            (r"F:\Samples\Kit\LT 3.wav", Some("Tom")),
+            ("/Samples/909 Kit/CH 01.wav", Some("Hi-Hat")),
+            ("/Samples/909 Kit/OH.wav", Some("Hi-Hat")),
+            ("/Samples/Kit/RD_02.wav", Some("Cymbal")),
+            ("/Samples/Kit/CP.wav", Some("Clap")),
+            ("/Samples/Kit/LT 3.wav", Some("Tom")),
             // ...but never over a real name anywhere in the path.
-            (r"F:\Samples\Vocals\Oh Yeah.wav", Some("Vocal")),
-            (r"F:\Samples\Snares\CH.wav", Some("Snare")),
-            (r"F:\Samples\Artist - Night EP\Kicks\hit.wav", Some("Kick")),
+            ("/Samples/Vocals/Oh Yeah.wav", Some("Vocal")),
+            ("/Samples/Snares/CH.wav", Some("Snare")),
+            ("/Samples/Artist - Night EP/Kicks/hit.wav", Some("Kick")),
             // Kit codes count in the kit folder, not in folders further up.
-            (r"F:\Samples\909 Kit\OH\01.wav", Some("Hi-Hat")),
-            (r"D:\MA\Field Recordings\take_014.wav", None),
-            (r"C:\Users\cr\Music\untitled.wav", None),
+            ("/Samples/909 Kit/OH/01.wav", Some("Hi-Hat")),
+            ("/MA/Field Recordings/take_014.wav", None),
+            ("/Users/cr/Music/untitled.wav", None),
             // Abbreviations, digits glued to words, and word pairs.
-            (r"F:\Samples\KCK_Deep.wav", Some("Kick")),
-            (r"F:\Samples\CRSH 1.wav", Some("Cymbal")),
-            (r"F:\Samples\Kick01.wav", Some("Kick")),
-            (r"F:\Samples\Bass Drum 3.wav", Some("Kick")),
-            (r"F:\Samples\808 Bass.wav", Some("Bass")),
-            (r"F:\Samples\Hi Hat Open.wav", Some("Hi-Hat")),
-            (r"F:\Samples\Finger Snap.wav", Some("Clap")),
+            ("/Samples/KCK_Deep.wav", Some("Kick")),
+            ("/Samples/CRSH 1.wav", Some("Cymbal")),
+            ("/Samples/Kick01.wav", Some("Kick")),
+            ("/Samples/Bass Drum 3.wav", Some("Kick")),
+            ("/Samples/808 Bass.wav", Some("Bass")),
+            ("/Samples/Hi Hat Open.wav", Some("Hi-Hat")),
+            ("/Samples/Finger Snap.wav", Some("Clap")),
             // Single letters (key names, take letters) are not instruments.
-            (r"F:\Samples\Pads\C major.wav", Some("Synth")),
-            (r"F:\Samples\Snares\Sample A.wav", Some("Snare")),
-            (r"F:\Samples\Misc\Sample A.wav", None),
+            ("/Samples/Pads/C major.wav", Some("Synth")),
+            ("/Samples/Snares/Sample A.wav", Some("Snare")),
+            ("/Samples/Misc/Sample A.wav", None),
             // Other languages.
-            (r"F:\Samples\Caja 01.wav", Some("Snare")),
-            (r"F:\Samples\Bombo.wav", Some("Kick")),
-            (r"F:\Samples\Grosse Caisse.wav", Some("Kick")),
-            (r"F:\Samples\Caisse Claire 2.wav", Some("Snare")),
-            (r"F:\Samples\Platillos\hit.wav", Some("Cymbal")),
-            (r"F:\Samples\Percusión\hit.wav", Some("Percussion")),
-            (r"F:\Samples\Gitarre.wav", Some("Guitar")),
-            (r"F:\Samples\Voz.wav", Some("Vocal")),
-            (r"F:\Samples\キック_01.wav", Some("Kick")),
-            (r"F:\Samples\スネアドラム.wav", Some("Snare")),
-            (r"F:\Samples\ハイハット\01.wav", Some("Hi-Hat")),
-            (r"F:\Samples\底鼓 01.wav", Some("Kick")),
-            (r"F:\Samples\踩镲.wav", Some("Hi-Hat")),
-            (r"F:\Samples\베이스.wav", Some("Bass")),
+            ("/Samples/Caja 01.wav", Some("Snare")),
+            ("/Samples/Bombo.wav", Some("Kick")),
+            ("/Samples/Grosse Caisse.wav", Some("Kick")),
+            ("/Samples/Caisse Claire 2.wav", Some("Snare")),
+            ("/Samples/Platillos/hit.wav", Some("Cymbal")),
+            ("/Samples/Percusión/hit.wav", Some("Percussion")),
+            ("/Samples/Gitarre.wav", Some("Guitar")),
+            ("/Samples/Voz.wav", Some("Vocal")),
+            ("/Samples/キック_01.wav", Some("Kick")),
+            ("/Samples/スネアドラム.wav", Some("Snare")),
+            ("/Samples/ハイハット/01.wav", Some("Hi-Hat")),
+            ("/Samples/底鼓 01.wav", Some("Kick")),
+            ("/Samples/踩镲.wav", Some("Hi-Hat")),
+            ("/Samples/베이스.wav", Some("Bass")),
             // Loanwords that merely contain an instrument name.
-            (r"F:\Samples\カスタム\hit.wav", None),
-            (r"F:\Samples\グループA\hit.wav", None),
-            (r"F:\Samples\データベース\hit.wav", None),
-            (r"F:\Samples\タム\01.wav", Some("Tom")),
-            (r"F:\Samples\オープンハイハット.wav", Some("Hi-Hat")),
+            ("/Samples/カスタム/hit.wav", None),
+            ("/Samples/グループA/hit.wav", None),
+            ("/Samples/データベース/hit.wav", None),
+            ("/Samples/タム/01.wav", Some("Tom")),
+            ("/Samples/オープンハイハット.wav", Some("Hi-Hat")),
         ];
         for (path, expected) in cases {
             assert_eq!(hint(path).as_deref(), expected, "{path}");
@@ -829,24 +829,24 @@ fn instrument_hint(path: &Path) -> Option<(String, HintSource)> {
     #[test]
     fn artist_hint_reads_label_from_directory_layout() {
         assert_eq!(
-            artist_hint_from_path(Path::new(r"F:\Samples\KSHMR\Vol4\Kicks\kick.wav")).as_deref(),
+            artist_hint_from_path(Path::new("/Samples/KSHMR/Vol4/Kicks/kick.wav")).as_deref(),
             Some("KSHMR")
         );
         assert_eq!(
-            artist_hint_from_path(Path::new(r"F:\Samples\KSHMR\Kicks\kick.wav")).as_deref(),
+            artist_hint_from_path(Path::new("/Samples/KSHMR/Kicks/kick.wav")).as_deref(),
             Some("KSHMR")
         );
         assert_eq!(
-            artist_hint_from_path(Path::new(r"D:\Splice\packs\deadmau5\kick.wav")).as_deref(),
+            artist_hint_from_path(Path::new("/Splice/packs/deadmau5/kick.wav")).as_deref(),
             Some("deadmau5")
         );
         assert_eq!(
-            artist_hint_from_path(Path::new(r"F:\Samples\Native Instruments\Battery 4\Snares\snare.wav"))
+            artist_hint_from_path(Path::new("/Samples/Native Instruments/Battery 4/Snares/snare.wav"))
                 .as_deref(),
             Some("Native Instruments")
         );
         assert_eq!(
-            artist_hint_from_path(Path::new(r"C:\Samples\snares\tight_01.wav")),
+            artist_hint_from_path(Path::new("/Samples/snares/tight_01.wav")),
             None
         );
     }

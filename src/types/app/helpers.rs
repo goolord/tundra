@@ -299,6 +299,8 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
+        std::fs::create_dir_all(&root).unwrap();
+        let root = crate::test_fixtures::canonical_temp_path(root);
         let nested = root.join("Drums");
         std::fs::create_dir_all(&nested).unwrap();
         let audio = nested.join("one shot.wav");
@@ -433,6 +435,7 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::create_dir_all(&cold).unwrap();
+        let cold = crate::test_fixtures::canonical_temp_path(cold);
         let cold_audio = cold.join("snare.wav");
         std::fs::write(&cold_audio, b"RIFF").unwrap();
 
@@ -486,8 +489,8 @@ mod tests {
 
     #[test]
     fn cached_paths_for_root_reports_missing_when_only_subtrees_are_cached() {
-        let root = PathBuf::from(r"F:\Samples");
-        let sub = PathBuf::from(r"F:\Samples\ADM Samples - Copy");
+        let root = PathBuf::from("/Samples");
+        let sub = PathBuf::from("/Samples/ADM Samples - Copy");
         let mut cache = HashMap::new();
         cache.insert(
             sub.clone(),
@@ -508,8 +511,8 @@ mod tests {
 
     #[test]
     fn cached_paths_for_root_reports_found_once_the_root_itself_is_walked() {
-        let root = PathBuf::from(r"F:\Samples");
-        let sub = PathBuf::from(r"F:\Samples\ADM Samples - Copy");
+        let root = PathBuf::from("/Samples");
+        let sub = PathBuf::from("/Samples/ADM Samples - Copy");
         let mut cache = HashMap::new();
         cache.insert(root.clone(), vec![root.join("kick.wav")]);
         cache.insert(sub.clone(), vec![sub.join("01_Snare.flac")]);
@@ -520,6 +523,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
     fn cached_paths_for_root_unions_stale_parent_and_verbatim_root() {
         let root = PathBuf::from(r"\\?\F:\Samples");
         let child = PathBuf::from(r"F:\Samples\ADM Samples - Copy");
@@ -543,6 +547,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
     fn cached_paths_for_root_keeps_one_listing_per_cache_key() {
         let root = PathBuf::from(r"F:\Samples");
         let verbatim = PathBuf::from(r"\\?\F:\Samples");
