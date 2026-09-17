@@ -332,14 +332,13 @@ fn reap_idle_workers() {
     loop {
         std::thread::sleep(IDLE_TIMEOUT / 4);
         for slot in &POOL.slots {
-            if let Ok(mut worker) = slot.try_lock() {
-                if worker
+            if let Ok(mut worker) = slot.try_lock()
+                && worker
                     .as_ref()
                     .is_some_and(|worker| worker.last_used.elapsed() >= IDLE_TIMEOUT)
                 {
                     *worker = None;
                 }
-            }
         }
     }
 }

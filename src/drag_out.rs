@@ -34,6 +34,8 @@ pub fn start_blocking(window: &dyn HasWindowHandle, path: PathBuf) -> Result<(),
 
 pub fn x11_window_id(window: &dyn HasWindowHandle) -> Option<u32> {
     match window.window_handle().ok()?.as_raw() {
+        // `c_ulong`: 32 bits on Windows, 64 on Linux.
+        #[allow(clippy::useless_conversion)]
         RawWindowHandle::Xlib(handle) => u32::try_from(handle.window).ok(),
         RawWindowHandle::Xcb(handle) => Some(handle.window.get()),
         _ => None,

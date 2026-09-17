@@ -187,8 +187,7 @@ fn parse_tag_value(raw: &str) -> Result<String, TagParseError> {
         return Err(TagParseError::EmptyValue);
     }
 
-    if raw.starts_with('"') {
-        let rest = &raw[1..];
+    if let Some(rest) = raw.strip_prefix('"') {
         let end = rest.find('"').ok_or(TagParseError::UnclosedQuote)?;
         let value = rest[..end].trim();
         if value.is_empty() {

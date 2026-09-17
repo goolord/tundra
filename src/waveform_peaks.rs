@@ -132,7 +132,7 @@ fn decode_peaks(
         sum = 0.0;
         in_frame = 0;
         frame += 1;
-        if frame % CANCEL_CHECK_FRAMES == 0 && cancelled() {
+        if frame.is_multiple_of(CANCEL_CHECK_FRAMES) && cancelled() {
             return None;
         }
     }

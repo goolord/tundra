@@ -68,11 +68,10 @@ impl MetadataLookup {
         let cached = self.lookup_cached(path).cloned();
 
         if let Some(mtime_secs) = file_mtime_secs(path) {
-            if let Some(cached) = &cached {
-                if cached.mtime_secs == mtime_secs {
+            if let Some(cached) = &cached
+                && cached.mtime_secs == mtime_secs {
                     return cached.fields.clone();
                 }
-            }
             let Some(fields) = read_tag_fields(path) else {
                 return TagFields::default();
             };

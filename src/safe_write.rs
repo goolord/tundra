@@ -161,14 +161,23 @@ fn replace_existing_windows(from: &Path, to: &Path) -> io::Result<()> {
     if ok == 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
 }
 
-/// Clear read-only attribute/permissions so writes and fsync succeed.
+/// Clear the read-only attribute (Windows) or grant the owner write permission
+/// (Unix) so writes and fsync succeed.
 pub fn ensure_writable(path: &Path) -> io::Result<()> {
     let mut perms = std::fs::metadata(path)?.permissions();
-    if perms.readonly() {
-        perms.set_readonly(false);
-        std::fs::set_permissions(path, perms)?;
+    if !perms.readonly() {
+        return Ok(());
     }
-    Ok(())
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        perms.set_mode(perms.mode() | 0o200);
+    }
+    // Off Unix this only clears the read-only attribute, which is what we want.
+    #[cfg(not(unix))]
+    #[allow(clippy::permissions_set_readonly_false)]
+    perms.set_readonly(false);
+    std::fs::set_permissions(path, perms)
 }
 
 /// Flush file data/metadata to disk before atomic replace.

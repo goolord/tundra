@@ -124,11 +124,10 @@ impl Iterator for StreamSource {
 
     fn next(&mut self) -> Option<Self::Item> {
         let sample = self.decoder.next()?;
-        if self.channels > 0 && self.sample_index.is_multiple_of(self.channels) {
-            if let Some(position) = &self.position {
+        if self.channels > 0 && self.sample_index.is_multiple_of(self.channels)
+            && let Some(position) = &self.position {
                 position.set_frame(self.frame_at(self.sample_index));
             }
-        }
         self.sample_index += 1;
         Some(sample)
     }

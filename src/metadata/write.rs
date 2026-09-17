@@ -201,11 +201,10 @@ pub(crate) fn write_tags(path: &Path, edit: &TagEdit) -> Result<(), String> {
 /// turn it into a detached copy and leave the real file untagged.
 fn write_target(path: &Path) -> PathBuf {
     let is_link = std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink());
-    if is_link {
-        if let Ok(target) = crate::path_util::canonical_path(path) {
+    if is_link
+        && let Ok(target) = crate::path_util::canonical_path(path) {
             return target;
         }
-    }
     path.to_path_buf()
 }
 

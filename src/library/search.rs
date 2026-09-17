@@ -37,7 +37,7 @@ pub fn cached_paths_for_root(cache: &HashMap<PathBuf, Vec<PathBuf>>, root: &Path
     let mut listings: HashMap<PathBuf, &Vec<PathBuf>> = HashMap::new();
     let mut root_walked = false;
     for (key, cached) in cache {
-        let listing_key = cache_key(&key);
+        let listing_key = cache_key(key);
         if !listing_key.starts_with(&root_key) {
             continue;
         }
@@ -112,7 +112,7 @@ pub async fn execute_file_search(request: SearchRequest) -> SearchOutput {
     }
 
     let mut seen = HashSet::new();
-    paths.retain(|path| seen.insert(cache_key(&path)));
+    paths.retain(|path| seen.insert(cache_key(path)));
 
     if !tag_filters.is_empty() {
         // Safety net for files a walk can no longer reach (renamed or temporarily offline

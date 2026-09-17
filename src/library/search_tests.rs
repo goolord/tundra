@@ -55,7 +55,7 @@ fn search(roots: &[&Path], metadata: Shared<CachedMetadata>, file_query: &str, i
 /// Results come back however the walk or the index spelled the path, so compare normalized.
 fn contains_path(paths: &[PathBuf], wanted: &Path) -> bool {
     let wanted = cache_key(wanted);
-    paths.iter().any(|path| cache_key(&path) == wanted)
+    paths.iter().any(|path| cache_key(path) == wanted)
 }
 
 #[test]

@@ -6,7 +6,7 @@ use super::widgets::spacer;
 use iced::widget::{button, container, mouse_area, row, stack, text};
 use iced::{Alignment, Border, Color, Element, Length, Padding, Shadow, Theme, alignment};
 use iced_aw::menu::{self, Menu};
-use iced_aw::style::{Status, menu_bar::primary};
+use iced_aw::style::Status;
 use iced_aw::{menu_bar, menu_items};
 
 const TITLE_BAR_HEIGHT: f32 = 24.0;
@@ -158,7 +158,7 @@ fn menu_bar_widget(always_on_top: bool) -> Element<'static, Message> {
     .into()
 }
 
-fn menu_bar_style(theme: &Theme, status: Status) -> iced_aw::style::menu_bar::Style {
+fn menu_bar_style(theme: &Theme, _status: Status) -> iced_aw::style::menu_bar::Style {
     let palette = theme.extended_palette();
     iced_aw::style::menu_bar::Style {
         bar_background: palette.background.weak.color.into(),
@@ -169,7 +169,6 @@ fn menu_bar_style(theme: &Theme, status: Status) -> iced_aw::style::menu_bar::St
         menu_shadow: style::drop_shadow(palette.background.base.text.scale_alpha(0.15), 2.0, 8.0),
         path: palette.background.weak.color.into(),
         path_border: Border::default(),
-        ..primary(theme, status)
     }
 }
 

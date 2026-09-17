@@ -132,11 +132,10 @@ pub(crate) enum Container {
 
 impl Container {
     pub(crate) fn of(path: &Path) -> Option<Self> {
-        if let Some(ext) = path.extension().and_then(|ext| ext.to_str()) {
-            if let Some(container) = Self::from_extension(ext) {
+        if let Some(ext) = path.extension().and_then(|ext| ext.to_str())
+            && let Some(container) = Self::from_extension(ext) {
                 return Some(container);
             }
-        }
         Self::sniff(path)
     }
 
@@ -402,17 +401,15 @@ pub(crate) fn tundra_comment(existing: Option<&str>) -> String {
 fn explicit_instrument_from_tag(tag: &Tag) -> Option<String> {
     for item in tag.items() {
         let description = item.description();
-        if description.eq_ignore_ascii_case("instrument")
+        if (description.eq_ignore_ascii_case("instrument")
             || description.eq_ignore_ascii_case("instrumentname")
-            || description.eq_ignore_ascii_case("instrument type")
-        {
-            if let ItemValue::Text(text) = item.value() {
+            || description.eq_ignore_ascii_case("instrument type"))
+            && let ItemValue::Text(text) = item.value() {
                 let trimmed = text.trim();
                 if !trimmed.is_empty() {
                     return Some(trimmed.to_string());
                 }
             }
-        }
     }
 
     if let Some(value) = tag.comment().and_then(|text| instrument_from_marked_comment(&text))
