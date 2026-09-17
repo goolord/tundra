@@ -4,10 +4,11 @@
 use super::{run_blocking, App, Modal};
 use crate::library::search::{execute_file_search, SearchRequest};
 use crate::library::walk_directory;
+use crate::library::cache::PersistedCaches;
+use crate::library::search::SearchOutput;
 use crate::metadata::{
-    control_bar_tags, file_search_active, file_search_debounce_ms, index_paths, is_audio, parse_tag_filter,
-    refresh_cached_metadata, tag_field_best_match, tag_parse_message, PersistedCaches, TagField, TagParseError,
-    TAG_SEARCH_DEBOUNCE_MS,
+    file_search_active, index_paths, is_audio, parse_tag_filter, refresh_cached_metadata, tag_field_best_match,
+    TagField, TagFields, TagParseError, FILE_SEARCH_MIN_QUERY_LEN,
 };
 use crate::ui::file_selector::{list_buttons, FileButton, FilterFocus, FILE_LIST_SCROLL_ID, FILE_SEARCH_INPUT_ID, TAG_SEARCH_INPUT_ID};
 use crate::ui::message::{FilterMsg, Message};
@@ -149,7 +150,7 @@ impl App {
             .current_file
             .as_deref()
             .and_then(|path| self.metadata_cache.cached_fields(path))
-            .map(|fields| control_bar_tags(&fields))
+            .map(|fields| toolbar_tags(&fields))
             .unwrap_or_default()
     }
 
@@ -291,7 +292,8 @@ impl App {
         }
 
         let tag_only = selector.tag_only_search();
-        let debounce_ms = if tag_only { TAG_SEARCH_DEBOUNCE_MS } else { file_search_debounce_ms(selector.search_value.len()) };
+        // Wait for typing to pause; a one- or two-letter query matches so much that it waits longer.
+        let debounce_ms = if !tag_only && selector.search_value.len() <= FILE_SEARCH_MIN_QUERY_LEN { 450 } else { 200 };
         let request = SearchRequest {
             debounce: Duration::from_millis(debounce_ms),
             allowed_roots: self.allowed_directories.roots().to_vec(),
@@ -372,15 +374,15 @@ impl App {
         self.file_list_focused = false;
     }
 
-    fn show_search_result(&mut self, result: crate::metadata::SearchResult) {
-        let mut walked_roots = false;
-        for (root, children) in result.cached_roots {
+    fn show_search_result(&mut self, SearchOutput { result, walked_roots }: SearchOutput) {
+        let mut walked_any = false;
+        for (root, children) in walked_roots {
             if self.allowed_directories.contains_path(&root) {
                 self.dir_cache.insert(root, children);
-                walked_roots = true;
+                walked_any = true;
             }
         }
-        if walked_roots {
+        if walked_any {
             self.dir_cache.persist();
         }
         self.metadata_cache.merge(result.new_metadata);
@@ -417,7 +419,7 @@ impl App {
                 Task::batch([self.start_file_search(), focus(TAG_SEARCH_INPUT_ID)])
             }
             Err(err) => {
-                self.file_selector.tag_search_error = Some(tag_parse_message(err).into());
+                self.file_selector.tag_search_error = Some(err.to_string());
                 focus(TAG_SEARCH_INPUT_ID)
             }
         }
@@ -436,5 +438,40 @@ impl App {
         self.file_selector.tag_search_error = None;
         self.file_selector.tag_search_value = format!("{}:", field.as_str());
         focus(TAG_SEARCH_INPUT_ID)
+    }
+}
+
+/// Tags worth showing in the waveform toolbar, in display order.
+fn toolbar_tags(fields: &TagFields) -> Vec<(TagField, String)> {
+    [TagField::Instrument, TagField::Bpm, TagField::Key, TagField::Genre]
+        .into_iter()
+        .map(|field| (field, fields.field_value(field)))
+        .filter(|(_, value)| !value.is_empty())
+        .map(|(field, value)| (field, value.to_string()))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn toolbar_shows_instrument_bpm_key_and_genre_when_set() {
+        let fields = TagFields {
+            explicit_instrument: "Snare".into(),
+            instrument: "Drums".into(),
+            bpm: "120".into(),
+            key: "Am".into(),
+            title: "ignored".into(),
+            ..TagFields::default()
+        };
+        assert_eq!(
+            toolbar_tags(&fields),
+            [
+                (TagField::Instrument, "Snare".to_string()),
+                (TagField::Bpm, "120".to_string()),
+                (TagField::Key, "Am".to_string()),
+            ]
+        );
     }
 }

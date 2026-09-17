@@ -12,11 +12,18 @@ use std::time::Duration;
 
 use super::AllowedDirectories;
 use crate::locks::{lock, read, write};
-use crate::metadata::{refresh_cached_metadata, CachedMetadata, PersistedCaches, TagFields};
+use crate::metadata::{refresh_cached_metadata, CachedMetadata, TagFields};
 
 pub type Listings = HashMap<PathBuf, Vec<PathBuf>>;
 pub type MetadataMap = HashMap<PathBuf, CachedMetadata>;
 pub type Shared<V> = Arc<RwLock<Arc<HashMap<PathBuf, V>>>>;
+
+/// Both caches as loaded from disk at start-up.
+#[derive(Debug, Clone, Default)]
+pub struct PersistedCaches {
+    pub dirs: Listings,
+    pub metadata: MetadataMap,
+}
 
 const DIR_CACHE_FILE: &str = "dir_cache.bin";
 // v10: instrument now reads from each container's canonical key, so entries

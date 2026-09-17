@@ -430,8 +430,8 @@ pub fn apply_items(items: &[BulkApplyItem], progress: Option<&BulkScanProgress>,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metadata::{collect_tag_matches, TagField, TagFilter};
-    use crate::test_fixtures::{copy_asset, ScratchDir, ASSET_FORMATS};
+    use crate::metadata::{search, MetadataLookup, SearchQuery, TagField, TagFilter};
+    use crate::test_fixtures::{copy_asset, write_riff_info, ScratchDir, ASSET_FORMATS};
 
     /// A `Kicks` folder holding one untagged file per format.
     fn kick_folder(label: &str) -> (ScratchDir, Vec<PathBuf>) {
@@ -449,7 +449,11 @@ mod tests {
             field: TagField::Instrument,
             value: value.to_string(),
         };
-        collect_tag_matches(paths, &[filter], indexed).paths.len()
+        let query = SearchQuery {
+            tag_filters: &[filter],
+            ..SearchQuery::default()
+        };
+        search(paths, &query, MetadataLookup::new(indexed)).paths.len()
     }
 
     /// The user-facing contract for the bulk tagger: every untagged file of
@@ -534,22 +538,9 @@ mod tests {
 
     #[test]
     fn legacy_tundra_comment_is_queued_for_reclassify() {
-        use lofty::config::WriteOptions;
-        use lofty::file::AudioFile;
-        use lofty::iff::wav::RiffInfoList;
-
         let (_root, paths) = kick_folder("bulk-legacy");
         let audio = paths.iter().find(|path| path.extension().is_some_and(|ext| ext == "wav")).cloned().expect("wav fixture");
-
-        let mut wav = {
-            let mut file = std::fs::File::open(&audio).expect("open");
-            lofty::iff::wav::WavFile::read_from(&mut file, lofty::config::ParseOptions::new()).expect("parse")
-        };
-        let mut info = RiffInfoList::new();
-        info.insert("IKEY".to_string(), "Snare".to_string());
-        info.insert("ICMT".to_string(), "Tundra".to_string());
-        wav.set_riff_info(info);
-        wav.save_to_path(&audio, WriteOptions::default()).expect("save legacy tags");
+        write_riff_info(&audio, &[("IKEY", "Snare"), ("ICMT", "Tundra")]);
 
         let (to_classify, metadata_only, skipped_complete) =
             partition_auto_tag_candidates(std::slice::from_ref(&audio), &HashMap::new());

@@ -7,9 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::cache::{lock_read, Shared};
-use crate::metadata::{
-    index_paths, is_audio, search_with_lookup, CachedMetadata, MetadataLookup, SearchResult, TagFilter,
-};
+use crate::metadata::{index_paths, is_audio, search, CachedMetadata, MetadataLookup, SearchQuery, SearchResult, TagFilter};
 use crate::path_util::{cache_key, is_under, resolve_open_path};
 
 /// Everything one search needs, captured on the UI thread.
@@ -57,7 +55,14 @@ pub fn cached_paths_for_root(cache: &HashMap<PathBuf, Vec<PathBuf>>, root: &Path
     (paths, root_walked)
 }
 
-pub async fn execute_file_search(request: SearchRequest) -> SearchResult {
+/// A search's matches, plus the listings of roots it had to walk.
+#[derive(Debug, Clone)]
+pub struct SearchOutput {
+    pub result: SearchResult,
+    pub walked_roots: HashMap<PathBuf, Vec<PathBuf>>,
+}
+
+pub async fn execute_file_search(request: SearchRequest) -> SearchOutput {
     let SearchRequest {
         debounce,
         allowed_roots,
@@ -91,7 +96,7 @@ pub async fn execute_file_search(request: SearchRequest) -> SearchResult {
     let metadata_map = lock_read(&metadata_cache);
 
     let mut walked = Vec::new();
-    let mut cached_roots = HashMap::new();
+    let mut walked_roots = HashMap::new();
     for root in missing_roots {
         // Skip only this root when its own index or subtree cache can answer.
         // A new allowed root with neither must still be walked.
@@ -103,7 +108,7 @@ pub async fn execute_file_search(request: SearchRequest) -> SearchResult {
         let children = super::walk_directory(&root);
         paths.extend(children.iter().cloned());
         walked.extend(children.iter().cloned());
-        cached_roots.insert(root, children);
+        walked_roots.insert(root, children);
     }
 
     let mut seen = HashSet::new();
@@ -140,7 +145,13 @@ pub async fn execute_file_search(request: SearchRequest) -> SearchResult {
     };
     let lookup = MetadataLookup::with_new_entries(metadata_map, indexed);
 
-    let mut result = search_with_lookup(&paths, &file_query, &tag_filters, case_sensitive, show_directories, lookup);
+    let query = SearchQuery {
+        text: &file_query,
+        tag_filters: &tag_filters,
+        case_sensitive,
+        show_directories,
+    };
+    let mut result = search(&paths, &query, lookup);
     if let Some(favorites) = favorites {
         result
             .paths
@@ -149,8 +160,7 @@ pub async fn execute_file_search(request: SearchRequest) -> SearchResult {
     for path in &mut result.paths {
         *path = resolve_open_path(path, paths.iter().map(PathBuf::as_path));
     }
-    result.cached_roots = cached_roots;
-    result
+    SearchOutput { result, walked_roots }
 }
 
 #[cfg(test)]

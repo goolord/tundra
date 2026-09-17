@@ -12,14 +12,11 @@ use std::sync::{LazyLock, Mutex, MutexGuard};
 // v6: tier 2 is YAMNet; labels from earlier models are not reused.
 const CACHE_FILE: &str = "classify_cache_v6.bin";
 
+/// Bincode writes nested structs inline, so this is still the v6 file layout.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CachedClassification {
     stamp: FileStamp,
-    instrument: String,
-    tier: u8,
-    zcr: Option<f64>,
-    confidence: Option<f64>,
-    summary: String,
+    result: ClassificationResult,
 }
 
 #[derive(Default)]
@@ -60,13 +57,7 @@ impl ClassifyCache {
     fn get(&self, path: &Path) -> Option<ClassificationResult> {
         let stamp = FileStamp::of(path)?;
         let cached = self.entries.get(&key(path))?;
-        (cached.stamp == stamp).then(|| ClassificationResult {
-            instrument: cached.instrument.clone(),
-            tier: cached.tier,
-            zcr: cached.zcr,
-            confidence: cached.confidence,
-            summary: cached.summary.clone(),
-        })
+        (cached.stamp == stamp).then(|| cached.result.clone())
     }
 
     fn insert(&mut self, path: &Path, stamp: FileStamp, result: &ClassificationResult) {
@@ -74,11 +65,7 @@ impl ClassifyCache {
             key(path),
             CachedClassification {
                 stamp,
-                instrument: result.instrument.clone(),
-                tier: result.tier,
-                zcr: result.zcr,
-                confidence: result.confidence,
-                summary: result.summary.clone(),
+                result: result.clone(),
             },
         );
         self.dirty = true;

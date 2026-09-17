@@ -77,10 +77,6 @@ impl<K: Clone + Eq + Hash> Selection<K> {
         self.selected.len()
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.selected.is_empty()
-    }
-
     pub fn iter(&self) -> impl Iterator<Item = &K> {
         self.selected.iter()
     }

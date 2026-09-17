@@ -274,23 +274,6 @@ pub fn instrument_hint_from_path(path: &Path) -> Option<String> {
     best.map(|(_, label)| label.to_string())
 }
 
-/// Where an instrument hint came from, so the classifier can say so.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HintSource {
-    Path,
-    #[allow(dead_code)]
-    Tags,
-}
-
-impl HintSource {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Path => "Path hint",
-            Self::Tags => "Tag hint",
-        }
-    }
-}
-
 const GENERIC_PATH_SEGMENTS: &[&str] = &[
     "samples",
     "sample",

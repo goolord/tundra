@@ -4,29 +4,15 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use super::read::is_audio;
-
 use super::fields::TagFields;
-use super::read::read_tag_fields;
+use super::read::{is_audio, read_tag_fields};
 use crate::path_util::file_mtime_secs;
 
+/// A file's tags as indexed, with the mtime they were read at.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CachedMetadata {
     pub mtime_secs: u64,
     pub fields: TagFields,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct PersistedCaches {
-    pub dirs: HashMap<PathBuf, Vec<PathBuf>>,
-    pub metadata: HashMap<PathBuf, CachedMetadata>,
-}
-
-#[derive(Debug, Clone)]
-pub struct SearchResult {
-    pub paths: Vec<PathBuf>,
-    pub new_metadata: HashMap<PathBuf, CachedMetadata>,
-    pub cached_roots: HashMap<PathBuf, Vec<PathBuf>>,
 }
 
 pub struct MetadataLookup {

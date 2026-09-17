@@ -1,5 +1,5 @@
-use super::{cached_paths_for_root, execute_file_search, SearchRequest, Shared};
-use crate::metadata::{CachedMetadata, SearchResult, TagField, TagFields, TagFilter};
+use super::{cached_paths_for_root, execute_file_search, SearchOutput, SearchRequest, Shared};
+use crate::metadata::{CachedMetadata, TagField, TagFields, TagFilter};
 use crate::path_util::file_mtime_secs;
 use crate::path_util::cache_key;
 use crate::test_fixtures::ScratchDir;
@@ -34,7 +34,7 @@ fn library_with_tagged_kick() -> (ScratchDir, PathBuf, Shared<CachedMetadata>) {
     (root, audio, metadata)
 }
 
-fn search(roots: &[&Path], metadata: Shared<CachedMetadata>, file_query: &str, instrument: &str) -> SearchResult {
+fn search(roots: &[&Path], metadata: Shared<CachedMetadata>, file_query: &str, instrument: &str) -> SearchOutput {
     futures::executor::block_on(execute_file_search(SearchRequest {
         debounce: std::time::Duration::ZERO,
         allowed_roots: roots.iter().map(|root| root.to_path_buf()).collect(),
@@ -65,11 +65,11 @@ fn file_query_keeps_tagged_files_the_walk_cannot_reach() {
     let ghost = root.path().join("Drums").join("ghost.wav");
     Arc::make_mut(&mut metadata.write().unwrap()).insert(cache_key(&ghost), kick_tags(0));
 
-    let tag_only = search(&[root.path()], Arc::clone(&metadata), "", "kick").paths;
+    let tag_only = search(&[root.path()], Arc::clone(&metadata), "", "kick").result.paths;
     assert!(contains_path(&tag_only, &ghost), "tag-only search missed {ghost:?}, got {tag_only:?}");
 
     // Narrowing with a file query must not drop what the tag filter just surfaced.
-    let narrowed = search(&[root.path()], metadata, "ghost", "kick").paths;
+    let narrowed = search(&[root.path()], metadata, "ghost", "kick").result.paths;
     assert!(contains_path(&narrowed, &ghost), "file query dropped {ghost:?}");
 }
 
@@ -77,11 +77,11 @@ fn file_query_keeps_tagged_files_the_walk_cannot_reach() {
 fn tag_only_search_finds_tagged_file_under_an_unwalked_root() {
     let (root, audio, metadata) = library_with_tagged_kick();
     let result = search(&[root.path()], metadata, "", "kick");
-    assert!(result.paths.contains(&audio), "tag-only search missed {audio:?}");
+    assert!(result.result.paths.contains(&audio), "tag-only search missed {audio:?}");
     assert!(
-        result.cached_roots.is_empty(),
+        result.walked_roots.is_empty(),
         "tag-only must not walk the library when the metadata index can answer, got {:?}",
-        result.cached_roots.keys().collect::<Vec<_>>()
+        result.walked_roots.keys().collect::<Vec<_>>()
     );
 }
 
@@ -92,27 +92,27 @@ fn tag_only_search_walks_a_root_with_no_cache_or_metadata() {
     std::fs::write(cold.path().join("snare.wav"), b"RIFF").unwrap();
 
     let result = search(&[known.path(), cold.path()], metadata, "", "kick");
-    assert!(!result.cached_roots.contains_key(known.path()), "root with metadata should not be walked");
+    assert!(!result.walked_roots.contains_key(known.path()), "root with metadata should not be walked");
     assert!(
-        result.cached_roots.contains_key(cold.path()),
+        result.walked_roots.contains_key(cold.path()),
         "root with no cache and no metadata must be walked, got {:?}",
-        result.cached_roots.keys().collect::<Vec<_>>()
+        result.walked_roots.keys().collect::<Vec<_>>()
     );
 }
 
 #[test]
 fn tag_filter_matches_regardless_of_query_case() {
     let (root, audio, metadata) = library_with_tagged_kick();
-    let paths = search(&[root.path()], metadata, "", "KICK").paths;
+    let paths = search(&[root.path()], metadata, "", "KICK").result.paths;
     assert!(paths.contains(&audio), "uppercase filter missed {audio:?}");
 }
 
 #[test]
 fn file_query_narrows_an_active_tag_filter() {
     let (root, audio, metadata) = library_with_tagged_kick();
-    let hit = search(&[root.path()], Arc::clone(&metadata), "shot", "kick").paths;
+    let hit = search(&[root.path()], Arc::clone(&metadata), "shot", "kick").result.paths;
     assert!(hit.contains(&audio), "matching query dropped {audio:?}");
-    let miss = search(&[root.path()], metadata, "zzzz", "kick").paths;
+    let miss = search(&[root.path()], metadata, "zzzz", "kick").result.paths;
     assert!(miss.is_empty(), "non-matching query still returned {miss:?}");
 }
 

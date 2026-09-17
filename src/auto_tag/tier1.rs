@@ -9,7 +9,7 @@ use rodio::Source;
 use std::fs::File;
 use std::path::Path;
 
-pub const SAMPLE_RATE: u32 = 22050;
+const SAMPLE_RATE: u32 = 22050;
 const ANALYSIS_SECONDS: f32 = 30.0;
 const FRAME_LENGTH: usize = 2048;
 const HOP_LENGTH: usize = 512;
@@ -26,10 +26,6 @@ pub struct Tier1Result {
     pub instrument: Option<String>,
     pub zcr: f64,
     pub confidence: Option<f64>,
-}
-
-fn failure(details: String) -> ClassifyError {
-    ClassifyError::new("Couldn't analyze this file.", details)
 }
 
 pub fn classify(path: &Path) -> Result<Tier1Result, ClassifyError> {
@@ -70,10 +66,10 @@ fn classify_zcr(zcr: f64) -> Tier1Result {
 /// resampled to `SAMPLE_RATE`.
 fn load_mono_audio(path: &Path) -> Result<Vec<f32>, ClassifyError> {
     let file_len = std::fs::metadata(path)
-        .map_err(|err| failure(format!("Failed to stat {}: {err}", path.display())))?
+        .map_err(|err| ClassifyError::analysis_failed(format!("Failed to stat {}: {err}", path.display())))?
         .len();
     if file_len > MAX_AUDIO_BYTES {
-        return Err(failure(format!(
+        return Err(ClassifyError::analysis_failed(format!(
             "{} is too large ({} MB; limit is {} MB)",
             path.display(),
             file_len / (1024 * 1024),
@@ -82,9 +78,9 @@ fn load_mono_audio(path: &Path) -> Result<Vec<f32>, ClassifyError> {
     }
 
     let file = File::open(path)
-        .map_err(|err| failure(format!("Failed to open {}: {err}", path.display())))?;
+        .map_err(|err| ClassifyError::analysis_failed(format!("Failed to open {}: {err}", path.display())))?;
     let mut decoder = rodio::Decoder::try_from(file)
-        .map_err(|err| failure(format!("Cannot decode {}: {err}", path.display())))?;
+        .map_err(|err| ClassifyError::analysis_failed(format!("Cannot decode {}: {err}", path.display())))?;
 
     let sample_rate = decoder.sample_rate();
     let channels = decoder.channels().max(1) as usize;
@@ -101,7 +97,7 @@ fn load_mono_audio(path: &Path) -> Result<Vec<f32>, ClassifyError> {
         mono.push(sum / channels as f32);
     }
     if mono.is_empty() {
-        return Err(failure(format!("{} contains no audio samples", path.display())));
+        return Err(ClassifyError::analysis_failed(format!("{} contains no audio samples", path.display())));
     }
     Ok(resample_linear(&mono, sample_rate, SAMPLE_RATE))
 }

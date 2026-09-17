@@ -36,39 +36,70 @@ impl Endian {
     }
 }
 
-/// Chunk ids and byte ranges (of each chunk body) inside `bytes`, which start
-/// right after a 12-byte form header. Fails rather than guessing on a size that
-/// runs past the end, so a damaged file is never rewritten.
+pub(crate) type Chunks = Vec<(ChunkId, Vec<u8>)>;
+
+/// Chunks in `bytes` in order, each as its id and body range. Yields `Err(id)`
+/// for a chunk whose size runs past the end, and nothing after it.
+fn scan_chunks(bytes: &[u8], endian: Endian) -> impl Iterator<Item = Result<(ChunkId, Range<usize>), ChunkId>> + '_ {
+    let mut offset = Some(0usize);
+    std::iter::from_fn(move || {
+        let at = offset.filter(|at| at + 8 <= bytes.len())?;
+        let id: ChunkId = bytes[at..at + 4].try_into().expect("4-byte slice");
+        let size = endian.read_u32(bytes[at + 4..at + 8].try_into().expect("4-byte slice")) as usize;
+        let start = at + 8;
+        let Some(end) = start.checked_add(size).filter(|end| *end <= bytes.len()) else {
+            offset = None;
+            return Some(Err(id));
+        };
+        // Odd-sized chunks are followed by a pad byte.
+        offset = Some(end + size % 2);
+        Some(Ok((id, start..end)))
+    })
+}
+
+/// Chunk ids and body ranges inside `bytes`, which start right after a 12-byte
+/// form header. Fails rather than guessing on a size that runs past the end, so
+/// a damaged file is never rewritten.
 pub(crate) fn chunk_ranges(bytes: &[u8], endian: Endian) -> Result<Vec<(ChunkId, Range<usize>)>, String> {
-    let mut offset = 0usize;
-    let mut chunks = Vec::new();
-    while offset + 8 <= bytes.len() {
-        let id: ChunkId = bytes[offset..offset + 4].try_into().expect("4-byte slice");
-        let size = endian.read_u32(bytes[offset + 4..offset + 8].try_into().expect("4-byte slice"))
-            as usize;
-        let start = offset + 8;
-        let end = start
-            .checked_add(size)
-            .filter(|end| *end <= bytes.len())
-            .ok_or_else(|| format!("Truncated {} chunk", String::from_utf8_lossy(&id)))?;
-        chunks.push((id, start..end));
-        offset = end + size % 2;
-    }
-    if offset < bytes.len() && bytes[offset..].iter().any(|byte| *byte != 0) {
+    let chunks: Vec<_> = scan_chunks(bytes, endian)
+        .collect::<Result<_, _>>()
+        .map_err(|id| format!("Truncated {} chunk", String::from_utf8_lossy(&id)))?;
+    let end = chunks.last().map_or(0, |(_, range)| range.end + range.len() % 2);
+    if bytes.get(end..).is_some_and(|rest| rest.iter().any(|byte| *byte != 0)) {
         return Err("Unexpected trailing bytes after the last chunk".into());
     }
     Ok(chunks)
 }
 
-pub(crate) fn parse_riff_wave_chunks(bytes: &[u8]) -> Result<Vec<(ChunkId, Vec<u8>)>, String> {
-    if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
-        return Err("Not a RIFF WAVE file".into());
+/// The form type and chunks of an IFF file starting with `magic` (`RIFF` or `FORM`).
+fn parse_form(bytes: &[u8], magic: &[u8; 4], endian: Endian) -> Result<(ChunkId, Chunks), String> {
+    if bytes.len() < 12 || &bytes[0..4] != magic {
+        return Err(format!("Not a {} file", String::from_utf8_lossy(magic)));
     }
+    let form_type: ChunkId = bytes[8..12].try_into().expect("4-byte slice");
     let body = &bytes[12..];
-    Ok(chunk_ranges(body, Endian::Little)?
+    let chunks = chunk_ranges(body, endian)?
         .into_iter()
         .map(|(id, range)| (id, body[range].to_vec()))
-        .collect())
+        .collect();
+    Ok((form_type, chunks))
+}
+
+fn encode_form(magic: &[u8; 4], form_type: &ChunkId, chunks: &[(ChunkId, Vec<u8>)], endian: Endian) -> Vec<u8> {
+    let mut body = form_type.to_vec();
+    encode_chunks(chunks, endian, &mut body);
+    let mut bytes = Vec::with_capacity(body.len() + 8);
+    bytes.extend_from_slice(magic);
+    bytes.extend_from_slice(&endian.write_u32(body.len() as u32));
+    bytes.extend(body);
+    bytes
+}
+
+pub(crate) fn parse_riff_wave_chunks(bytes: &[u8]) -> Result<Chunks, String> {
+    match parse_form(bytes, b"RIFF", Endian::Little)? {
+        (form_type, chunks) if &form_type == b"WAVE" => Ok(chunks),
+        _ => Err("Not a RIFF WAVE file".into()),
+    }
 }
 
 fn encode_chunks(chunks: &[(ChunkId, Vec<u8>)], endian: Endian, out: &mut Vec<u8>) {
@@ -83,13 +114,7 @@ fn encode_chunks(chunks: &[(ChunkId, Vec<u8>)], endian: Endian, out: &mut Vec<u8
 }
 
 pub(crate) fn encode_riff_wave(chunks: &[(ChunkId, Vec<u8>)]) -> Vec<u8> {
-    let mut body = Vec::from(*b"WAVE");
-    encode_chunks(chunks, Endian::Little, &mut body);
-    let mut bytes = Vec::with_capacity(body.len() + 8);
-    bytes.extend_from_slice(b"RIFF");
-    bytes.extend_from_slice(&(body.len() as u32).to_le_bytes());
-    bytes.extend(body);
-    bytes
+    encode_form(b"RIFF", b"WAVE", chunks, Endian::Little)
 }
 
 fn is_info_list(id: &ChunkId, data: &[u8]) -> bool {
@@ -118,23 +143,14 @@ fn info_field_id(key: &str) -> ChunkId {
     id
 }
 
-type InfoFields = Vec<(ChunkId, Vec<u8>)>;
+type InfoFields = Chunks;
 
+/// The fields of a `LIST INFO` body, keeping whatever parsed before any damage.
 fn parse_info_fields(bytes: &[u8]) -> InfoFields {
-    let mut offset = 0usize;
-    let mut fields = Vec::new();
-    while offset + 8 <= bytes.len() {
-        let id: ChunkId = bytes[offset..offset + 4].try_into().expect("4-byte slice");
-        let size = u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().expect("4-byte slice"))
-            as usize;
-        let start = offset + 8;
-        let Some(end) = start.checked_add(size).filter(|end| *end <= bytes.len()) else {
-            break;
-        };
-        fields.push((id, bytes[start..end].to_vec()));
-        offset = end + size % 2;
-    }
-    fields
+    scan_chunks(bytes, Endian::Little)
+        .map_while(Result::ok)
+        .map(|(id, range)| (id, bytes[range].to_vec()))
+        .collect()
 }
 
 fn set_info_field(fields: &mut InfoFields, key: &str, value: &str) {
@@ -251,14 +267,7 @@ pub(crate) fn move_aiff_tags_before_sound(path: &std::path::Path) -> Result<(), 
     use crate::path_util::path_io_error;
 
     let bytes = std::fs::read(path).map_err(|err| path_io_error("read", path, err))?;
-    if bytes.len() < 12 || &bytes[0..4] != b"FORM" {
-        return Err("Not an AIFF file".into());
-    }
-    let body = &bytes[12..];
-    let chunks: Vec<(ChunkId, Vec<u8>)> = chunk_ranges(body, Endian::Big)?
-        .into_iter()
-        .map(|(id, range)| (id, body[range].to_vec()))
-        .collect();
+    let (form_type, chunks) = parse_form(&bytes, b"FORM", Endian::Big)?;
     let Some(sound) = chunks.iter().position(|(id, _)| id == b"SSND") else {
         return Ok(());
     };
@@ -275,11 +284,6 @@ pub(crate) fn move_aiff_tags_before_sound(path: &std::path::Path) -> Result<(), 
         .cloned()
         .collect();
 
-    let mut form = bytes[8..12].to_vec();
-    encode_chunks(&ordered, Endian::Big, &mut form);
-    let mut out = Vec::with_capacity(form.len() + 8);
-    out.extend_from_slice(b"FORM");
-    out.extend_from_slice(&(form.len() as u32).to_be_bytes());
-    out.extend(form);
-    std::fs::write(path, out).map_err(|err| path_io_error("write tags to", path, err))
+    std::fs::write(path, encode_form(b"FORM", &form_type, &ordered, Endian::Big))
+        .map_err(|err| path_io_error("write tags to", path, err))
 }

@@ -23,8 +23,10 @@ impl ScratchDir {
     pub fn new(label: &str) -> Self {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+        // The 8-digit `_<id>` part marks the folder as throwaway to the path
+        // hints, so tests that tag files never take it for an artist name.
         let dir = std::env::temp_dir().join(format!(
-            "tundra-test-{label}-{}-{id}",
+            "tundra-test-{label}_{}_{id:08}",
             std::process::id()
         ));
         fs::create_dir_all(&dir).expect("scratch dir");
@@ -103,6 +105,26 @@ pub fn minimal_wav_bytes() -> Vec<u8> {
 
 pub fn write_minimal_wav(path: &Path) {
     fs::write(path, minimal_wav_bytes()).expect("write wav");
+}
+
+/// Replaces the RIFF INFO list of the WAV at `path` with `fields`, given as
+/// `(key, value)` pairs such as `("IKEY", "Snare")`, the way another tagger
+/// would have left the file.
+pub fn write_riff_info(path: &Path, fields: &[(&str, &str)]) {
+    use lofty::config::{ParseOptions, WriteOptions};
+    use lofty::file::AudioFile;
+    use lofty::iff::wav::{RiffInfoList, WavFile};
+
+    let mut wav = {
+        let mut file = fs::File::open(path).expect("open wav");
+        WavFile::read_from(&mut file, ParseOptions::new()).expect("parse wav")
+    };
+    let mut info = RiffInfoList::new();
+    for (key, value) in fields {
+        info.insert(key.to_string(), value.to_string());
+    }
+    wav.set_riff_info(info);
+    wav.save_to_path(path, WriteOptions::default()).expect("save RIFF INFO");
 }
 
 /// Stale tag tmp left by a crashed process (dead PID in the sidecar name).

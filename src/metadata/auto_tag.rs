@@ -5,8 +5,8 @@ use super::read::is_audio;
 use super::fields::TagFields;
 use super::hints::artist_hint_from_path;
 use super::read::{
-    durable_instrument, file_tundra_tag_version, instrument_from_marked_comment,
-    parse_tundra_comment_version, read_native_tags, tundra_tagged_file, TUNDRA_TAG_VERSION,
+    durable_instrument, file_tundra_tag_version, instrument_from_marked_comment, parse_tundra_comment_version,
+    read_native_tags, tundra_tagged_file, NativeTags, TUNDRA_TAG_VERSION,
 };
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -59,28 +59,37 @@ impl AutoTagFieldStatus {
     }
 }
 
-pub const AUTO_TAG_ALREADY_COMPLETE: &str =
-    "This file already has the tags Tundra would add.";
-pub const AUTO_TAG_INSTRUMENT_PRESENT: &str =
-    "Instrument tag already present. Apply to fill any missing artist or comment tags.";
+/// What auto-tag would change in a file, judged from its native tags.
+pub(crate) struct NativeInspection {
+    pub native: NativeTags,
+    /// The instrument from the file, or from the tag store when the file has none.
+    pub durable_instrument: Option<String>,
+    pub status: AutoTagFieldStatus,
+}
 
-pub fn auto_tag_field_status(path: &Path) -> Option<AutoTagFieldStatus> {
-    if !is_audio(path) {
-        return None;
-    }
+pub(crate) fn inspect_native(path: &Path) -> NativeInspection {
     let native = read_native_tags(path);
     let native_writable = native.is_some();
     let native = native.unwrap_or_default();
-    Some(AutoTagFieldStatus::from_parts(
+    let durable_instrument = durable_instrument(path, &native, None);
+    let status = AutoTagFieldStatus::from_parts(
         path,
-        durable_instrument(path, &native, None).unwrap_or_default().as_str(),
+        durable_instrument.as_deref().unwrap_or_default(),
         native.instrument.as_deref().unwrap_or_default(),
         native.artist.as_deref().unwrap_or_default(),
         native.comment.as_deref().unwrap_or_default(),
         native_writable,
-    ))
+    );
+    NativeInspection { native, durable_instrument, status }
 }
 
+pub fn auto_tag_field_status(path: &Path) -> Option<AutoTagFieldStatus> {
+    is_audio(path).then(|| inspect_native(path).status)
+}
+
+/// Like `auto_tag_field_status`, but takes artist and comment from `fields`
+/// (which include tag store values) and still reads the file for its native
+/// instrument and whether it can hold tags.
 pub fn auto_tag_field_status_from_fields(path: &Path, fields: &TagFields) -> AutoTagFieldStatus {
     let native = read_native_tags(path);
     AutoTagFieldStatus::from_parts(

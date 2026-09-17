@@ -162,41 +162,6 @@ impl TagFields {
     }
 }
 
-/// Compact tags for the waveform toolbar (instrument, bpm, key, genre).
-pub fn control_bar_tags(fields: &TagFields) -> Vec<(TagField, String)> {
-    let mut tags = Vec::new();
-    let instrument = fields.field_value(TagField::Instrument);
-    if !instrument.is_empty() {
-        tags.push((TagField::Instrument, instrument.to_string()));
-    }
-    if !fields.bpm.is_empty() {
-        tags.push((TagField::Bpm, fields.bpm.clone()));
-    }
-    if !fields.key.is_empty() {
-        tags.push((TagField::Key, fields.key.clone()));
-    }
-    if !fields.genre.is_empty() {
-        tags.push((TagField::Genre, fields.genre.clone()));
-    }
-    tags
-}
-
-/// Compact tag line for tests and text-only surfaces.
-#[cfg(test)]
-pub fn format_control_bar_tags(fields: &TagFields) -> Option<String> {
-    let tags = control_bar_tags(fields);
-    if tags.is_empty() {
-        None
-    } else {
-        Some(
-            tags.iter()
-                .map(|(field, value)| format!("{}: {value}", field.label()))
-                .collect::<Vec<_>>()
-                .join(" · "),
-        )
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TagParseError {
     MissingSeparator,
@@ -205,16 +170,14 @@ pub enum TagParseError {
     UnclosedQuote,
 }
 
-pub fn tag_parse_message(err: TagParseError) -> &'static str {
-    match err {
-        TagParseError::MissingSeparator => {
-            "Use field:value (example: title:My Song)."
-        }
-        TagParseError::UnknownField => {
-            "Unknown tag field. Try bpm, key, instrument, title, genre…"
-        }
-        TagParseError::EmptyValue => "Tag value cannot be empty.",
-        TagParseError::UnclosedQuote => "Closing quote missing in tag value.",
+impl std::fmt::Display for TagParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            TagParseError::MissingSeparator => "Use field:value (example: title:My Song).",
+            TagParseError::UnknownField => "Unknown tag field. Try bpm, key, instrument, title, genre…",
+            TagParseError::EmptyValue => "Tag value cannot be empty.",
+            TagParseError::UnclosedQuote => "Closing quote missing in tag value.",
+        })
     }
 }
 

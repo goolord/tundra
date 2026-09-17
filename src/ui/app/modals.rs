@@ -3,13 +3,10 @@
 use super::{pick_audio_file, pick_folder, run_blocking, App, Modal};
 use crate::auto_tag::{self, ClassifyError};
 use crate::library::AddDirectory;
-use crate::metadata::{
-    auto_tag_field_status, instrument_tag, write_auto_tags, write_manual_tags, AUTO_TAG_ALREADY_COMPLETE,
-    AUTO_TAG_INSTRUMENT_PRESENT,
-};
+use crate::metadata::{auto_tag_field_status, instrument_tag, write_auto_tags, write_manual_tags};
 use crate::ui::auto_tag::AutoTagState;
 use crate::ui::message::{AutoTagMsg, Message, SettingsMsg, TagEditorMsg};
-use crate::ui::settings::SELECT_AUDIO_FIRST;
+use crate::ui::settings::{AUTO_TAG_ALREADY_COMPLETE, AUTO_TAG_INSTRUMENT_PRESENT, SELECT_AUDIO_FIRST};
 use crate::ui::tag_editor::TagEditorState;
 use iced::Task;
 use std::path::PathBuf;

@@ -843,7 +843,7 @@ mod tests {
     fn failed_files_cannot_be_selected_or_checked() {
         let mut state = state();
         state.select_file(key(0, 1), false, false);
-        assert!(state.selection.is_empty());
+        assert_eq!(state.selection.len(), 0);
         state.set_all_accepted(true);
         assert_eq!(state.accepted_count(), 4);
         assert!(!state.groups[0].files[1].accepted);
@@ -864,7 +864,7 @@ mod tests {
         state.select_directory(1, false, false);
         assert_eq!(state.selection.len(), 2);
         state.select_directory(1, false, true);
-        assert!(state.selection.is_empty(), "ctrl+click on a fully selected folder clears it");
+        assert_eq!(state.selection.len(), 0, "ctrl+click on a fully selected folder clears it");
 
         state.select_file(key(0, 2), false, false);
         state.select_directory(1, true, false);

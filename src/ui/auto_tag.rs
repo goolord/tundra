@@ -1,11 +1,11 @@
 //! The single-file Auto Tag modal.
 
 use super::message::{AutoTagMsg, Message};
-use super::settings::NO_AUDIO_SELECTED;
+use super::settings::{AUTO_TAG_ALREADY_COMPLETE, AUTO_TAG_INSTRUMENT_PRESENT, NO_AUDIO_SELECTED};
 use super::style;
 use super::widgets::{modal_button, modal_info_row, modal_shell, spacer};
 use crate::auto_tag::{ClassificationResult, ClassifyError};
-use crate::metadata::{AutoTagFieldStatus, AUTO_TAG_ALREADY_COMPLETE, AUTO_TAG_INSTRUMENT_PRESENT};
+use crate::metadata::AutoTagFieldStatus;
 use iced::widget::{button, column, container, row, text, Column};
 use iced::{Alignment, Color, Element, Length, Theme};
 use std::path::PathBuf;

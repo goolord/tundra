@@ -5,7 +5,9 @@ use super::bulk_auto_tag::BulkFileKey;
 use super::waveform::WaveFormView;
 use crate::auto_tag::{ClassificationResult, ClassifyError};
 use crate::bulk_auto_tag::{BulkApplySummary, BulkScanSummary, ScanError};
-use crate::metadata::{CachedMetadata, PersistedCaches, SavedTo, SearchResult, TagField};
+use crate::library::cache::PersistedCaches;
+use crate::library::search::SearchOutput;
+use crate::metadata::{CachedMetadata, SavedTo, TagField};
 use crate::playback::{PlayerEvent, PlayerWorker};
 use futures::channel::mpsc::UnboundedReceiver;
 use futures::future::Aborted;
@@ -104,7 +106,7 @@ pub enum FilterMsg {
     ToggleCaseSensitive,
     ToggleShowDirectories,
     ToggleFavoritesOnly,
-    SearchCompleted { generation: u64, result: Result<SearchResult, Aborted> },
+    SearchCompleted { generation: u64, result: Result<SearchOutput, Aborted> },
 }
 
 #[derive(Debug, Clone)]

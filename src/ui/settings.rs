@@ -1,4 +1,4 @@
-//! The settings modal, and messages about the allowed directories.
+//! The settings modal, and user-facing messages shared by several views.
 
 use super::message::{Message, SettingsMsg};
 use super::style;
@@ -12,6 +12,9 @@ pub const FOLDER_OUTSIDE_ALLOWED: &str = "Folder must be inside allowed director
 pub const UNSUPPORTED_AUDIO: &str = "Choose a supported audio file.";
 pub const SELECT_AUDIO_FIRST: &str = "Select an audio file first.";
 pub const NO_AUDIO_SELECTED: &str = "No audio file selected";
+pub const AUTO_TAG_ALREADY_COMPLETE: &str = "This file already has the tags Tundra would add.";
+pub const AUTO_TAG_INSTRUMENT_PRESENT: &str =
+    "Instrument tag already present. Apply to fill any missing artist or comment tags.";
 
 fn directory_row(path: &Path) -> Element<'static, Message> {
     container(
