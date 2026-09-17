@@ -4,8 +4,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::path_util::sidecar;
-use crate::path_util::REPLACE_OLD_SUFFIX;
+use crate::safe_write::sidecar;
+use crate::safe_write::REPLACE_OLD_SUFFIX;
 
 /// PID guaranteed dead on all platforms (`u32::MAX - 1`).
 pub const DEAD_PID: u32 = 4294967294;
@@ -118,7 +118,7 @@ pub fn restore_dest_from_crash_aside(dir: &Path, dest: &Path, aside_bytes: &[u8]
     )
     .expect("crash aside");
     let _ = fs::remove_file(dest);
-    crate::path_util::reclaim_write_sidecars(dir);
+    crate::safe_write::reclaim_write_sidecars(dir);
 }
 
 /// Holds `dest` open so same-directory atomic replace fails cross-platform.

@@ -278,7 +278,7 @@ impl FileSelector {
     pub fn set_file_list(&mut self, file_list: Vec<FileButton>, list_error: Option<String>) {
         let key_at = |list: &[FileButton], index: usize| {
             list.get(index)
-                .map(|entry| crate::path_util::cache_key(entry.file_path.clone()))
+                .map(|entry| crate::path_util::cache_key(&entry.file_path))
         };
         let selected: std::collections::HashSet<PathBuf> = self
             .selection
@@ -297,7 +297,7 @@ impl FileSelector {
         let mut new_anchor = None;
         let mut indices = Vec::new();
         for (index, entry) in self.file_list.iter().enumerate() {
-            let key = crate::path_util::cache_key(entry.file_path.clone());
+            let key = crate::path_util::cache_key(&entry.file_path);
             if selected.contains(&key) {
                 indices.push(index);
                 if anchor.as_ref() == Some(&key) {
@@ -313,11 +313,11 @@ impl FileSelector {
     }
 
     pub fn sync_selection_for_path(&mut self, path: &Path) {
-        let key = crate::path_util::cache_key(path.to_path_buf());
+        let key = crate::path_util::cache_key(path);
         if let Some(index) = self
             .file_list
             .iter()
-            .position(|entry| crate::path_util::cache_key(entry.file_path.clone()) == key)
+            .position(|entry| crate::path_util::cache_key(&entry.file_path) == key)
         {
             self.selection.select_only(index);
         }

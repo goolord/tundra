@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use super::AllowedDirectories;
+use crate::locks::{lock, read, write};
 use crate::metadata::{refresh_cached_metadata, CachedMetadata, PersistedCaches, TagFields};
 
 pub type Listings = HashMap<PathBuf, Vec<PathBuf>>;
@@ -36,8 +37,9 @@ pub struct PersistedMap<V> {
 pub type DirCache = PersistedMap<Vec<PathBuf>>;
 pub type MetadataCache = PersistedMap<CachedMetadata>;
 
+/// A snapshot of the map as it is now; later writes do not affect it.
 pub fn lock_read<V>(map: &Shared<V>) -> Arc<HashMap<PathBuf, V>> {
-    Arc::clone(&map.read().unwrap_or_else(std::sync::PoisonError::into_inner))
+    Arc::clone(&read(map))
 }
 
 impl<V> PersistedMap<V>
@@ -62,10 +64,7 @@ where
     }
 
     fn update<R>(&mut self, change: impl FnOnce(&mut HashMap<PathBuf, V>) -> R) -> R {
-        let mut guard = self
-            .map
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut guard = write(&self.map);
         change(Arc::make_mut(&mut guard))
     }
 
@@ -103,7 +102,7 @@ where
         // Borrowed keys and values encode to the same bytes as the owned map.
         let persistable: HashMap<&PathBuf, &V> =
             map.iter().filter(|(_, value)| value.worth_saving()).collect();
-        crate::path_util::write_bincode(path, &persistable, &path.display().to_string());
+        crate::app_data::write_bincode(path, &persistable, &path.display().to_string());
     }
 
     /// Write now, on this thread. Used on exit, when a pending background save
@@ -111,7 +110,7 @@ where
     pub fn flush(&self) {
         if self.loaded.load(Ordering::SeqCst)
             && self.save_pending.swap(false, Ordering::SeqCst)
-            && let Some(path) = crate::path_util::cache_file(self.file)
+            && let Some(path) = crate::app_data::cache_file(self.file)
         {
             Self::persist_map_to(&path, &self.snapshot());
         }
@@ -124,14 +123,14 @@ where
         if !self.loaded.load(Ordering::SeqCst) || self.save_pending.swap(true, Ordering::SeqCst) {
             return;
         }
-        let Some(path) = crate::path_util::cache_file(self.file) else {
+        let Some(path) = crate::app_data::cache_file(self.file) else {
             self.save_pending.store(false, Ordering::SeqCst);
             return;
         };
         let (map, pending) = (self.share(), Arc::clone(&self.save_pending));
         std::thread::spawn(move || {
             std::thread::sleep(SAVE_DELAY);
-            let _serial = SAVE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _serial = lock(&SAVE_LOCK);
             pending.store(false, Ordering::SeqCst);
             Self::persist_map_to(&path, &lock_read(&map));
         });
@@ -159,14 +158,14 @@ impl DirCache {
     }
 
     pub fn insert(&mut self, dir: PathBuf, listing: Vec<PathBuf>) {
-        let key = crate::path_util::cache_key(dir);
+        let key = crate::path_util::cache_key(&dir);
         self.update(|map| map.insert(key, listing));
         self.persist();
     }
 
     pub fn contains_key(&self, dir: &Path) -> bool {
         self.snapshot()
-            .contains_key(&crate::path_util::cache_key(dir.to_path_buf()))
+            .contains_key(&crate::path_util::cache_key(dir))
     }
 }
 
@@ -191,7 +190,7 @@ impl MetadataCache {
 
     pub fn merge_path(&mut self, path: &Path, entry: CachedMetadata) {
         self.merge(HashMap::from([(
-            crate::path_util::cache_key(path.to_path_buf()),
+            crate::path_util::cache_key(path),
             entry,
         )]));
     }
@@ -207,7 +206,7 @@ impl MetadataCache {
 
     /// Tags for `path`, re-read when the file changed since it was indexed.
     pub fn tag_fields_for(&mut self, path: &Path) -> TagFields {
-        if let Some(mtime_secs) = crate::metadata::file_mtime_secs(path) {
+        if let Some(mtime_secs) = crate::path_util::file_mtime_secs(path) {
             let map = self.snapshot();
             let current = crate::path_util::cache_lookup_keys(path)
                 .iter()
@@ -236,30 +235,30 @@ fn keep_newer(map: &mut MetadataMap, key: PathBuf, entry: CachedMetadata) {
 }
 
 fn load_map<V: serde::de::DeserializeOwned>(file: &str) -> HashMap<PathBuf, V> {
-    crate::path_util::cache_file(file)
-        .and_then(|path| crate::path_util::read_bincode(&path))
+    crate::app_data::cache_file(file)
+        .and_then(|path| crate::app_data::read_bincode(&path))
         .unwrap_or_default()
 }
 
 /// Runs off the UI thread at start-up.
 pub fn load_startup_caches(allowed: AllowedDirectories) -> PersistedCaches {
     // Temps from an atomic save that crashed; the live file is intact.
-    for dir in [crate::path_util::tundra_cache_dir(), crate::path_util::tundra_config_dir()]
+    for dir in [crate::app_data::cache_dir(), crate::app_data::config_dir()]
         .into_iter()
         .flatten()
     {
-        crate::path_util::reclaim_write_sidecars(&dir);
+        crate::safe_write::reclaim_write_sidecars(&dir);
     }
 
     let mut dirs: Listings = load_map::<Vec<PathBuf>>(DIR_CACHE_FILE)
         .into_iter()
-        .map(|(key, listing)| (crate::path_util::cache_key(key), listing))
+        .map(|(key, listing)| (crate::path_util::cache_key(&key), listing))
         .collect();
     // Older builds also stored raw path spellings next to cache keys; fold them
     // into one entry per file, keeping the newest.
     let mut metadata = MetadataMap::new();
     for (key, entry) in load_map::<CachedMetadata>(METADATA_CACHE_FILE) {
-        keep_newer(&mut metadata, crate::path_util::cache_key(key), entry);
+        keep_newer(&mut metadata, crate::path_util::cache_key(&key), entry);
     }
     if !allowed.is_empty() {
         dirs.retain(|path, _| allowed.contains_cached_path(path));
@@ -300,8 +299,8 @@ mod tests {
     fn legacy_spellings_fold_into_the_newest_entry() {
         let mut map = MetadataMap::new();
         let raw = PathBuf::from(r"C:\Samples\Kick.wav");
-        keep_newer(&mut map, crate::path_util::cache_key(raw.clone()), entry(50, "new"));
-        keep_newer(&mut map, crate::path_util::cache_key(raw), entry(40, "old raw spelling"));
+        keep_newer(&mut map, crate::path_util::cache_key(&raw), entry(50, "new"));
+        keep_newer(&mut map, crate::path_util::cache_key(&raw), entry(40, "old raw spelling"));
         assert_eq!(map.len(), 1);
         assert_eq!(map.values().next().map(|cached| cached.fields.title.as_str()), Some("new"));
     }

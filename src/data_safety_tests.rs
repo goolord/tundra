@@ -3,7 +3,7 @@
 use std::fs;
 
 use crate::metadata::{write_auto_tags, TUNDRA_TAG_VERSION};
-use crate::path_util::{
+use crate::safe_write::{
     reclaim_write_sidecars, sidecar, write_atomic, REPLACE_OLD_SUFFIX, TAG_BAK_SUFFIX,
     TAG_TMP_SUFFIX,
 };

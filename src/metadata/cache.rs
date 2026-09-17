@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 use super::read::is_audio;
 
 use super::fields::TagFields;
-use super::read::{file_mtime_secs, read_tag_fields};
+use super::read::read_tag_fields;
+use crate::path_util::file_mtime_secs;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CachedMetadata {
@@ -61,7 +62,7 @@ impl MetadataLookup {
     fn store_fields(&mut self, path: &Path, mtime_secs: u64, fields: TagFields) -> TagFields {
         let fields_clone = fields.clone();
         self.new_entries.insert(
-            crate::path_util::cache_key(path.to_path_buf()),
+            crate::path_util::cache_key(path),
             CachedMetadata {
                 mtime_secs,
                 fields,

@@ -391,11 +391,11 @@ fn should_stop_artist_walk(path: &Path) -> bool {
         [Some(temp), canonical]
             .into_iter()
             .flatten()
-            .map(crate::path_util::cache_key)
+            .map(|dir| crate::path_util::cache_key(&dir))
             .collect()
     });
     path.parent().is_none()
-        || TEMP_DIRS.contains(&crate::path_util::cache_key(path.to_path_buf()))
+        || TEMP_DIRS.contains(&crate::path_util::cache_key(path))
 }
 
 fn path_segment_is_ephemeral_temp(name: &str) -> bool {

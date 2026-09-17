@@ -5,11 +5,13 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::path_util::file_mtime_secs;
+
 use super::hints::{hint_label_for_term, hint_name_tokens, HintSource};
 use super::riff::{encode_riff_wave, parse_riff_wave_chunks};
 use super::write::stage_and_replace;
 use super::read::{
-    file_mtime_secs, instrument_tag, read_tag_fields, tundra_tag_is_current, WAV_ARTIST_KEY, WAV_COMMENT_KEY, WAV_GENRE_KEY,
+    instrument_tag, read_tag_fields, tundra_tag_is_current, WAV_ARTIST_KEY, WAV_COMMENT_KEY, WAV_GENRE_KEY,
     WAV_INSTRUMENT_KEY, WAV_TITLE_KEY, VORBIS_COMMENT_KEY, VORBIS_INSTRUMENT_KEY,
     TUNDRA_TAG_VERSION,
 };
@@ -364,7 +366,7 @@ fn instrument_hint(path: &Path) -> Option<(String, HintSource)> {
         let audio = dir.join("snare.wav");
         std::fs::write(&audio, b"RIFF").unwrap();
         let mtime_secs = file_mtime_secs(&audio).expect("temp file mtime");
-        let key = crate::path_util::cache_key(audio.clone());
+        let key = crate::path_util::cache_key(&audio);
         let mut cache = HashMap::new();
         cache.insert(
             key,

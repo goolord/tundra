@@ -1,6 +1,6 @@
 //! Small UI preferences saved between runs, and window helpers.
 
-use crate::path_util::{cache_file, read_bincode, write_bincode};
+use crate::app_data::{cache_file, read_bincode, write_bincode};
 use crate::playback::clamp_volume;
 use crate::ui::message::Message;
 use iced::{window, Task};

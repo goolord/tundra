@@ -2,41 +2,15 @@
 //! with the file's size and modification time.
 
 use super::ClassificationResult;
-use crate::path_util;
+use crate::path_util::{self, FileStamp};
+use crate::app_data;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex, MutexGuard};
-use std::time::SystemTime;
 
 // v6: tier 2 is YAMNet; labels from earlier models are not reused.
 const CACHE_FILE: &str = "classify_cache_v6.bin";
-
-/// Identifies one version of a file. Size is included because copies and
-/// archive extraction often keep the original mtime (and exFAT has 2 s
-/// resolution), so mtime alone can match a different file.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-pub struct FileStamp {
-    secs: u64,
-    nanos: u32,
-    len: u64,
-}
-
-impl FileStamp {
-    pub fn of(path: &Path) -> Option<Self> {
-        let meta = std::fs::metadata(path).ok()?;
-        let modified = meta
-            .modified()
-            .ok()?
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .ok()?;
-        Some(Self {
-            secs: modified.as_secs(),
-            nanos: modified.subsec_nanos(),
-            len: meta.len(),
-        })
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CachedClassification {
@@ -55,13 +29,13 @@ struct ClassifyCache {
 }
 
 fn key(path: &Path) -> PathBuf {
-    path_util::cache_key(path.to_path_buf())
+    path_util::cache_key(path)
 }
 
 impl ClassifyCache {
     fn load() -> Self {
-        let entries = path_util::cache_file(CACHE_FILE)
-            .and_then(|path| path_util::read_bincode(&path))
+        let entries = app_data::cache_file(CACHE_FILE)
+            .and_then(|path| app_data::read_bincode(&path))
             .unwrap_or_default();
         Self {
             entries,
@@ -71,14 +45,14 @@ impl ClassifyCache {
 
     fn persist(&mut self) {
         if self.dirty
-            && let Some(path) = path_util::cache_file(CACHE_FILE)
+            && let Some(path) = app_data::cache_file(CACHE_FILE)
         {
             self.persist_to(&path);
         }
     }
 
     fn persist_to(&mut self, path: &Path) {
-        if path_util::write_bincode(path, &self.entries, "classify cache") {
+        if app_data::write_bincode(path, &self.entries, "classify cache") {
             self.dirty = false;
         }
     }
@@ -115,9 +89,7 @@ static CLASSIFY_CACHE: LazyLock<Mutex<ClassifyCache>> =
     LazyLock::new(|| Mutex::new(ClassifyCache::load()));
 
 fn cache() -> MutexGuard<'static, ClassifyCache> {
-    CLASSIFY_CACHE
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+    crate::locks::lock(&CLASSIFY_CACHE)
 }
 
 pub fn get_cached(path: &Path) -> Option<ClassificationResult> {
@@ -196,7 +168,7 @@ mod tests {
         assert_eq!(dir.sidecar_count(), 0);
 
         let entries: HashMap<PathBuf, CachedClassification> =
-            path_util::read_bincode(&path).expect("reload");
+            app_data::read_bincode(&path).expect("reload");
         let reloaded = ClassifyCache {
             entries,
             dirty: false,

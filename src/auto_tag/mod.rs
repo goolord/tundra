@@ -45,7 +45,7 @@ pub struct BundledPython {
 }
 
 pub fn bundled_python() -> Option<BundledPython> {
-    let packaged = crate::path_util::find_beside(&["python"], |dir| {
+    let packaged = crate::platform::find_beside(&["python"], |dir| {
         dir.join("site-packages").is_dir()
     })
     .and_then(|python| {
@@ -67,7 +67,7 @@ pub fn bundled_python() -> Option<BundledPython> {
         const VENV_REL: &str = "scripts/.venv/Scripts/python.exe";
         #[cfg(not(windows))]
         const VENV_REL: &str = "scripts/.venv/bin/python3";
-        crate::path_util::find_beside(&[VENV_REL], |candidate| candidate.is_file()).map(|exe| {
+        crate::platform::find_beside(&[VENV_REL], |candidate| candidate.is_file()).map(|exe| {
             BundledPython {
                 exe,
                 site_packages: None,
@@ -104,7 +104,7 @@ fn classify_file_inner(path: &Path) -> Result<ClassificationResult, ClassifyErro
 
     // Stamp before analysis: if the file changes while it is being analysed,
     // the result is stored against the old version and never matches.
-    let stamp = classify_cache::FileStamp::of(path);
+    let stamp = crate::path_util::FileStamp::of(path);
     let tier1 = tier1::classify(path)?;
     if tier1.instrument.is_some() {
         let instrument = tier1.instrument.ok_or_else(|| {
@@ -242,7 +242,7 @@ fn apply_hint(
 
 pub fn scripts_dir() -> PathBuf {
     const WORKER: &str = "classifier_worker.py";
-    crate::path_util::find_beside(&["scripts"], |dir| dir.join(WORKER).is_file())
+    crate::platform::find_beside(&["scripts"], |dir| dir.join(WORKER).is_file())
         .or_else(|| {
             let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts");
             dir.is_dir().then_some(dir)
@@ -252,7 +252,7 @@ pub fn scripts_dir() -> PathBuf {
 
 /// Directory holding the YAMNet model and its class map (see `tools/yamnet`).
 pub fn bundled_models_dir() -> Option<PathBuf> {
-    crate::path_util::find_beside(&["models", "resources/models"], |dir| {
+    crate::platform::find_beside(&["models", "resources/models"], |dir| {
         dir.join("yamnet.onnx").is_file() && dir.join("yamnet_class_map.csv").is_file()
     })
 }
@@ -276,7 +276,7 @@ pub fn configure_classifier_command(command: &mut Command) {
         command.env("TUNDRA_MODELS", &models);
         command.env("TUNDRA_ONNX_DL", "1");
     }
-    crate::path_util::hide_console(command);
+    crate::platform::hide_console(command);
 }
 
 #[cfg(test)]

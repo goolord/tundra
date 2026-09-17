@@ -68,7 +68,7 @@ pub(super) fn drag_out_notice(intro: &str) -> String {
     let gesture = if cfg!(target_os = "macos") { "Control-click or use a two-finger click" } else { "Right-click" };
     format!(
         "{intro} {gesture} the file and choose \"{}\", then drag it from there.",
-        crate::path_util::file_manager_label()
+        crate::platform::file_manager_label()
     )
 }
 

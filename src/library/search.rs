@@ -35,11 +35,11 @@ pub struct SearchRequest {
 /// happened to visit, which is a small slice of the library — treating those as coverage is
 /// what made tag-only searches miss most files.
 pub fn cached_paths_for_root(cache: &HashMap<PathBuf, Vec<PathBuf>>, root: &Path) -> (Vec<PathBuf>, bool) {
-    let root_key = cache_key(root.to_path_buf());
+    let root_key = cache_key(root);
     let mut listings: HashMap<PathBuf, &Vec<PathBuf>> = HashMap::new();
     let mut root_walked = false;
     for (key, cached) in cache {
-        let listing_key = cache_key(key.clone());
+        let listing_key = cache_key(&key);
         if !listing_key.starts_with(&root_key) {
             continue;
         }
@@ -107,7 +107,7 @@ pub async fn execute_file_search(request: SearchRequest) -> SearchResult {
     }
 
     let mut seen = HashSet::new();
-    paths.retain(|path| seen.insert(cache_key(path.clone())));
+    paths.retain(|path| seen.insert(cache_key(&path)));
 
     if !tag_filters.is_empty() {
         // Safety net for files a walk can no longer reach (renamed or temporarily offline
@@ -120,7 +120,7 @@ pub async fn execute_file_search(request: SearchRequest) -> SearchResult {
                 continue;
             }
             let resolved = resolve_open_path(path, paths.iter().map(PathBuf::as_path));
-            if seen.insert(cache_key(resolved.clone())) {
+            if seen.insert(cache_key(&resolved)) {
                 paths.push(resolved);
             }
         }

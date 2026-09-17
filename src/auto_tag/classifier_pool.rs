@@ -281,10 +281,7 @@ impl ClassifierPool {
     }
 
     fn spawn(&self) -> Result<Worker, ClassifyError> {
-        let mut failure = self
-            .last_spawn_failure
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut failure = crate::locks::lock(&self.last_spawn_failure);
         if let Some((at, err)) = failure.as_ref()
             && at.elapsed() < SPAWN_RETRY_AFTER
         {
@@ -293,10 +290,7 @@ impl ClassifierPool {
         *failure = None;
         drop(failure);
         Worker::spawn().inspect_err(|err| {
-            *self
-                .last_spawn_failure
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((Instant::now(), err.clone()));
+            *crate::locks::lock(&self.last_spawn_failure) = Some((Instant::now(), err.clone()));
         })
     }
 

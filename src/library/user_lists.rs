@@ -1,6 +1,7 @@
 //! User-owned path lists: the allowed search directories and favorites.
 
-use crate::path_util::{cache_file, canonical_path, config_file, load_user_data, write_bincode};
+use crate::app_data::{cache_file, config_file, load_user_data, write_bincode};
+use crate::path_util::canonical_path;
 use std::path::{Path, PathBuf};
 
 /// A sorted path list saved as bincode. User data, so loading never loses it:
@@ -129,7 +130,7 @@ impl FavoritesStore {
     /// Whether a row from a directory listing is starred. Listing paths are
     /// already resolved, so this skips the filesystem and is cheap per frame.
     pub fn contains_listed(&self, path: &Path) -> bool {
-        let key = crate::path_util::cache_key(path.to_path_buf());
+        let key = crate::path_util::cache_key(path);
         self.paths().contains(&key)
     }
 
@@ -151,14 +152,14 @@ fn migrate_settings_from_cache(config_path: &Path) {
         return;
     }
     if let Some(cache_path) = cache_file("allowed_directories.bin") {
-        crate::path_util::migrate_file(&cache_path, config_path);
+        crate::app_data::migrate_file(&cache_path, config_path);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::path_util::{reclaim_write_sidecars, sidecar, REPLACE_OLD_SUFFIX};
+    use crate::safe_write::{reclaim_write_sidecars, sidecar, REPLACE_OLD_SUFFIX};
     use crate::test_fixtures::ScratchDir;
 
     #[test]
@@ -228,12 +229,12 @@ mod tests {
         std::fs::create_dir_all(src.parent().unwrap()).expect("cache dir");
         std::fs::write(&src, b"old").expect("src");
 
-        crate::path_util::migrate_file(&src, &dest);
+        crate::app_data::migrate_file(&src, &dest);
         assert_eq!(std::fs::read(&dest).expect("dest"), b"old");
         assert!(!src.exists());
 
         std::fs::write(&src, b"stale").expect("src again");
-        crate::path_util::migrate_file(&src, &dest);
+        crate::app_data::migrate_file(&src, &dest);
         assert_eq!(std::fs::read(&dest).expect("dest"), b"old");
     }
 }

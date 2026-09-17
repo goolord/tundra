@@ -203,7 +203,7 @@ impl App {
 
     /// Walk `dir` on a background thread unless a walk of it is already running.
     pub(super) fn walk_task(&mut self, dir: PathBuf) -> Task<Message> {
-        let key = crate::path_util::cache_key(dir.clone());
+        let key = crate::path_util::cache_key(&dir);
         if !self.walks_in_progress.insert(key.clone()) {
             return Task::none();
         }
@@ -258,7 +258,7 @@ impl App {
     }
 
     pub(super) fn insert_walked_directory(&mut self, dir: PathBuf, children: Vec<PathBuf>) -> Task<Message> {
-        self.walks_in_progress.remove(&crate::path_util::cache_key(dir.clone()));
+        self.walks_in_progress.remove(&crate::path_util::cache_key(&dir));
         if !self.allowed_directories.contains_path(&dir) {
             return Task::none();
         }

@@ -489,7 +489,7 @@ fn copy_path(path: &Path) -> Task<Message> {
 }
 
 fn reveal(path: &Path) -> Task<Message> {
-    crate::path_util::reveal_in_file_manager(path);
+    crate::platform::reveal_in_file_manager(path);
     Task::none()
 }
 

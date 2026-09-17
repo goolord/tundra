@@ -351,4 +351,13 @@ impl ManualTagEdits {
             .iter()
             .all(|field| self.field_value(*field).trim().is_empty())
     }
+
+    /// Every field with surrounding whitespace removed.
+    pub fn trimmed(&self) -> Self {
+        let mut trimmed = Self::default();
+        for field in Self::EDITOR_FIELDS {
+            trimmed.set_field(field, self.field_value(field).trim().to_string());
+        }
+        trimmed
+    }
 }

@@ -10,7 +10,8 @@ mod user_lists;
 pub use user_lists::{AddDirectory, AllowedDirectories, FavoritesStore};
 
 use crate::metadata::is_audio;
-use crate::path_util::{is_hidden, SidecarSweep};
+use crate::path_util::is_hidden;
+use crate::safe_write::SidecarSweep;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
@@ -71,7 +72,7 @@ pub fn list_directory(dir: &Path) -> Result<Vec<ListedEntry>, String> {
 #[cfg(test)]
 mod tests {
     use super::walk_directory;
-    use crate::path_util::{sidecar, REPLACE_OLD_SUFFIX};
+    use crate::safe_write::{sidecar, REPLACE_OLD_SUFFIX};
     use crate::test_fixtures::{dead_pid_tag_tmp, ScratchDir};
     use std::collections::HashSet;
     use std::path::PathBuf;

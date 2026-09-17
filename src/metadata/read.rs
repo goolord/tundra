@@ -18,14 +18,6 @@ pub(crate) fn push_field(value: &mut String, source: Option<impl AsRef<str>>) {
     }
 }
 
-pub fn file_mtime_secs(path: &Path) -> Option<u64> {
-    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
-    modified
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()
-        .map(|duration| duration.as_secs())
-}
-
 pub(crate) fn push_instrument_field(fields: &mut TagFields, tag: &Tag) {
     if let Some(value) = explicit_instrument_from_tag(tag) {
         push_field(&mut fields.explicit_instrument, Some(&value));
@@ -456,7 +448,7 @@ fn overlay_nonempty(dest: &mut String, source: &str) {
 
 pub(crate) fn overlay_sidecar_manual_fields(
     fields: &mut TagFields,
-    sidecar: &crate::tag_store::SidecarManualFields,
+    sidecar: &super::fields::ManualTagEdits,
 ) {
     overlay_nonempty(&mut fields.title, &sidecar.title);
     overlay_nonempty(&mut fields.artist, &sidecar.artist);

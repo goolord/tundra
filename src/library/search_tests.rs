@@ -1,5 +1,6 @@
 use super::{cached_paths_for_root, execute_file_search, SearchRequest, Shared};
-use crate::metadata::{file_mtime_secs, CachedMetadata, SearchResult, TagField, TagFields, TagFilter};
+use crate::metadata::{CachedMetadata, SearchResult, TagField, TagFields, TagFilter};
+use crate::path_util::file_mtime_secs;
 use crate::path_util::cache_key;
 use crate::test_fixtures::ScratchDir;
 use std::collections::HashMap;
@@ -29,7 +30,7 @@ fn library_with_tagged_kick() -> (ScratchDir, PathBuf, Shared<CachedMetadata>) {
     let audio = nested.join("one shot.wav");
     std::fs::write(&audio, b"RIFF").unwrap();
     let mtime = file_mtime_secs(&audio).expect("temp file mtime");
-    let metadata = shared(HashMap::from([(cache_key(audio.clone()), kick_tags(mtime))]));
+    let metadata = shared(HashMap::from([(cache_key(&audio), kick_tags(mtime))]));
     (root, audio, metadata)
 }
 
@@ -53,8 +54,8 @@ fn search(roots: &[&Path], metadata: Shared<CachedMetadata>, file_query: &str, i
 
 /// Results come back however the walk or the index spelled the path, so compare normalized.
 fn contains_path(paths: &[PathBuf], wanted: &Path) -> bool {
-    let wanted = cache_key(wanted.to_path_buf());
-    paths.iter().any(|path| cache_key(path.clone()) == wanted)
+    let wanted = cache_key(wanted);
+    paths.iter().any(|path| cache_key(&path) == wanted)
 }
 
 #[test]
@@ -62,7 +63,7 @@ fn file_query_keeps_tagged_files_the_walk_cannot_reach() {
     let (root, _, metadata) = library_with_tagged_kick();
     // Renamed, or on a drive that is momentarily offline, but still in the index.
     let ghost = root.path().join("Drums").join("ghost.wav");
-    Arc::make_mut(&mut metadata.write().unwrap()).insert(cache_key(ghost.clone()), kick_tags(0));
+    Arc::make_mut(&mut metadata.write().unwrap()).insert(cache_key(&ghost), kick_tags(0));
 
     let tag_only = search(&[root.path()], Arc::clone(&metadata), "", "kick").paths;
     assert!(contains_path(&tag_only, &ghost), "tag-only search missed {ghost:?}, got {tag_only:?}");

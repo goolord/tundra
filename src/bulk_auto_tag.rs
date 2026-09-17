@@ -253,7 +253,7 @@ fn is_link_or_reparse(path: &Path) -> bool {
 /// so a bulk write cannot escape the folder the user picked.
 fn collect_audio_paths(root: &Path, progress: &BulkScanProgress, cancel: &AtomicBool) -> Result<Vec<PathBuf>, ScanError> {
     let mut paths = Vec::new();
-    let mut sweep = crate::path_util::SidecarSweep::default();
+    let mut sweep = crate::safe_write::SidecarSweep::default();
     let walk = WalkDir::new(root)
         .follow_links(false)
         .into_iter()
@@ -413,7 +413,7 @@ pub fn apply_items(items: &[BulkApplyItem], progress: Option<&BulkScanProgress>,
             Ok(true) => {
                 summary.written += 1;
                 if let Some(entry) = crate::metadata::refresh_cached_metadata(&item.path) {
-                    summary.refreshed.insert(crate::path_util::cache_key(item.path.clone()), entry);
+                    summary.refreshed.insert(crate::path_util::cache_key(&item.path), entry);
                 }
             }
             Ok(false) => summary.unchanged += 1,

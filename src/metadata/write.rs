@@ -19,7 +19,7 @@ use lofty::ogg::tag::VorbisComments;
 use lofty::tag::Accessor;
 use lofty::TextEncoding;
 
-use crate::path_util::{open_file, path_io_error};
+use crate::path_util::{open_file, path_io_error, FileStamp};
 use super::read::is_audio;
 
 use super::auto_tag::AutoTagFieldStatus;
@@ -193,7 +193,7 @@ pub(crate) fn write_tags(path: &Path, edit: &TagEdit) -> Result<(), String> {
             path.display()
         ));
     }
-    let sidecar_stamp = crate::tag_store::file_stamp(path);
+    let sidecar_stamp = FileStamp::of(path);
 
     stage_and_replace(&target, |staged| {
         apply_tag_edit(staged, container, edit)?;
@@ -202,9 +202,7 @@ pub(crate) fn write_tags(path: &Path, edit: &TagEdit) -> Result<(), String> {
 
     // Tundra's own write changes mtime and size. Carry any sidecar row across
     // so labels stored there are not mistaken for a different file's.
-    if let Some(stamp) = sidecar_stamp {
-        crate::tag_store::restamp(&path, stamp);
-    }
+    crate::tag_store::restamp(path, sidecar_stamp);
     Ok(())
 }
 
@@ -220,22 +218,17 @@ fn write_target(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
-/// Size and mtime, used to notice another program writing the file mid-edit.
-fn change_stamp(path: &Path) -> Option<(u64, std::time::SystemTime)> {
-    let meta = std::fs::metadata(path).ok()?;
-    Some((meta.len(), meta.modified().ok()?))
-}
-
 /// Edits a copy, then swaps it in, so a failed write never truncates the original.
 pub(crate) fn stage_and_replace(
     path: &Path,
     edit: impl FnOnce(&Path) -> Result<(), String>,
 ) -> Result<(), String> {
     let before = std::fs::metadata(path).map_err(|err| path_io_error("read", path, err))?;
-    let before_stamp = change_stamp(path);
+    // Size and mtime, to notice another program writing the file mid-edit.
+    let before_stamp = FileStamp::of(path);
     let original_perms = before.permissions();
 
-    let tmp = crate::path_util::unique_sidecar(path, "tag");
+    let tmp = crate::safe_write::unique_sidecar(path, "tag");
     let discard = |message: String| {
         let _ = std::fs::remove_file(&tmp);
         Err(message)
@@ -244,29 +237,29 @@ pub(crate) fn stage_and_replace(
     if let Err(err) = std::fs::copy(path, &tmp) {
         return discard(format!("Failed to stage {}: {err}", path.display()));
     }
-    if let Err(err) = crate::path_util::ensure_writable(&tmp) {
+    if let Err(err) = crate::safe_write::ensure_writable(&tmp) {
         return discard(format!("Failed to prepare tagged file {}: {err}", path.display()));
     }
     if let Err(err) = edit(&tmp) {
         return discard(err);
     }
-    if let Err(err) = crate::path_util::sync_file(&tmp) {
+    if let Err(err) = crate::safe_write::sync_file(&tmp) {
         return discard(format!("Failed to sync tagged file {}: {err}", tmp.display()));
     }
-    if change_stamp(path) != before_stamp {
+    if FileStamp::of(path) != before_stamp {
         return discard(format!(
             "{} changed on disk while its tags were being written; nothing was saved",
             path.display()
         ));
     }
-    if let Err(err) = crate::path_util::ensure_writable(path) {
+    if let Err(err) = crate::safe_write::ensure_writable(path) {
         let _ = std::fs::set_permissions(path, original_perms);
         return discard(format!(
             "Cannot write tags to read-only file {}: {err}",
             path.display()
         ));
     }
-    if let Err(err) = crate::path_util::replace_file(&tmp, path) {
+    if let Err(err) = crate::safe_write::replace_file(&tmp, path) {
         if path.exists() {
             let _ = std::fs::set_permissions(path, original_perms);
             return discard(format!("Failed to replace {}: {err}", path.display()));
@@ -284,7 +277,7 @@ pub(crate) fn stage_and_replace(
         return Err(format!("Failed to replace {}: {err}", path.display()));
     }
 
-    let _ = crate::path_util::sync_parent_dir(path);
+    let _ = crate::safe_write::sync_parent_dir(path);
     let _ = std::fs::set_permissions(path, original_perms);
     Ok(())
 }

@@ -1,4 +1,10 @@
-use std::io::{self, Write};
+//! Path spellings and labels.
+//!
+//! One file can be reached by several spellings: with or without Windows'
+//! `\\?\` prefix, and in any letter case on case-insensitive volumes. Caches
+//! key everything by `cache_key`; `resolve_open_path` turns a key back into a
+//! path the filesystem will open.
+
 use std::path::{Path, PathBuf};
 
 /// Strip Windows extended-length `\\?\` / `\\?\UNC\` prefixes so paths work with
@@ -14,13 +20,14 @@ pub fn normalize_path(path: PathBuf) -> PathBuf {
     path
 }
 
-pub fn canonical_path(path: &Path) -> Result<PathBuf, std::io::Error> {
+pub fn canonical_path(path: &Path) -> std::io::Result<PathBuf> {
     path.canonicalize().map(normalize_path)
 }
 
-/// Case-fold path keys on Windows/macOS default volumes.
-pub fn cache_key(path: PathBuf) -> PathBuf {
-    let path = normalize_path(path);
+/// The spelling caches key a path by: no `\\?\` prefix, and case-folded on
+/// Windows and macOS, whose default volumes ignore case.
+pub fn cache_key(path: &Path) -> PathBuf {
+    let path = normalize_path(path.to_path_buf());
     if cfg!(any(windows, target_os = "macos")) {
         PathBuf::from(path.to_string_lossy().to_lowercase())
     } else {
@@ -32,13 +39,13 @@ pub fn cache_key(path: PathBuf) -> PathBuf {
 /// WalkDir and `canonicalize` disagree on the `\\?\` prefix, so one file can
 /// appear under both forms.
 pub fn cache_lookup_keys(path: &Path) -> Vec<PathBuf> {
-    let raw = path.to_path_buf();
-    let key = cache_key(raw.clone());
-    if key == raw {
-        vec![raw]
-    } else {
-        vec![raw, key]
-    }
+    let key = cache_key(path);
+    if key == path { vec![key] } else { vec![path.to_path_buf(), key] }
+}
+
+/// The key favorites are stored under: the canonical path's cache key when the file exists.
+pub fn favorite_lookup_key(path: &Path) -> PathBuf {
+    canonical_path(path).map_or_else(|_| cache_key(path), |canonical| cache_key(&canonical))
 }
 
 /// Turn a cache key or stale spelling into a path the filesystem will open.
@@ -46,23 +53,19 @@ pub fn cache_lookup_keys(path: &Path) -> Vec<PathBuf> {
 /// Metadata and search caches store lowercase `cache_key` paths. Those are fine for
 /// lookups, but playback needs the spelling the directory walk recorded (or whatever
 /// variant actually exists on disk).
-pub fn resolve_open_path<'a>(
-    path: &Path,
-    known_paths: impl IntoIterator<Item = &'a Path>,
-) -> PathBuf {
+pub fn resolve_open_path<'a>(path: &Path, known_paths: impl IntoIterator<Item = &'a Path>) -> PathBuf {
     let path = repair_windows_drive_path(path);
 
-    for key in cache_lookup_keys(&path) {
-        if key.exists() {
-            return canonical_path(&key).unwrap_or_else(|_| normalize_path(key));
-        }
+    if let Some(existing) = cache_lookup_keys(&path).into_iter().find(|key| key.exists()) {
+        return canonical_path(&existing).unwrap_or_else(|_| normalize_path(existing));
     }
 
-    let target = cache_key(path.clone());
-    for candidate in known_paths {
-        if cache_key(candidate.to_path_buf()) == target && candidate.exists() {
-            return canonical_path(candidate).unwrap_or_else(|_| candidate.to_path_buf());
-        }
+    let target = cache_key(&path);
+    if let Some(candidate) = known_paths
+        .into_iter()
+        .find(|candidate| cache_key(candidate) == target && candidate.exists())
+    {
+        return canonical_path(candidate).unwrap_or_else(|_| candidate.to_path_buf());
     }
 
     normalize_path(path)
@@ -73,17 +76,11 @@ pub fn resolve_open_path<'a>(
 #[cfg(windows)]
 fn repair_windows_drive_path(path: &Path) -> PathBuf {
     let rendered = path.to_string_lossy();
-    let bytes = rendered.as_bytes();
-    if rendered.len() <= 2 || bytes[1] != b':' {
-        return path.to_path_buf();
-    }
-    if rendered.len() == 2 {
-        return path.to_path_buf();
-    }
-    match bytes[2] {
-        b'\\' | b'/' => path.to_path_buf(),
-        b'|' => PathBuf::from(format!(r"{}\{}", &rendered[..2], &rendered[3..])),
-        _ => PathBuf::from(format!(r"{}\{}", &rendered[..2], &rendered[2..])),
+    match rendered.as_bytes() {
+        [_, b':', b'\\' | b'/', ..] => path.to_path_buf(),
+        [_, b':', b'|', ..] => PathBuf::from(format!(r"{}\{}", &rendered[..2], &rendered[3..])),
+        [_, b':', _, ..] => PathBuf::from(format!(r"{}\{}", &rendered[..2], &rendered[2..])),
+        _ => path.to_path_buf(),
     }
 }
 
@@ -94,142 +91,18 @@ fn repair_windows_drive_path(path: &Path) -> PathBuf {
 
 /// True when `path` is `root` or a descendant, ignoring `\\?\` and case.
 pub fn is_under(path: &Path, root: &Path) -> bool {
-    let path = cache_key(path.to_path_buf());
-    let root = cache_key(root.to_path_buf());
-    path.starts_with(root)
-}
-
-fn tundra_app_dir(base: Option<PathBuf>, require_create: bool) -> Option<PathBuf> {
-    let mut dir = base?;
-    dir.push("tundra");
-    if require_create {
-        std::fs::create_dir_all(&dir).ok()?;
-    } else {
-        let _ = std::fs::create_dir_all(&dir);
-    }
-    Some(dir)
-}
-
-pub fn tundra_cache_dir() -> Option<PathBuf> {
-    tundra_app_dir(dirs::cache_dir(), false)
-}
-
-pub fn tundra_config_dir() -> Option<PathBuf> {
-    tundra_app_dir(dirs::config_dir(), false)
-}
-
-#[cfg_attr(test, allow(dead_code))]
-pub fn tundra_data_dir() -> Option<PathBuf> {
-    tundra_app_dir(dirs::data_dir(), true)
-}
-
-pub fn cache_file(name: &str) -> Option<PathBuf> {
-    tundra_cache_dir().map(|mut path| {
-        path.push(name);
-        path
-    })
-}
-
-pub fn config_file(name: &str) -> Option<PathBuf> {
-    tundra_config_dir().map(|mut path| {
-        path.push(name);
-        path
-    })
-}
-
-pub(crate) fn favorite_lookup_key(path: &Path) -> PathBuf {
-    canonical_path(path)
-        .map(cache_key)
-        .unwrap_or_else(|_| cache_key(path.to_path_buf()))
-}
-
-pub fn read_bincode<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
-    bincode::deserialize(&std::fs::read(path).ok()?).ok()
-}
-
-/// Load user data such as settings or favorites.
-///
-/// A file that cannot be decoded is moved aside (`.unreadable-<ts>`) so the
-/// next save cannot destroy the user's only copy. A file that exists but
-/// cannot be read right now (locked by antivirus or a sync client) is left
-/// alone and `writable` comes back false: the caller must not save over it
-/// this session.
-pub fn load_user_data<T: Default + serde::de::DeserializeOwned>(path: &Path, label: &str) -> (T, bool) {
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return (T::default(), true),
-        Err(err) => {
-            eprintln!(
-                "Failed to read {label} ({}): {err}; changes will not be saved this session",
-                path.display()
-            );
-            return (T::default(), false);
-        }
-    };
-    let err = match bincode::deserialize(&bytes) {
-        Ok(value) => return (value, true),
-        Err(err) => err,
-    };
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs())
-        .unwrap_or_default();
-    let backup = sidecar(path, &format!(".unreadable-{stamp}"));
-    match std::fs::rename(path, &backup) {
-        Ok(()) => {
-            eprintln!(
-                "Failed to load {label} ({}): {err}. Kept the file as {}",
-                path.display(),
-                backup.display()
-            );
-            (T::default(), true)
-        }
-        Err(move_err) => {
-            eprintln!(
-                "Failed to load {label} ({}): {err}; could not move it aside ({move_err}), so it will not be overwritten",
-                path.display()
-            );
-            (T::default(), false)
-        }
-    }
-}
-
-/// Move a file from an old location once, atomically, keeping the source
-/// until the copy is durable.
-pub fn migrate_file(src: &Path, dest: &Path) {
-    if dest.exists() || !src.exists() {
-        return;
-    }
-    let moved = std::fs::read(src).and_then(|bytes| write_atomic(dest, &bytes));
-    match moved {
-        Ok(()) => {
-            let _ = std::fs::remove_file(src);
-        }
-        Err(err) => eprintln!(
-            "Failed to move {} to {}: {err}",
-            src.display(),
-            dest.display()
-        ),
-    }
-}
-
-pub fn write_bincode<T: serde::Serialize>(path: &Path, value: &T, label: &str) -> bool {
-    let Ok(bytes) = bincode::serialize(value) else {
-        eprintln!("Failed to serialize {label}");
-        return false;
-    };
-    if let Err(err) = write_atomic(path, &bytes) {
-        eprintln!("Failed to write {label}: {err}");
-        return false;
-    }
-    true
+    cache_key(path).starts_with(cache_key(root))
 }
 
 pub fn file_name_lossy(path: &Path) -> Option<String> {
-    path.file_name()
-        .map(|name| name.to_string_lossy().into_owned())
+    path.file_name().map(|name| name.to_string_lossy().into_owned())
 }
 
+pub fn file_stem_lossy(path: &Path) -> Option<String> {
+    path.file_stem().map(|stem| stem.to_string_lossy().into_owned())
+}
+
+/// The file name, or the whole path when it has none.
 pub fn file_label(path: &Path) -> String {
     file_name_lossy(path).unwrap_or_else(|| path.display().to_string())
 }
@@ -269,52 +142,34 @@ pub fn is_hidden(path: &Path) -> bool {
     false
 }
 
-/// What the platform calls "show this file in its folder".
-pub fn file_manager_label() -> &'static str {
-    if cfg!(target_os = "windows") {
-        "Open in Explorer"
-    } else if cfg!(target_os = "macos") {
-        "Open in Finder"
-    } else {
-        "Open in File browser"
+/// Identifies one version of a file: its size and modification time. Size is
+/// included because copies and archive extraction often keep the original
+/// mtime (and exFAT has 2 s resolution), so mtime alone can match a different file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FileStamp {
+    pub secs: u64,
+    pub nanos: u32,
+    pub len: u64,
+}
+
+impl FileStamp {
+    pub fn of(path: &Path) -> Option<Self> {
+        let meta = std::fs::metadata(path).ok()?;
+        let modified = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;
+        Some(Self {
+            secs: modified.as_secs(),
+            nanos: modified.subsec_nanos(),
+            len: meta.len(),
+        })
     }
 }
 
-/// Opens the system file manager with `path` selected (or opened, for a folder).
-pub fn reveal_in_file_manager(path: &Path) {
-    #[cfg(target_os = "windows")]
-    let command = {
-        use std::os::windows::process::CommandExt;
-        let mut command = std::process::Command::new("explorer");
-        if path.is_dir() {
-            command.arg(path);
-        } else {
-            command.raw_arg(format!("/select,\"{}\"", path.display()));
-        }
-        hide_console(&mut command);
-        command
-    };
-    #[cfg(target_os = "macos")]
-    let command = {
-        let mut command = std::process::Command::new("open");
-        if path.is_file() {
-            command.arg("-R");
-        }
-        command.arg(path);
-        command
-    };
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let command = {
-        let mut command = std::process::Command::new("xdg-open");
-        command.arg(if path.is_dir() { path } else { path.parent().unwrap_or(path) });
-        command
-    };
-    let mut command = command;
-    if let Err(err) = command.spawn() {
-        eprintln!("Could not open the file manager for {}: {err}", path.display());
-    }
+/// The file's modification time in whole seconds.
+pub fn file_mtime_secs(path: &Path) -> Option<u64> {
+    FileStamp::of(path).map(|stamp| stamp.secs)
 }
 
+/// A user-facing I/O error message: "Failed to <verb> <path>: <err>".
 pub fn path_io_error(verb: &str, path: &Path, err: impl std::fmt::Display) -> String {
     format!("Failed to {verb} {}: {err}", path.display())
 }
@@ -323,406 +178,10 @@ pub fn open_file(path: &Path) -> Result<std::fs::File, String> {
     std::fs::File::open(path).map_err(|err| path_io_error("open", path, err))
 }
 
-pub fn file_stem_lossy(path: &Path) -> Option<String> {
-    path.file_stem()
-        .map(|stem| stem.to_string_lossy().into_owned())
-}
-
-pub fn hide_console(command: &mut std::process::Command) {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x0800_0000);
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = command;
-    }
-}
-
-fn manifest_dir() -> Option<PathBuf> {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    dir.is_dir().then_some(dir)
-}
-
-/// Directories to search for bundled assets (scripts, models).
-pub fn exe_search_roots() -> Vec<PathBuf> {
-    let mut roots = Vec::new();
-    let mut push = |path: PathBuf| {
-        let path = normalize_path(path);
-        if !roots.iter().any(|existing| existing == &path) {
-            roots.push(path);
-        }
-    };
-
-    if let Ok(exe) = std::env::current_exe() {
-        let exe = normalize_path(exe);
-        if let Some(parent) = exe.parent() {
-            if parent.file_name().and_then(|name| name.to_str()) == Some("MacOS") {
-                if let Some(contents) = parent.parent() {
-                    push(contents.join("Resources"));
-                }
-            }
-            push(parent.to_path_buf());
-        }
-    }
-
-    if let Some(manifest) = manifest_dir() {
-        push(manifest);
-    }
-    roots
-}
-
-pub fn find_beside(
-    relatives: &[&str],
-    predicate: impl Fn(&Path) -> bool,
-) -> Option<PathBuf> {
-    for root in exe_search_roots() {
-        for relative in relatives {
-            let candidate = root.join(relative);
-            if predicate(&candidate) {
-                return Some(candidate);
-            }
-        }
-    }
-    None
-}
-
-pub const TAG_TMP_SUFFIX: &str = ".tundra-tag.tmp";
-/// Legacy only: older builds wrote this, reclaim still deletes it.
-pub const TAG_BAK_SUFFIX: &str = ".tundra-tag.bak";
-pub const REPLACE_OLD_SUFFIX: &str = ".tundra-replace-old";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WriteSidecarKind {
-    Tmp,
-    Bak,
-    ReplaceOld,
-}
-
-pub fn sidecar(path: &Path, suffix: &str) -> PathBuf {
-    let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(suffix);
-    path.with_file_name(name)
-}
-
-/// Same-directory temp that two Tundra processes cannot share.
-pub fn unique_sidecar(path: &Path, kind: &str) -> PathBuf {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-    sidecar(
-        path,
-        &format!(".tundra-{kind}-{}-{seq}.tmp", std::process::id()),
-    )
-}
-
-fn parse_write_sidecar(name: &str) -> Option<(&str, WriteSidecarKind, Option<u32>)> {
-    if let Some(dest) = name.strip_suffix(REPLACE_OLD_SUFFIX) {
-        return (!dest.is_empty()).then_some((dest, WriteSidecarKind::ReplaceOld, None));
-    }
-    if let Some(dest) = name.strip_suffix(TAG_BAK_SUFFIX) {
-        return (!dest.is_empty()).then_some((dest, WriteSidecarKind::Bak, None));
-    }
-    if let Some(dest) = name.strip_suffix(TAG_TMP_SUFFIX) {
-        return (!dest.is_empty()).then_some((dest, WriteSidecarKind::Tmp, None));
-    }
-    // `unique_sidecar` names: `<dest>.tundra-<kind>-<pid>-<seq>.tmp`.
-    let rest = name.strip_suffix(".tmp")?;
-    for marker in [".tundra-tag-", ".tundra-atomic-"] {
-        let Some(index) = rest.rfind(marker) else {
-            continue;
-        };
-        let dest = &rest[..index];
-        if dest.is_empty() {
-            return None;
-        }
-        let pid = rest[index + marker.len()..].split('-').next()?.parse().ok();
-        return Some((dest, WriteSidecarKind::Tmp, pid));
-    }
-    None
-}
-
-/// True for temp and recovery files Tundra's writers leave beside a file.
-pub fn is_write_sidecar(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| parse_write_sidecar(name).is_some())
-}
-
-fn pid_is_alive(pid: u32) -> bool {
-    if pid == 0 {
-        return false;
-    }
-    if pid == std::process::id() {
-        return true;
-    }
-    #[cfg(windows)]
-    {
-        return windows_pid_is_alive(pid);
-    }
-    #[cfg(unix)]
-    {
-        let path = std::path::PathBuf::from(format!("/proc/{pid}"));
-        if path.exists() {
-            return true;
-        }
-        #[cfg(target_os = "macos")]
-        {
-            let mut command = std::process::Command::new("kill");
-            command.args(["-0", &pid.to_string()]);
-            hide_console(&mut command);
-            return command.status().is_ok_and(|status| status.success());
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            return false;
-        }
-    }
-    #[cfg(not(any(windows, unix)))]
-    {
-        false
-    }
-}
-
-#[cfg(windows)]
-fn windows_pid_is_alive(pid: u32) -> bool {
-    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
-    const ERROR_ACCESS_DENIED: u32 = 5;
-
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut core::ffi::c_void;
-        fn CloseHandle(handle: *mut core::ffi::c_void) -> i32;
-        fn GetLastError() -> u32;
-    }
-
-    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
-    if !handle.is_null() {
-        unsafe { CloseHandle(handle) };
-        return true;
-    }
-    unsafe { GetLastError() == ERROR_ACCESS_DENIED }
-}
-
-/// Same-directory replace. POSIX `rename` overwrites atomically. Windows uses
-/// `ReplaceFileW` with no backup file. Never moves the dest aside.
-pub fn replace_file(from: &Path, to: &Path) -> io::Result<()> {
-    match std::fs::rename(from, to) {
-        Ok(()) => Ok(()),
-        Err(err) => {
-            #[cfg(windows)]
-            if to.exists() {
-                return replace_existing_windows(from, to);
-            }
-            Err(err)
-        }
-    }
-}
-
-#[cfg(windows)]
-fn replace_existing_windows(from: &Path, to: &Path) -> io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-
-    fn wide(path: &Path) -> Vec<u16> {
-        path.as_os_str().encode_wide().chain(Some(0)).collect()
-    }
-
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn ReplaceFileW(
-            lp_replaced_file_name: *const u16,
-            lp_replacement_file_name: *const u16,
-            lp_backup_file_name: *const u16,
-            dw_replace_flags: u32,
-            lp_exclude: *mut core::ffi::c_void,
-            lp_reserved: *mut core::ffi::c_void,
-        ) -> i32;
-    }
-
-    let replaced = wide(to);
-    let replacement = wide(from);
-    let ok = unsafe {
-        ReplaceFileW(
-            replaced.as_ptr(),
-            replacement.as_ptr(),
-            std::ptr::null(),
-            0,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
-    };
-    if ok == 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
-
-/// Clear read-only attribute/permissions so writes and fsync succeed.
-pub fn ensure_writable(path: &Path) -> io::Result<()> {
-    let mut perms = std::fs::metadata(path)?.permissions();
-    if perms.readonly() {
-        perms.set_readonly(false);
-        std::fs::set_permissions(path, perms)?;
-    }
-    Ok(())
-}
-
-/// Flush file data/metadata to disk before atomic replace.
-pub fn sync_file(path: &Path) -> io::Result<()> {
-    use std::fs::OpenOptions;
-    OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(path)?
-        .sync_all()
-}
-
-pub fn sync_parent_dir(path: &Path) -> io::Result<()> {
-    let parent = path.parent().filter(|dir| !dir.as_os_str().is_empty());
-    let parent = parent.unwrap_or_else(|| Path::new("."));
-
-    #[cfg(unix)]
-    {
-        std::fs::File::open(parent)?.sync_all()
-    }
-
-    #[cfg(windows)]
-    {
-        use std::fs::OpenOptions;
-        use std::os::windows::fs::OpenOptionsExt;
-        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-        OpenOptions::new()
-            .read(true)
-            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-            .open(parent)?
-            .sync_all()
-    }
-
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = parent;
-        Ok(())
-    }
-}
-
-/// Restore a missing dest from `.tundra-replace-old` only (crash-aside).
-/// Keep a tmp only when its PID is still live. Delete dest-less legacy
-/// `.tundra-tag.tmp` only after dest exists. Never resurrect dest from
-/// `.bak`/`.tmp` (user may have deleted the audio).
-///
-/// Returns the files restored from a crash-aside copy.
-pub fn reclaim_write_sidecars(dir: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-
-    let mut groups: std::collections::HashMap<
-        PathBuf,
-        Vec<(PathBuf, WriteSidecarKind, Option<u32>)>,
-    > = std::collections::HashMap::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Some(name) = file_name_lossy(&path) else {
-            continue;
-        };
-        let Some((dest_name, kind, pid)) = parse_write_sidecar(&name) else {
-            continue;
-        };
-        let dest = path.with_file_name(dest_name);
-        groups.entry(dest).or_default().push((path, kind, pid));
-    }
-
-    let mut restored = Vec::new();
-    for (dest, sidecars) in groups {
-        if !dest.exists() {
-            if let Some((source, _, _)) = sidecars
-                .iter()
-                .find(|(_, kind, _)| *kind == WriteSidecarKind::ReplaceOld)
-            {
-                if std::fs::rename(source, &dest).is_err() && std::fs::copy(source, &dest).is_ok() {
-                    let _ = std::fs::remove_file(source);
-                }
-                if dest.exists() {
-                    restored.push(dest.clone());
-                }
-            }
-        }
-
-        let dest_exists = dest.exists();
-        for (path, kind, pid) in sidecars {
-            match kind {
-                WriteSidecarKind::Tmp => {
-                    let live = pid.is_some_and(pid_is_alive);
-                    if live {
-                        continue;
-                    }
-                    // With the destination gone this temp may be the only copy
-                    // left by a replace that failed half-way; never delete it.
-                    if dest_exists {
-                        let _ = std::fs::remove_file(path);
-                    }
-                }
-                WriteSidecarKind::Bak | WriteSidecarKind::ReplaceOld => {
-                    if dest_exists {
-                        let _ = std::fs::remove_file(path);
-                    }
-                }
-            }
-        }
-    }
-    restored
-}
-
-/// Notes directories holding write sidecars while a walk is already listing
-/// them, so recovery costs no second pass over the tree and never follows a
-/// link the walk itself would not.
-#[derive(Default)]
-pub struct SidecarSweep {
-    dirs: std::collections::HashSet<PathBuf>,
-}
-
-impl SidecarSweep {
-    pub fn note(&mut self, path: &Path) {
-        if is_write_sidecar(path) {
-            if let Some(parent) = path.parent() {
-                self.dirs.insert(parent.to_path_buf());
-            }
-        }
-    }
-
-    /// Reclaim every noted directory. Returns files restored from a
-    /// crash-aside copy, which the walk could not have listed.
-    pub fn finish(self) -> Vec<PathBuf> {
-        self.dirs
-            .iter()
-            .flat_map(|dir| reclaim_write_sidecars(dir))
-            .collect()
-    }
-}
-
-pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let tmp = unique_sidecar(path, "atomic");
-    {
-        let mut file = std::fs::File::create(&tmp)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-    }
-    let result = replace_file(&tmp, path);
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    result
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_fixtures::{dead_pid_tag_tmp, ScratchDir};
+    use crate::test_fixtures::ScratchDir;
     use std::fs;
 
     #[test]
@@ -741,10 +200,7 @@ mod tests {
         let child = PathBuf::from(r"F:\Samples\ADM Samples - Copy\Snare\01_Snare.flac");
         assert!(is_under(&child, &root));
         assert!(is_under(&root, &root));
-        assert!(!is_under(
-            Path::new(r"F:\Other\snare.flac"),
-            &root
-        ));
+        assert!(!is_under(Path::new(r"F:\Other\snare.flac"), &root));
     }
 
     #[test]
@@ -752,20 +208,18 @@ mod tests {
         let path = PathBuf::from(r"\\?\F:\Samples\Snare\01_Snare.flac");
         let keys = cache_lookup_keys(&path);
         assert!(keys.contains(&path));
-        assert!(keys.contains(&cache_key(path)));
+        assert!(keys.contains(&cache_key(&path)));
     }
 
     #[test]
     #[cfg(windows)]
     fn repair_windows_drive_path_fixes_missing_separator_and_pipe() {
-        assert_eq!(
-            repair_windows_drive_path(Path::new(r"F:Samples\kick.wav")),
-            PathBuf::from(r"F:\Samples\kick.wav")
-        );
-        assert_eq!(
-            repair_windows_drive_path(Path::new(r"F:|Samples\kick.wav")),
-            PathBuf::from(r"F:\Samples\kick.wav")
-        );
+        for broken in [r"F:Samples\kick.wav", r"F:|Samples\kick.wav"] {
+            assert_eq!(repair_windows_drive_path(Path::new(broken)), PathBuf::from(r"F:\Samples\kick.wav"));
+        }
+        for fine in [r"F:\Samples\kick.wav", "F:", "kick.wav"] {
+            assert_eq!(repair_windows_drive_path(Path::new(fine)), PathBuf::from(fine));
+        }
     }
 
     #[test]
@@ -776,10 +230,10 @@ mod tests {
         let audio = nested.join("kick.wav");
         fs::write(&audio, b"RIFF").unwrap();
 
-        let cache_key_path = cache_key(audio.clone());
+        let cache_key_path = cache_key(&audio);
         let resolved = resolve_open_path(&cache_key_path, [audio.as_path()]);
         assert!(resolved.exists());
-        assert_eq!(cache_key(resolved), cache_key_path);
+        assert_eq!(cache_key(&resolved), cache_key_path);
     }
 
     #[test]
@@ -792,9 +246,7 @@ mod tests {
 
         // The temp dir as the OS reports it can differ from its canonical form:
         // a symlink (`/var` -> `/private/var` on macOS) or an 8.3 short name on Windows.
-        let reported = std::env::temp_dir()
-            .join(dir.path().file_name().unwrap())
-            .join("kick.wav");
+        let reported = std::env::temp_dir().join(dir.path().file_name().unwrap()).join("kick.wav");
         assert_eq!(favorite_lookup_key(&reported), stored);
 
         #[cfg(windows)]
@@ -805,327 +257,9 @@ mod tests {
     }
 
     #[test]
-    fn replace_works_when_dest_readonly() {
-        let dir = ScratchDir::new("replace-readonly");
-        let dest = dir.path().join("kick.wav");
-        fs::write(&dest, b"audio").unwrap();
-        let tmp = sidecar(&dest, TAG_TMP_SUFFIX);
-        fs::write(&tmp, b"tagged").unwrap();
-        let mut perms = fs::metadata(&dest).unwrap().permissions();
-        perms.set_readonly(true);
-        fs::set_permissions(&dest, perms).unwrap();
-
-        ensure_writable(&dest).unwrap();
-        replace_file(&tmp, &dest).unwrap();
-        assert_eq!(fs::read(&dest).unwrap(), b"tagged");
-    }
-
-    #[test]
-    fn sync_file_works_on_readonly_copy() {
-        let dir = ScratchDir::new("path-util");
-        let dest = dir.path().join("kick.wav");
-        fs::write(&dest, b"audio").unwrap();
-        let tmp = sidecar(&dest, TAG_TMP_SUFFIX);
-        fs::copy(&dest, &tmp).unwrap();
-        let mut perms = fs::metadata(&tmp).unwrap().permissions();
-        perms.set_readonly(true);
-        fs::set_permissions(&tmp, perms).unwrap();
-
-        ensure_writable(&tmp).unwrap();
-        fs::write(&tmp, b"tagged").unwrap();
-        sync_file(&tmp).unwrap();
-    }
-
-    #[test]
-    fn reclaim_keeps_live_pid_tmp_when_dest_exists() {
-        let dir = ScratchDir::new("path-util");
-        let dest = dir.path().join("kick.wav");
-        fs::write(&dest, b"original").unwrap();
-        let tmp = unique_sidecar(&dest, "tag");
-        fs::write(&tmp, b"tmp").unwrap();
-        fs::write(sidecar(&dest, TAG_BAK_SUFFIX), b"bak").unwrap();
-        fs::write(sidecar(&dest, REPLACE_OLD_SUFFIX), b"old").unwrap();
-
-        reclaim_write_sidecars(dir.path());
-
-        assert_eq!(fs::read(&dest).unwrap(), b"original");
-        assert!(tmp.exists(), "in-progress tmp for this process must stay");
-        assert!(!sidecar(&dest, TAG_BAK_SUFFIX).exists());
-        assert!(!sidecar(&dest, REPLACE_OLD_SUFFIX).exists());
-    }
-
-    #[test]
-    fn reclaim_deletes_dead_pid_tmp() {
-        let dir = ScratchDir::new("path-util");
-        let dest = dir.path().join("kick.wav");
-        fs::write(&dest, b"original").unwrap();
-        let tmp = dead_pid_tag_tmp(&dest);
-        fs::write(&tmp, b"stale").unwrap();
-
-        reclaim_write_sidecars(dir.path());
-
-        assert!(!tmp.exists());
-        assert_eq!(fs::read(&dest).unwrap(), b"original");
-    }
-
-    #[test]
-    fn reclaim_restores_replace_old_only_when_dest_missing() {
-        let dir = ScratchDir::new("path-util");
-        let dest = dir.path().join("snare.wav");
-        fs::write(sidecar(&dest, TAG_TMP_SUFFIX), b"tmp-maybe-corrupt").unwrap();
-        fs::write(sidecar(&dest, TAG_BAK_SUFFIX), b"bak-original").unwrap();
-        fs::write(sidecar(&dest, REPLACE_OLD_SUFFIX), b"aside-original").unwrap();
-
-        reclaim_write_sidecars(dir.path());
-
-        assert_eq!(fs::read(&dest).unwrap(), b"aside-original");
-        assert!(
-            !sidecar(&dest, TAG_TMP_SUFFIX).exists(),
-            "legacy tmp is deleted once dest is present"
-        );
-        assert!(!sidecar(&dest, TAG_BAK_SUFFIX).exists());
-        assert!(!sidecar(&dest, REPLACE_OLD_SUFFIX).exists());
-    }
-
-    #[test]
-    fn reclaim_does_not_resurrect_from_tmp_or_bak() {
-        let dir = ScratchDir::new("path-util");
-        let dest = dir.path().join("hat.wav");
-        fs::write(sidecar(&dest, TAG_TMP_SUFFIX), b"tagged-copy").unwrap();
-        fs::write(sidecar(&dest, TAG_BAK_SUFFIX), b"bak-original").unwrap();
-
-        reclaim_write_sidecars(dir.path());
-
-        assert!(!dest.exists());
-        assert!(sidecar(&dest, TAG_TMP_SUFFIX).exists());
-        assert!(sidecar(&dest, TAG_BAK_SUFFIX).exists());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn reclaim_keeps_sidecars_when_restore_fails() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = ScratchDir::new("path-util");
-        let dest = dir.path().join("rim.wav");
-        let aside = sidecar(&dest, REPLACE_OLD_SUFFIX);
-        fs::write(&aside, b"aside-original").unwrap();
-        let tmp = sidecar(&dest, TAG_TMP_SUFFIX);
-        fs::write(&tmp, b"tmp").unwrap();
-
-        let readonly = fs::Permissions::from_mode(0o555);
-        fs::set_permissions(dir.path(), readonly).unwrap();
-        reclaim_write_sidecars(dir.path());
-        let writable = fs::Permissions::from_mode(0o755);
-        fs::set_permissions(dir.path(), writable).unwrap();
-
-        assert!(!dest.exists());
-        assert!(aside.exists());
-        assert!(tmp.exists());
-    }
-
-    #[test]
-    fn sweep_restores_only_noted_directories() {
-        let dir = ScratchDir::new("path-util");
-        let nested = dir.path().join("drums");
-        fs::create_dir(&nested).unwrap();
-        let dest = nested.join("kick.wav");
-        let aside = sidecar(&dest, REPLACE_OLD_SUFFIX);
-        fs::write(&aside, b"aside").unwrap();
-
-        assert!(SidecarSweep::default().finish().is_empty());
-        assert!(!dest.exists());
-
-        let mut sweep = SidecarSweep::default();
-        sweep.note(&nested.join("snare.wav"));
-        sweep.note(&aside);
-        assert_eq!(sweep.finish(), vec![dest.clone()]);
-        assert_eq!(fs::read(&dest).unwrap(), b"aside");
-    }
-
-    #[test]
-    fn atomic_temps_are_recognised_and_reclaimed() {
-        let dir = ScratchDir::new("path-util");
-        let dest = dir.path().join("favorites.bin");
-        fs::write(&dest, b"current").unwrap();
-        let live = unique_sidecar(&dest, "atomic");
-        let dead = sidecar(
-            &dest,
-            &format!(".tundra-atomic-{}-7.tmp", crate::test_fixtures::DEAD_PID),
-        );
-        fs::write(&live, b"in flight").unwrap();
-        fs::write(&dead, b"crashed").unwrap();
-        assert!(is_write_sidecar(&live) && is_write_sidecar(&dead));
-        assert!(!is_write_sidecar(&dest));
-
-        reclaim_write_sidecars(dir.path());
-
-        assert!(live.exists());
-        assert!(!dead.exists());
-        assert_eq!(fs::read(&dest).unwrap(), b"current");
-    }
-
-    #[test]
-    fn write_atomic_writes_and_replaces_without_leaving_tmp() {
-        let dir = ScratchDir::new("path-util");
-        let dest = dir.path().join("cache.bin");
-        write_atomic(&dest, b"one").unwrap();
-        write_atomic(&dest, b"two").unwrap();
-        assert_eq!(fs::read(&dest).unwrap(), b"two");
-        let sidecars = fs::read_dir(dir.path())
-            .unwrap()
-            .flatten()
-            .filter(|entry| {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .contains(".tundra-")
-            })
-            .count();
-        assert_eq!(sidecars, 0);
-    }
-
-    #[test]
-    fn write_atomic_creates_parent_directories() {
-        let dir = ScratchDir::new("path-util");
-        let dest = dir.path().join("deep").join("nested.bin");
-        write_atomic(&dest, b"payload").unwrap();
-        assert_eq!(fs::read(&dest).unwrap(), b"payload");
-    }
-
-    #[test]
-    fn unique_sidecar_names_differ_for_same_dest() {
-        let dir = ScratchDir::new("path-util");
-        let dest = dir.path().join("kick.wav");
-        let a = unique_sidecar(&dest, "tag");
-        let b = unique_sidecar(&dest, "tag");
-        assert_ne!(a, b);
-    }
-
-    #[test]
-    fn sidecar_appends_suffix_to_file_name() {
-        let dir = ScratchDir::new("sidecar-name");
-        let path = dir.path().join("kick.wav");
-        assert_eq!(
-            sidecar(&path, TAG_TMP_SUFFIX),
-            dir.path().join("kick.wav.tundra-tag.tmp")
-        );
-    }
-
-    #[test]
-    fn reclaim_cleans_legacy_tmp_once_dest_exists() {
-        let dir = ScratchDir::new("path-util");
-        let dest = dir.path().join("kick.wav");
-        fs::write(sidecar(&dest, REPLACE_OLD_SUFFIX), b"aside").unwrap();
-        fs::write(sidecar(&dest, TAG_TMP_SUFFIX), b"legacy").unwrap();
-
-        reclaim_write_sidecars(dir.path());
-
-        assert_eq!(fs::read(&dest).unwrap(), b"aside");
-        assert!(!sidecar(&dest, TAG_TMP_SUFFIX).exists());
-    }
-
-    #[test]
-    fn reclaim_leaves_dest_missing_when_only_tmp_and_bak_exist() {
-        let dir = ScratchDir::new("path-util");
-        let dest = dir.path().join("missing.wav");
-        fs::write(sidecar(&dest, TAG_TMP_SUFFIX), b"tmp").unwrap();
-        fs::write(sidecar(&dest, TAG_BAK_SUFFIX), b"bak").unwrap();
-
-        reclaim_write_sidecars(dir.path());
-
-        assert!(!dest.exists());
-        assert!(sidecar(&dest, TAG_TMP_SUFFIX).exists());
-        assert!(sidecar(&dest, TAG_BAK_SUFFIX).exists());
-    }
-
-    #[test]
-    fn reclaim_handles_multiple_files_in_one_directory() {
-        let dir = ScratchDir::new("path-util");
-        let kick = dir.path().join("kick.wav");
-        let snare = dir.path().join("snare.wav");
-        fs::write(sidecar(&kick, REPLACE_OLD_SUFFIX), b"k-aside").unwrap();
-        fs::write(sidecar(&snare, REPLACE_OLD_SUFFIX), b"s-aside").unwrap();
-        fs::write(sidecar(&kick, TAG_TMP_SUFFIX), b"stale").unwrap();
-
-        reclaim_write_sidecars(dir.path());
-
-        assert_eq!(fs::read(&kick).unwrap(), b"k-aside");
-        assert_eq!(fs::read(&snare).unwrap(), b"s-aside");
-        assert!(!sidecar(&kick, TAG_TMP_SUFFIX).exists());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn sync_parent_dir_succeeds_for_existing_directory() {
-        let dir = ScratchDir::new("sync-parent");
-        sync_parent_dir(&dir.path().join("child.bin")).unwrap();
-    }
-
-    #[test]
-    fn reclaim_keeps_dead_pid_tmp_when_dest_missing() {
-        let dir = ScratchDir::new("path-util");
-        let dest = dir.path().join("missing.wav");
-        let tmp = dead_pid_tag_tmp(&dest);
-        fs::write(&tmp, b"stale").unwrap();
-        assert!(!dest.exists());
-
-        reclaim_write_sidecars(dir.path());
-
-        assert!(tmp.exists(), "may be the only copy of the audio");
-        assert!(!dest.exists());
-    }
-
-    #[test]
-    fn write_atomic_preserves_existing_file_when_replace_fails() {
-        use crate::test_fixtures::with_replace_blocked;
-
-        let dir = ScratchDir::new("atomic-preserve");
-        let dest = dir.path().join("cache.bin");
-        fs::write(&dest, b"stable").unwrap();
-
-        let err = with_replace_blocked(dir.path(), &dest, || write_atomic(&dest, b"new"));
-
-        assert!(err.is_err());
-        assert_eq!(fs::read(&dest).unwrap(), b"stable");
-        assert_eq!(dir.sidecar_count(), 0);
-    }
-
-    #[test]
-    fn reclaim_keeps_live_pid_tmp_when_dest_missing() {
-        let dir = ScratchDir::new("live-missing");
-        let dest = dir.path().join("missing.wav");
-        let tmp = unique_sidecar(&dest, "tag");
-        fs::write(&tmp, b"tmp").unwrap();
-
-        reclaim_write_sidecars(dir.path());
-
-        assert!(!dest.exists());
-        assert!(tmp.exists(), "live pid tmp must stay when dest is missing");
-    }
-
-    #[test]
-    fn write_atomic_removes_tmp_when_replace_fails() {
-        let dir = ScratchDir::new("atomic-fail");
-        let dest = dir.path().join("blocked.bin");
-        fs::create_dir(&dest).unwrap();
-
-        let err = write_atomic(&dest, b"payload");
-        assert!(err.is_err());
-        assert_eq!(dir.sidecar_count(), 0);
-    }
-
-    #[test]
-    fn ensure_writable_allows_subsequent_write() {
-        let dir = ScratchDir::new("path-util");
-        let dest = dir.path().join("kick.wav");
-        fs::write(&dest, b"audio").unwrap();
-        let mut perms = fs::metadata(&dest).unwrap().permissions();
-        perms.set_readonly(true);
-        fs::set_permissions(&dest, perms).unwrap();
-
-        ensure_writable(&dest).unwrap();
-        fs::write(&dest, b"updated").unwrap();
-        assert_eq!(fs::read(&dest).unwrap(), b"updated");
+    fn truncate_path_keeps_the_end() {
+        let path = Path::new("/samples/drums/kick.wav");
+        assert_eq!(truncate_path(path, 100), "/samples/drums/kick.wav");
+        assert_eq!(truncate_path(path, 9), "…kick.wav");
     }
 }

@@ -125,7 +125,7 @@ pub fn file_context_menu(
     let always = [
         ("Copy name", copy_name),
         ("Copy full path", copy_path),
-        (crate::path_util::file_manager_label(), reveal),
+        (crate::platform::file_manager_label(), reveal),
     ];
     column(
         optional
