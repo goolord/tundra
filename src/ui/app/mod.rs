@@ -1,64 +1,57 @@
-use super::*;
-use crate::auto_tag;
-use crate::bulk_auto_tag;
-use crate::drag_out::NativeDrag;
-use crate::metadata::{
-    TagField,
-    control_bar_tags, file_search_debounce_ms, index_paths, instrument_tag, parse_tag_filter,
-    refresh_cached_metadata, tag_field_best_match,
-    tag_parse_message, write_auto_tags, write_manual_tags,
-    AUTO_TAG_ALREADY_COMPLETE, AUTO_TAG_INSTRUMENT_PRESENT,
-    auto_tag_field_status,
-    PersistedCaches, TagParseError, file_search_active,
-    TAG_SEARCH_DEBOUNCE_MS,
-};
-use super::auto_tag::{auto_tag_view, AutoTagState};
-use super::bulk_auto_tag::{bulk_auto_tag_view, BulkAutoTagPhase, BulkAutoTagState};
-use super::settings::{
-    self, AddDirectoryResult, AllowedDirectories, FavoritesStore, FILE_OUTSIDE_ALLOWED,
-    FOLDER_OUTSIDE_ALLOWED, SELECT_AUDIO_FIRST, UNSUPPORTED_AUDIO,
-};
-use super::tag_editor::{tag_editor_view, TagEditorState};
-use futures::channel::oneshot;
-use futures::future::{AbortHandle, Abortable};
+//! Application state and message routing.
+//!
+//! `update` only dispatches; each message group is handled in the file that
+//! owns it: `input` (pointer, keyboard, drag-out, window frame), `library`
+//! (navigation, search, caches), `modals` (settings, auto-tag, tag editor),
+//! and `bulk_auto_tag`. `view` and `subscription` are read-only over the state.
 
-use iced::widget::{button, center, column, container, mouse_area, opaque, operation, row, stack, text, Space};
-use iced::widget::Id;
-use iced::widget::operation::AbsoluteOffset;
-use iced::{Border, Color, Element, Event, Length, Point, Shadow, Subscription, Task, Theme};
-use iced::event;
-use iced::futures::stream;
-use iced::keyboard::{Key, Modifiers};
-use iced::mouse;
-use iced::window;
-use iced_aw::ICED_AW_FONT_BYTES;
-use futures::StreamExt;
+mod bulk_auto_tag;
+mod input;
+mod library;
+mod modals;
+mod prefs;
+mod subscription;
+mod view;
+
+use super::auto_tag::AutoTagState;
+use super::bulk_auto_tag::BulkAutoTagState;
+use super::dialog::Dialog;
+use super::file_selector::FileSelector;
+use super::menu::window_title;
+use super::message::{AutoTagMsg, Message, TagEditorMsg, WaveformMsg, WindowMsg};
+use super::player::Player;
+use super::tag_editor::TagEditorState;
+use super::waveform::WaveFormView;
+use crate::drag_out::NativeDrag;
+use crate::library::cache::{load_startup_caches, DirCache, MetadataCache};
+use crate::library::{AllowedDirectories, FavoritesStore};
+use crate::playback::{PlayerEvent, PlayerWorker};
+use futures::channel::oneshot;
+use futures::future::AbortHandle;
+use iced::keyboard::Modifiers;
+use iced::{window, Point, Task};
+use input::{FileDrag, ScrollbarDrag, SidebarResize};
+use prefs::on_window;
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Duration;
 
-mod cache;
-mod helpers;
-mod prefs;
+pub fn run() {
+    iced::application(App::boot, App::update, App::view)
+        .title(App::title)
+        .antialiasing(true)
+        .font(iced_aw::ICED_AW_FONT_BYTES)
+        .subscription(App::subscription)
+        .level(prefs::window_level(prefs::load_always_on_top()))
+        .decorations(false)
+        .resizable(true)
+        .exit_on_close_request(false)
+        .run()
+        .expect("the UI event loop failed")
+}
 
-pub use cache::{DirCache, MetadataCache};
-pub use prefs::{window_level, set_window_level};
-use prefs::on_window;
-use cache::load_startup_caches;
-use helpers::{
-    execute_file_search, pick_audio_file, pick_folder,
-    tag_search_can_autocomplete, transport_shortcut_allowed, walk_directory, FileDragKind,
-    FileDragPending, FileListScrollbarDrag, SidebarResize, TitleBarInteraction,
-};
-use prefs::{
-    load_always_on_top, load_looping, load_sidebar_width, load_volume, persist_always_on_top,
-    persist_looping, persist_sidebar_width, persist_volume, MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH,
-    SIDEBAR_RESIZER_HIT_WIDTH, SIDEBAR_RESIZER_LINE_WIDTH,
-    TITLE_DRAG_THRESHOLD, WINDOW_RESIZE_BORDER,
-};
-
+/// Which modal covers the workspace. Bulk auto-tag and message dialogs are tracked separately.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Modal {
     None,
@@ -68,1096 +61,291 @@ enum Modal {
 }
 
 pub struct App {
-    pub file_selector: FileSelector,
-    pub menu: MainMenu,
-    pub player: Player,
-    pub search_thread: AbortHandle,
-    search_generation: u64,
-    pub dir_cache: DirCache,
+    file_selector: FileSelector,
+    player: Player,
+    dir_cache: DirCache,
     metadata_cache: MetadataCache,
-    drag_over: bool,
-    dialog: Option<Dialog>,
-    /// File or folder the OS asked us to open on startup.
-    pending_launch_path: Option<PathBuf>,
     allowed_directories: AllowedDirectories,
     favorites: FavoritesStore,
-    search_enabled_memo: std::cell::RefCell<Option<(PathBuf, Vec<PathBuf>, bool)>>,
+
+    // Search and background walks.
+    search_abort: AbortHandle,
+    search_generation: u64,
     /// Directories being walked, so repeated requests share one walk.
     walks_in_progress: HashSet<PathBuf>,
-    /// At most one of these modals is open; bulk auto-tag tracks its own state.
+    /// Whether `current_dir` is inside an allowed root, keyed by folder and root list.
+    /// Resolving touches the filesystem and `view` asks every frame.
+    search_enabled_memo: RefCell<Option<(PathBuf, Vec<PathBuf>, bool)>>,
+    caches_ready: bool,
+    /// File or folder the OS asked us to open, held until settings and audio are ready.
+    pending_launch_path: Option<PathBuf>,
+
+    // Modals.
     modal: Modal,
+    dialog: Option<Dialog>,
     settings_first_run: bool,
     settings_error: Option<String>,
-    always_on_top: bool,
     auto_tag: AutoTagState,
     tag_editor: TagEditorState,
     bulk_auto_tag: BulkAutoTagState,
-    bulk_scan_progress: Option<Arc<bulk_auto_tag::BulkScanProgress>>,
-    bulk_scan_cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
-    bulk_scan_generation: u64,
-    bulk_scan_active: Option<u64>,
-    bulk_apply_generation: u64,
-    bulk_apply_active: Option<u64>,
+
+    // Pointer and keyboard.
+    modifiers: Modifiers,
+    last_cursor: Point,
+    /// A file is dragged over the window from outside.
+    drag_over: bool,
     waveform_hovered: bool,
     waveform_scrubbing: bool,
     last_scrub_progress: f64,
-    controls_hovered: bool,
-    file_list_hovered: bool,
+    /// The file list, not a filter input, gets unmodified key presses.
     file_list_focused: bool,
-    filter_focus: FilterFocus,
-    sidebar_width: f32,
-    sidebar_resize: Option<SidebarResize>,
-    title_bar: TitleBarInteraction,
-    window_maximized: bool,
-    file_list_scrollbar_drag: Option<FileListScrollbarDrag>,
-    file_drag: Option<FileDragPending>,
+    file_drag: Option<FileDrag>,
     native_drag: NativeDrag,
+    /// Drag-out is initialized (always on Windows and macOS; X11 needs the window id first).
     drag_ready: bool,
-    caches_ready: bool,
-    search_pending: bool,
-    last_cursor: Point,
-    modifiers: Modifiers,
+    sidebar_resize: Option<SidebarResize>,
+    file_list_scrollbar_drag: Option<ScrollbarDrag>,
+    /// Where a title bar press started, until it turns into a window drag.
+    title_bar_press: Option<Point>,
+
+    // Window and preferences.
+    sidebar_width: f32,
+    window_maximized: bool,
+    always_on_top: bool,
 }
 
-
-pub fn app() {
-    let always_on_top = load_always_on_top();
-    iced::application(App::boot, App::update, App::view)
-        .title(App::title)
-        .antialiasing(true)
-        .font(ICED_AW_FONT_BYTES)
-        .subscription(App::subscription)
-        .level(window_level(always_on_top))
-        .decorations(false)
-        .resizable(true)
-        .exit_on_close_request(false)
-        .run()
-        .unwrap()
+/// Where to start browsing with no allowed folder: the working directory, else home.
+fn startup_directory() -> PathBuf {
+    std::env::current_dir().unwrap_or_else(|err| {
+        eprintln!("Could not read current directory: {err}");
+        dirs::home_dir().unwrap_or_else(std::env::temp_dir)
+    })
 }
 
-
-/// Run blocking work on its own thread. `Err` means it panicked.
-async fn run_blocking<T>(f: impl FnOnce() -> T + Send + 'static) -> Result<T, ()>
-where
-    T: Send + 'static,
-{
+/// Runs blocking work on its own thread. `Err` means it panicked.
+async fn run_blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Result<T, ()> {
     let (tx, rx) = oneshot::channel();
     std::thread::spawn(move || {
-        let _ = tx.send(f());
+        let _ = tx.send(work());
     });
     rx.await.map_err(|_| ())
 }
 
-async fn load_startup_caches_async(allowed: AllowedDirectories) -> PersistedCaches {
-    run_blocking(move || load_startup_caches(allowed))
-        .await
-        .unwrap_or_else(|_| panic!("blocking task dropped"))
-}
-
-fn clipboard_name(path: &Path) -> Task<Message> {
-    crate::path_util::file_name_lossy(path)
-        .map(iced::clipboard::write)
-        .unwrap_or_else(Task::none)
-}
-
-fn clipboard_path(path: &Path) -> Task<Message> {
-    iced::clipboard::write(path.to_string_lossy().into_owned())
-}
-
-fn reveal_path(path: &Path) -> Task<Message> {
-    reveal_in_file_manager(path);
-    Task::none()
-}
-
 impl App {
-    fn boot() -> (Self, Task<Message>) {
-        let mut app = Self::default();
-        app.pending_launch_path =
-            crate::launch::primary_open_target(&crate::launch::paths_from_args());
-        let allowed = app.allowed_directories.clone();
-        let volume = app.player.controls.volume;
-        let is_playing = app.player.controls.is_playing.clone();
-        let looping = app.player.controls.looping.clone();
-        let launch = app
-            .maybe_open_pending_launch()
-            .unwrap_or_else(Task::none);
-        (
-            app,
-            Task::batch([
-                Task::perform(
-                    load_startup_caches_async(allowed),
-                    Message::StartupCachesReady,
-                ),
-                Task::perform(
-                    async move {
-                        run_blocking(move || PlayerWorker::spawn(is_playing, looping, volume))
-                            .await
-                            .unwrap_or_else(|_| panic!("blocking task dropped"))
-                    },
-                    |(worker, receiver)| {
-                        Message::PlayerWorkerReady(worker, Arc::new(receiver))
-                    },
-                ),
-                launch,
-                on_window(|id| window::is_maximized(id).map(Message::WindowMaximizedChanged)),
-            ]),
-        )
-    }
-}
-
-impl Default for App {
-    fn default() -> App {
+    fn new() -> Self {
         let allowed_directories = AllowedDirectories::load();
         let settings_first_run = allowed_directories.is_empty();
-        let current_dir = allowed_directories
-            .startup_directory()
-            .unwrap_or_else(startup_directory);
-        let file_selector = FileSelector::new(&current_dir);
-        let menu = MainMenu::new();
-        let player = Player::new(load_volume(), load_looping());
-        let search_thread = AbortHandle::new_pair().0;
-        let dir_cache = DirCache::new();
-        let metadata_cache = MetadataCache::new();
+        let current_dir = allowed_directories.startup_directory().unwrap_or_else(startup_directory);
         App {
-            file_selector,
-            menu,
-            player,
-            search_thread,
-            search_generation: 0,
-            dir_cache,
-            metadata_cache,
-            drag_over: false,
-            dialog: None,
-            pending_launch_path: None,
+            file_selector: FileSelector::new(&current_dir),
+            player: Player::new(prefs::load_volume(), prefs::load_looping()),
+            dir_cache: DirCache::new(),
+            metadata_cache: MetadataCache::new(),
             allowed_directories,
             favorites: FavoritesStore::load(),
-            search_enabled_memo: Default::default(),
+            search_abort: AbortHandle::new_pair().0,
+            search_generation: 0,
             walks_in_progress: HashSet::new(),
+            search_enabled_memo: RefCell::default(),
+            caches_ready: false,
+            pending_launch_path: crate::launch::primary_open_target(&crate::launch::paths_from_args()),
             modal: if settings_first_run { Modal::Settings } else { Modal::None },
+            dialog: None,
             settings_first_run,
             settings_error: None,
-            always_on_top: load_always_on_top(),
             auto_tag: AutoTagState::default(),
             tag_editor: TagEditorState::default(),
             bulk_auto_tag: BulkAutoTagState::default(),
-            bulk_scan_progress: None,
-            bulk_scan_cancel: None,
-            bulk_scan_generation: 0,
-            bulk_scan_active: None,
-            bulk_apply_generation: 0,
-            bulk_apply_active: None,
+            modifiers: Modifiers::default(),
+            last_cursor: Point::ORIGIN,
+            drag_over: false,
             waveform_hovered: false,
-            controls_hovered: false,
-            file_list_hovered: false,
-            file_list_focused: false,
-            filter_focus: FilterFocus::None,
-            sidebar_width: load_sidebar_width(),
-            sidebar_resize: None,
-            title_bar: TitleBarInteraction {
-                drag_armed: false,
-                press_origin: None,
-            },
-            window_maximized: false,
             waveform_scrubbing: false,
             last_scrub_progress: 0.0,
-            file_list_scrollbar_drag: None,
+            file_list_focused: false,
             file_drag: None,
             native_drag: NativeDrag::new(),
             drag_ready: cfg!(any(windows, target_os = "macos")),
-            caches_ready: false,
-            search_pending: false,
-            last_cursor: Point::ORIGIN,
-            modifiers: Modifiers::default(),
-        }
-    }
-}
-
-#[cfg(test)]
-mod always_on_top_tests {
-    use super::*;
-
-    #[test]
-    fn window_level_follows_flag() {
-        assert_eq!(window_level(true), window::Level::AlwaysOnTop);
-        assert_eq!(window_level(false), window::Level::Normal);
-    }
-}
-
-
-impl App {
-    pub fn subscription(state: &App) -> Subscription<Message> {
-        let file_events = event::listen_with(|event, _status, _window| match event {
-            Event::Window(window::Event::FileDropped(path)) => Some(Message::FileDropped(path)),
-            Event::Window(window::Event::FileHovered(path)) => Some(Message::FileHovered(path)),
-            Event::Window(window::Event::FilesHoveredLeft) => Some(Message::FilesHoverLeft),
-            Event::Keyboard(iced::keyboard::Event::ModifiersChanged(modifiers)) => {
-                Some(Message::ModifiersChanged(modifiers))
-            }
-            Event::Mouse(mouse::Event::CursorMoved { position }) => {
-                Some(Message::CursorMoved(position))
-            }
-            _ => None,
-        });
-
-        let playing = state.player.controls.is_playing.load(Ordering::Relaxed)
-            && state.player.waveform.is_some();
-        // Only the time label needs this; the waveform animates its own playhead.
-        let playback_tick = if playing {
-            Subscription::run(|| {
-                StreamExt::map(async_io::Timer::interval(Duration::from_millis(250)), |_| {
-                    Message::PlaybackTick
-                })
-            })
-        } else {
-            Subscription::none()
-        };
-
-        let transport_keys = if state.player.waveform.is_some()
-            && state.dialog.is_none()
-            && state.modal == Modal::None
-            && !state.bulk_auto_tag.is_open()
-            && state.filter_focus != FilterFocus::FileSearch
-            && (state.filter_focus != FilterFocus::TagSearch || state.file_list_focused)
-        {
-            event::listen_with(|event, status, _window| {
-                if status != event::Status::Ignored {
-                    return None;
-                }
-                match event {
-                    Event::Keyboard(iced::keyboard::Event::KeyPressed {
-                        key,
-                        modifiers,
-                        repeat,
-                        ..
-                    }) => {
-                        if repeat || !transport_shortcut_allowed(modifiers) {
-                            return None;
-                        }
-                        if key == Key::Named(iced::keyboard::key::Named::Space) {
-                            Some(Message::TogglePlaying)
-                        } else {
-                            None
-                        }
-                    }
-                    _ => None,
-                }
-            })
-        } else {
-            Subscription::none()
-        };
-
-        let waveform_keys = if state.waveform_hovered && state.player.waveform.is_some() {
-            event::listen_with(|event, status, _window| {
-                if status != event::Status::Ignored {
-                    return None;
-                }
-                match event {
-                    Event::Keyboard(iced::keyboard::Event::KeyPressed {
-                        key,
-                        modifiers,
-                        repeat,
-                        ..
-                    }) => {
-                        if repeat || modifiers.control() || modifiers.logo() || modifiers.alt() {
-                            return None;
-                        }
-                        if key == Key::Named(iced::keyboard::key::Named::Space) {
-                            return None;
-                        }
-                        Some(Message::WaveformKey(key))
-                    }
-                    _ => None,
-                }
-            })
-        } else {
-            Subscription::none()
-        };
-
-        let sidebar_resize = if state.sidebar_resize.is_some() {
-            event::listen_with(|event, _status, _window| match event {
-                Event::Mouse(mouse::Event::CursorMoved { position }) => {
-                    Some(Message::SidebarResizeMove(position.x))
-                }
-                Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
-                    Some(Message::SidebarResizeEnd)
-                }
-                _ => None,
-            })
-        } else {
-            Subscription::none()
-        };
-
-        let file_list_scrollbar = if state.file_list_scrollbar_drag.is_some() {
-            event::listen_with(|event, _status, _window| match event {
-                Event::Mouse(mouse::Event::CursorMoved { position }) => {
-                    Some(Message::FileListScrollbarDrag(position))
-                }
-                Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
-                    Some(Message::FileListScrollbarRelease)
-                }
-                _ => None,
-            })
-        } else {
-            Subscription::none()
-        };
-
-        let file_drag = if state.sidebar_resize.is_none()
-            && state.file_list_scrollbar_drag.is_none()
-            && (state.file_drag.is_some() || state.native_drag.is_active())
-        {
-            event::listen_with(|event, _status, _window| match event {
-                Event::Mouse(mouse::Event::CursorMoved { position }) => {
-                    Some(Message::FileDragMove(position))
-                }
-                Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
-                    Some(Message::FileDragRelease)
-                }
-                _ => None,
-            })
-        } else {
-            Subscription::none()
-        };
-
-        let file_drag_tick = if state.native_drag.is_active() {
-            Subscription::run_with((), |_| {
-                stream::unfold((), |()| async {
-                    async_io::Timer::after(Duration::from_millis(16)).await;
-                    Some((Message::FileDragTick, ()))
-                })
-            })
-        } else {
-            Subscription::none()
-        };
-
-        let waveform_spring = if state.player.waveform.as_ref().is_some_and(|wf| {
-            wf.view_state().overscroll_active() && !wf.pan_active()
-        }) {
-            Subscription::run_with((), |_| {
-                stream::unfold((), |()| async {
-                    async_io::Timer::after(Duration::from_millis(16)).await;
-                    Some((Message::WaveformSpringTick, ()))
-                })
-            })
-        } else {
-            Subscription::none()
-        };
-
-        let filter_tab_keys = if state.filter_focus != FilterFocus::None
-            && !(state.filter_focus == FilterFocus::TagSearch
-                && tag_search_can_autocomplete(&state.file_selector.tag_search_value))
-        {
-            event::listen_with(|event, status, _window| {
-                if status != event::Status::Ignored {
-                    return None;
-                }
-                match event {
-                    Event::Keyboard(iced::keyboard::Event::KeyPressed {
-                        key,
-                        modifiers,
-                        repeat,
-                        ..
-                    }) if !repeat
-                        && !modifiers.control()
-                        && !modifiers.logo()
-                        && !modifiers.alt()
-                        && key.as_ref()
-                            == Key::Named(iced::keyboard::key::Named::Tab) =>
-                    {
-                        Some(Message::FilterTab(modifiers.shift()))
-                    }
-                    _ => None,
-                }
-            })
-        } else {
-            Subscription::none()
-        };
-
-        let tag_autocomplete_keys = if state.filter_focus == FilterFocus::TagSearch
-            && tag_search_can_autocomplete(&state.file_selector.tag_search_value)
-        {
-            event::listen_with(|event, status, _window| {
-                if status != event::Status::Ignored {
-                    return None;
-                }
-                match event {
-                    Event::Keyboard(iced::keyboard::Event::KeyPressed {
-                        key,
-                        modifiers,
-                        repeat,
-                        ..
-                    }) => {
-                        if repeat
-                            || modifiers.shift()
-                            || modifiers.control()
-                            || modifiers.logo()
-                            || modifiers.alt()
-                        {
-                            return None;
-                        }
-                        if key == Key::Named(iced::keyboard::key::Named::Tab) {
-                            Some(Message::TagSearchAutocomplete)
-                        } else {
-                            None
-                        }
-                    }
-                    _ => None,
-                }
-            })
-        } else {
-            Subscription::none()
-        };
-
-        let bulk_scan_tick = if state.bulk_scan_progress.is_some() {
-            Subscription::run_with((), |_| {
-                stream::unfold((), |()| async {
-                    async_io::Timer::after(Duration::from_millis(100)).await;
-                    Some((Message::BulkAutoTagProgressTick, ()))
-                })
-            })
-        } else {
-            Subscription::none()
-        };
-
-        let close_requests = window::close_requests().map(|_| Message::Quit);
-        let window_resize = window::resize_events().map(|(_id, _size)| Message::SyncWindowMaximized);
-
-        let waveform_scrub = if state.waveform_scrubbing {
-            event::listen_with(|event, _status, _window| match event {
-                Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
-                    Some(Message::WaveformScrubRelease)
-                }
-                _ => None,
-            })
-        } else {
-            Subscription::none()
-        };
-
-        Subscription::batch([
-            file_events,
-            playback_tick,
-            waveform_keys,
-            transport_keys,
-            filter_tab_keys,
-            tag_autocomplete_keys,
-            waveform_spring,
-            sidebar_resize,
-            file_list_scrollbar,
-            file_drag,
-            file_drag_tick,
-            bulk_scan_tick,
-            window_resize,
-            close_requests,
-            waveform_scrub,
-        ])
-    }
-
-    fn autocomplete_tag_field(&mut self) -> Task<Message> {
-        match tag_field_best_match(&self.file_selector.tag_search_value) {
-            Some(field) => self.select_tag_field(field),
-            None => Task::none(),
+            sidebar_resize: None,
+            file_list_scrollbar_drag: None,
+            title_bar_press: None,
+            sidebar_width: prefs::load_sidebar_width(),
+            window_maximized: false,
+            always_on_top: prefs::load_always_on_top(),
         }
     }
 
-    /// Put `field:` in the tag search box, ready for a value.
-    fn select_tag_field(&mut self, field: TagField) -> Task<Message> {
-        self.filter_focus = FilterFocus::TagSearch;
-        self.file_selector.tag_search_error = None;
-        self.file_selector.tag_search_value = format!("{}:", field.as_str());
-        operation::focus(Id::new(TAG_SEARCH_INPUT_ID))
-    }
-
-    /// Walk `dir` on a background thread unless a walk of it is already running.
-    fn walk_task(&mut self, dir: PathBuf) -> Task<Message> {
-        let key = crate::path_util::cache_key(dir.clone());
-        if !self.walks_in_progress.insert(key.clone()) {
-            return Task::none();
-        }
-        Task::perform(
-            run_blocking(move || {
-                let children = walk_directory(&dir);
-                (dir, children)
+    fn boot() -> (Self, Task<Message>) {
+        let mut app = Self::new();
+        let allowed = app.allowed_directories.clone();
+        let (is_playing, looping) = (Arc::clone(&app.player.controls.is_playing), Arc::clone(&app.player.controls.looping));
+        let volume = app.player.controls.volume;
+        let tasks = [
+            Task::perform(run_blocking(move || load_startup_caches(allowed)), |caches| {
+                Message::StartupCachesReady(caches.expect("loading caches panicked"))
             }),
-            move |walked| walked.map_or_else(|()| Message::WalkFailed(key.clone()), Message::InsertDircache),
-        )
-    }
-
-    fn finish_scrub(&mut self, progress: f64) -> Task<Message> {
-        if !self.waveform_scrubbing {
-            return Task::none();
-        }
-        self.waveform_scrubbing = false;
-        self.player.controls.scrubbing = false;
-        if let Some(waveform) = &mut self.player.waveform {
-            waveform.set_ui_scrubbing(false);
-            waveform.set_scrub_progress(None);
-        }
-        self.player.seek(progress);
-        Task::none()
-    }
-
-    fn release_filter_focus(&mut self) -> Task<Message> {
-        self.filter_focus = FilterFocus::None;
-        operation::focus(Id::new(FILE_LIST_SCROLL_ID))
-    }
-
-    fn open_path(&mut self, path: &Path) -> Task<Message> {
-        let listings = self.dir_cache.snapshot();
-        let known = listings.values().flatten().map(PathBuf::as_path);
-        let path = crate::path_util::resolve_open_path(path, known);
-        let defocus = self.release_filter_focus();
-        if path.is_dir() {
-            return Task::batch([defocus, self.navigate_directory(path)]);
-        }
-        if is_audio(&path) {
-            return Task::batch([defocus, self.open_audio_at(path)]);
-        }
-        defocus
-    }
-
-    fn open_audio_at(&mut self, path: PathBuf) -> Task<Message> {
-        if let Some(parent) = path.parent().filter(|dir| dir.is_dir()) {
-            self.filter_focus = FilterFocus::None;
-            if !self.file_selector.favorites_only {
-                self.file_selector.reload_directory(parent);
-            }
-        }
-        self.play_audio(&path)
-    }
-
-    fn maybe_open_pending_launch(&mut self) -> Option<Task<Message>> {
-        if self.modal == Modal::Settings || self.pending_launch_path.is_none() {
-            return None;
-        }
-        if !self.player.audio_ready() {
-            return None;
-        }
-        let path = self.pending_launch_path.take().expect("checked");
-        Some(self.open_path(&path))
-    }
-
-    /// Whether the current folder is inside an allowed root. Resolving the path
-    /// touches the filesystem and `view` asks every frame, so the answer is
-    /// memoized per folder and root list.
-    fn search_enabled(&self) -> bool {
-        let dir = &self.file_selector.current_dir;
-        let roots = self.allowed_directories.roots();
-        let mut memo = self.search_enabled_memo.borrow_mut();
-        if let Some((memo_dir, memo_roots, enabled)) = memo.as_ref()
-            && memo_dir == dir
-            && memo_roots.as_slice() == roots
-        {
-            return *enabled;
-        }
-        let enabled = self.allowed_directories.contains_path(dir);
-        *memo = Some((dir.clone(), roots.to_vec(), enabled));
-        enabled
-    }
-
-    fn navigate_directory(&mut self, dir: PathBuf) -> Task<Message> {
-        self.filter_focus = FilterFocus::None;
-        self.file_selector.reload_directory(&dir);
-        if self.file_selector.favorites_only {
-            self.reset_file_list();
-            return Task::none();
-        }
-        if !self.search_enabled() {
-            self.search_thread.abort();
-            return Task::none();
-        }
-        if !self.dir_cache.contains_key(&dir) {
-            self.walk_task(dir)
-        } else {
-            self.start_file_search()
-        }
-    }
-
-    fn play_audio(&mut self, file_path: &Path) -> Task<Message> {
-        match self.player.play_file(file_path) {
-            Ok(()) => {
-                // Playing a file only re-runs the search when its tags turned out
-                // to be stale; otherwise the list (and selection) stay put.
-                let refresh = if self.merge_path_metadata(file_path) {
-                    self.refresh_search_if_active()
-                } else {
-                    Task::none()
-                };
-                self.file_selector.sync_selection_for_path(file_path);
-                refresh
-            }
-            Err(err) => {
-                self.show_error(err);
-                self.file_selector.clear_selection();
-                Task::none()
-            }
-        }
-    }
-
-    fn show_error(&mut self, message: String) {
-        self.player.reset_on_error();
-        self.dialog = Some(Dialog::error(message));
-    }
-
-    fn show_notice(&mut self, message: impl Into<String>) {
-        self.dialog = Some(Dialog::notice(message.into()));
-    }
-
-    fn ensure_drag() -> Task<Message> {
-        on_window(|id| {
-            window::run(id, |window| crate::drag_out::x11_window_id(window)).map(Message::DragWindowId)
-        })
-    }
-
-    #[cfg(any(windows, target_os = "macos"))]
-    fn begin_platform_drag(path: PathBuf) -> Task<Message> {
-        on_window(move |id| {
-            let drag_path = path.clone();
-            window::run(id, move |window| crate::drag_out::start_blocking(window, drag_path))
-                .map(Message::FileDragCompleted)
-        })
-    }
-
-    fn start_file_drag(&mut self, path: PathBuf) -> Task<Message> {
-        let canonical = match crate::path_util::canonical_path(&path) {
-            Ok(path) => path,
-            Err(err) => {
-                self.show_notice(drag_out_notice(format!(
-                    "Cannot drag {}: {err}.",
-                    path.display()
-                )));
-                self.file_drag = None;
-                return Task::none();
-            }
-        };
-
-        #[cfg(any(windows, target_os = "macos"))]
-        {
-            self.file_drag = None;
-            return Self::begin_platform_drag(canonical);
-        }
-
-        #[cfg(all(unix, not(target_os = "macos")))]
-        {
-            match self.native_drag.start(canonical) {
-                Ok(()) => Task::none(),
-                Err(err) => {
-                    self.show_notice(drag_out_notice(format!("Drag failed: {err}.")));
-                    self.file_drag = None;
-                    Task::none()
-                }
-            }
-        }
+            Task::perform(run_blocking(move || PlayerWorker::spawn(is_playing, looping, volume)), |spawned| {
+                let (worker, events) = spawned.expect("starting the audio thread panicked");
+                Message::PlayerWorkerReady(worker, Arc::new(events))
+            }),
+            app.open_pending_launch(),
+            on_window(|id| window::is_maximized(id).map(|maximized| WindowMsg::MaximizedChanged(maximized).into())),
+        ];
+        (app, Task::batch(tasks))
     }
 
     pub fn title(&self) -> String {
-        let active_file = self
-            .player
-            .current_file
-            .as_ref()
-            .and_then(|path| crate::path_util::file_name_lossy(path));
-        window_title(active_file.as_deref())
+        window_title(self.current_file_name().as_deref())
     }
 
-    fn prepare_feature_modal(&mut self) {
-        self.dialog = None;
-        self.cancel_bulk_scan();
-    }
-
-    fn allowed_audio_error(&self, path: &Path) -> Option<&'static str> {
-        if !is_audio(path) {
-            Some(UNSUPPORTED_AUDIO)
-        } else if !self.allowed_directories.contains_path(path) {
-            Some(FILE_OUTSIDE_ALLOWED)
-        } else {
-            None
-        }
-    }
-
-    fn with_current_file(&self, f: impl FnOnce(&Path) -> Task<Message>) -> Task<Message> {
-        self.player
-            .current_file
-            .as_deref()
-            .map(f)
-            .unwrap_or_else(Task::none)
-    }
-
-    /// Re-read `path`'s tags into the index. True when they changed.
-    fn merge_path_metadata(&mut self, path: &Path) -> bool {
-        let Some(cached) = refresh_cached_metadata(path) else {
-            return false;
-        };
-        let changed = self.metadata_cache.cached_fields(path).as_ref() != Some(&cached.fields);
-        self.metadata_cache.merge_path(path, cached);
-        changed
-    }
-
-    fn refresh_search_if_active(&mut self) -> Task<Message> {
-        if self.file_selector.search_active() {
-            self.start_file_search()
-        } else {
-            Task::none()
-        }
-    }
-
-    fn open_tag_editor_for(&mut self, path: PathBuf) -> Task<Message> {
-        // Reopening a file whose save is still running shows that save rather
-        // than reloading tags it is about to replace.
-        if self.tag_editor.saving && self.tag_editor.target.as_ref() == Some(&path) {
-            self.modal = Modal::TagEditor;
-            return Task::none();
-        }
-        // First-run settings must be completed before anything else opens.
-        if self.modal == Modal::Settings && self.settings_first_run {
-            return Task::none();
-        }
-        self.prepare_feature_modal();
-        self.modal = Modal::TagEditor;
-        if let Some(err) = self.allowed_audio_error(&path) {
-            self.tag_editor = TagEditorState::default();
-            self.tag_editor.set_error(err);
-            return Task::none();
-        }
-        let fields = self.metadata_cache.tag_fields_for(&path);
-        self.tag_editor.reset_for_path(path, fields);
-        Task::none()
-    }
-
-    fn reset_file_list(&mut self) {
-        if self.file_selector.favorites_only {
-            let favorites = self.favorite_file_buttons();
-            self.file_selector.set_file_list(favorites, None);
-            return;
-        }
-        let (file_list, list_error) = FileList::list_buttons(&self.file_selector.current_dir);
-        self.file_selector.set_file_list(file_list, list_error);
-    }
-
-    fn favorite_file_buttons(&self) -> Vec<FileButton> {
-        let mut buttons: Vec<FileButton> = self
-            .favorites
-            .paths()
-            .iter()
-            .filter_map(|stored| {
-                let path = crate::path_util::canonical_path(stored)
-                    .unwrap_or_else(|_| stored.clone());
-                if !path.is_file() || self.allowed_audio_error(&path).is_some() {
-                    return None;
-                }
-                let base = path
-                    .parent()
-                    .map(Path::to_path_buf)
-                    .unwrap_or_else(|| path.clone());
-                Some(FileButton::with_kind(path, &base, false))
-            })
-            .collect();
-        buttons.sort_by(|a, b| a.label.to_lowercase().cmp(&b.label.to_lowercase()));
-        buttons
-    }
-
-    fn favorite_key_set(&self) -> HashSet<PathBuf> {
-        self.favorites.paths().iter().cloned().collect()
-    }
-
-    fn refresh_after_favorites_change(&mut self) -> Task<Message> {
-        if self.file_selector.search_active() {
-            self.start_file_search()
-        } else {
-            self.reset_file_list();
-            Task::none()
-        }
-    }
-
-    /// Drop cache entries outside the allowed folders. Caches only; favorites
-    /// are user data and are filtered at display time instead.
-    fn prune_caches(&mut self) {
-        let allowed = self.allowed_directories.clone();
-        if allowed.is_empty() {
-            return;
-        }
-        if self.dir_cache.retain(|path| allowed.contains_cached_path(path)) {
-            self.dir_cache.persist();
-        }
-        if self
-            .metadata_cache
-            .retain(|path| allowed.contains_cached_path(path))
-        {
-            self.metadata_cache.persist();
-        }
-    }
-
-    fn warm_allowed_caches(&mut self) -> Task<Message> {
-        let missing: Vec<PathBuf> = self
-            .allowed_directories
-            .roots()
-            .iter()
-            .filter(|root| !self.dir_cache.contains_key(root))
-            .cloned()
-            .collect();
-        Task::batch(missing.into_iter().map(|root| self.walk_task(root)))
-    }
-
-
-    fn start_file_search(&mut self) -> Task<Message> {
-        self.search_thread.abort();
-        self.search_generation = self.search_generation.wrapping_add(1);
-        let generation = self.search_generation;
-        let file_query = self.file_selector.search_value.clone();
-        let tag_filters = self.file_selector.tag_filters.clone();
-        let case_sensitive = self.file_selector.search_case_sensitive;
-        let show_directories = self.file_selector.search_show_directories;
-        let tag_only = self.file_selector.tag_only_search();
-        let favorites_only = self.file_selector.favorites_only;
-        let favorite_keys = self.favorite_key_set();
-
-        if !self.search_enabled() || !file_search_active(&file_query, &tag_filters) {
-            self.reset_file_list();
-            return Task::none();
-        }
-
-        if favorites_only && favorite_keys.is_empty() {
-            self.file_selector.set_file_list(Vec::new(), None);
-            return Task::none();
-        }
-
-        // `StartupCachesReady` re-runs the active search, so bailing here only defers it.
-        // Running early would race `warm_allowed_caches` into walking the same roots twice.
-        if !self.caches_ready {
-            self.search_pending = true;
-            return Task::none();
-        }
-        self.search_pending = false;
-
-        let debounce_ms = if tag_only {
-            TAG_SEARCH_DEBOUNCE_MS
-        } else {
-            file_search_debounce_ms(file_query.len())
-        };
-        let allowed_roots = self.allowed_directories.roots().to_vec();
-        let dir_cache = self.dir_cache.share();
-        let metadata_cache = self.metadata_cache.share();
-        let (abort_handle, abort_reg) = AbortHandle::new_pair();
-        self.search_thread = abort_handle;
-
-        Task::perform(
-            Abortable::new(
-                async move {
-                    let result = execute_file_search(
-                        debounce_ms,
-                        allowed_roots,
-                        dir_cache,
-                        metadata_cache,
-                        file_query,
-                        tag_filters,
-                        case_sensitive,
-                        show_directories,
-                        tag_only,
-                        favorites_only,
-                        favorite_keys,
-                    )
-                    .await;
-                    (generation, result)
-                },
-                abort_reg,
-            ),
-            move |result| match result {
-                Ok(payload) => Message::SearchCompleted {
-                    generation: payload.0,
-                    result: Ok(payload.1),
-                },
-                Err(aborted) => Message::SearchCompleted {
-                    generation,
-                    result: Err(aborted),
-                },
-            },
-        )
-    }
-
-    fn abort_bulk_scan(&mut self) {
-        if let Some(cancel) = &self.bulk_scan_cancel {
-            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-        }
-        self.bulk_scan_cancel = None;
-        self.bulk_scan_generation = self.bulk_scan_generation.wrapping_add(1);
-        self.bulk_scan_progress = None;
-        self.bulk_scan_active = None;
-        self.bulk_apply_generation = self.bulk_apply_generation.wrapping_add(1);
-        self.bulk_apply_active = None;
-    }
-
-    fn request_cancel_bulk_apply(&mut self) {
-        if let Some(cancel) = &self.bulk_scan_cancel {
-            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-        }
-        self.bulk_auto_tag.request_stop_apply();
-    }
-
-    fn cancel_bulk_scan(&mut self) {
-        self.abort_bulk_scan();
-        self.bulk_auto_tag.close();
-    }
-
-    fn start_bulk_scan(&mut self) -> Task<Message> {
-        let Some(root) = self.bulk_auto_tag.root.clone() else {
-            self.bulk_auto_tag
-                .set_error("Choose a folder before scanning.");
-            return Task::none();
-        };
-        if !root.is_dir() {
-            self.bulk_auto_tag.set_error("That folder no longer exists.");
-            return Task::none();
-        }
-        if !self.allowed_directories.contains_path(&root) {
-            self.bulk_auto_tag
-                .set_error(FOLDER_OUTSIDE_ALLOWED);
-            return Task::none();
-        }
-
-        self.abort_bulk_scan();
-        let generation = self.bulk_scan_generation;
-        self.bulk_scan_active = Some(generation);
-        self.bulk_auto_tag.start_running(root.clone());
-        let progress = bulk_auto_tag::BulkScanProgress::new();
-        self.bulk_scan_progress = Some(progress.clone());
-        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        self.bulk_scan_cancel = Some(Arc::clone(&cancel));
-        let metadata = self.metadata_cache.snapshot();
-
-        Task::perform(
-            async move {
-                let result = run_blocking(move || {
-                    bulk_auto_tag::scan_and_classify(root, metadata, progress, cancel)
-                })
-                .await
-                .unwrap_or_else(|()| Err("Scan failed unexpectedly.".into()));
-                (generation, result)
-            },
-
-            |(generation, result)| Message::BulkAutoTagScanCompleted { generation, result },
-        )
+    fn current_file_name(&self) -> Option<String> {
+        self.player.current_file.as_deref().and_then(crate::path_util::file_name_lossy)
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::FileListSelect { index, shift, control } => {
-                self.filter_focus = FilterFocus::None;
-                self.file_list_focused = true;
-                self.file_selector.select_row(index, shift, control);
-                if shift || control {
-                    return Task::none();
+            Message::CursorMoved(point) => self.cursor_moved(point),
+            Message::MouseReleased => self.mouse_released(),
+            Message::KeyPressed(key, modifiers) => self.key_pressed(key, modifiers),
+            Message::ModifiersChanged(modifiers) => {
+                self.modifiers = modifiers;
+                if let Some(waveform) = &mut self.player.waveform {
+                    waveform.set_modifiers(modifiers);
                 }
-                let Some(path) = self
-                    .file_selector
-                    .file_list
-                    .get(index)
-                    .map(|entry| entry.file_path.clone())
-                else {
-                    return Task::none();
-                };
-                self.open_path(&path)
+                Task::none()
             }
-
             Message::FileDropped(path) => {
                 self.drag_over = false;
                 self.open_path(&path)
             }
-
             Message::FileHovered(path) => {
-                self.drag_over = is_audio(&path) || path.is_dir();
+                self.drag_over = crate::metadata::is_audio(&path) || path.is_dir();
                 Task::none()
             }
-
             Message::FilesHoverLeft => {
                 self.drag_over = false;
                 Task::none()
             }
 
-            Message::OpenFolder => {
-                let start_dir = self.file_selector.current_dir.clone();
-                Task::perform(pick_folder(start_dir), Message::FolderPicked)
+            Message::FileListSelect { index, shift, control } => self.select_file_row(index, shift, control),
+            Message::FileListScrolled(viewport) => {
+                self.file_selector.list_scroll_offset = viewport.absolute_offset().y;
+                self.file_selector.list_viewport_height = viewport.bounds().height;
+                Task::none()
             }
-
+            Message::FileListScrollbarPress { track_y, track_top, track_height } => {
+                self.press_scrollbar(track_y, track_top, track_height)
+            }
+            Message::FileListHoverChanged(hovered) => {
+                self.file_list_focused &= hovered;
+                Task::none()
+            }
+            Message::FileRowHover(index) => {
+                self.file_selector.filter_focus = Default::default();
+                self.file_selector.hovered_file = Some(index);
+                Task::none()
+            }
+            Message::FileRowLeave => {
+                self.file_selector.hovered_file = None;
+                Task::none()
+            }
+            Message::FileCopyName(path) => copy_name(&path),
+            Message::FileCopyPath(path) => copy_path(&path),
+            Message::FileRevealInFileManager(path) => reveal(&path),
+            Message::ToggleFavorite(path) => self.toggle_favorite(&path),
+            Message::ChangeDirectory(dir) => self.navigate_directory(dir),
+            Message::OpenFolder => Task::perform(
+                pick_folder(self.file_selector.current_dir.clone()),
+                Message::FolderPicked,
+            ),
             Message::OpenFile => Task::perform(
                 pick_audio_file(self.file_selector.current_dir.clone()),
                 Message::FilePicked,
             ),
-
-
-            Message::FilePicked(file) => {
-                if let Some(path) = file {
-                    return self.open_path(&path);
-                }
-                Task::none()
-            }
-
-            Message::FolderPicked(folder) => {
-                if let Some(path) = folder {
-                    return self.navigate_directory(path);
-                }
-                Task::none()
-            }
-
-            Message::GoHome => {
-                if let Some(home) = self.allowed_directories.startup_directory() {
-                    return self.navigate_directory(home);
-                }
-                if let Some(home) = dirs::home_dir() {
-                    return self.navigate_directory(home);
-                }
-                Task::none()
-            }
-
+            Message::FolderPicked(folder) => folder.map_or_else(Task::none, |dir| self.navigate_directory(dir)),
+            Message::FilePicked(file) => file.map_or_else(Task::none, |path| self.open_path(&path)),
+            Message::GoHome => match self.allowed_directories.startup_directory().or_else(dirs::home_dir) {
+                Some(home) => self.navigate_directory(home),
+                None => Task::none(),
+            },
             Message::RefreshDirectory => {
                 let current_dir = self.file_selector.current_dir.clone();
                 self.file_selector.reload_directory(&current_dir);
                 self.start_file_search()
             }
+            Message::InvalidateDircache => self.invalidate_caches(),
+            Message::Filter(message) => self.update_filter(message),
 
-            Message::Quit => {
-                self.dir_cache.flush();
-                self.metadata_cache.flush();
-                iced::exit()
+            Message::FileDragPress { path, from_file_list } => self.press_file(path, from_file_list),
+            Message::FileDragTick => self.tick_native_drag(),
+            Message::FileDragCompleted(result) => {
+                if let Err(err) = result {
+                    self.show_notice(input::drag_out_notice(&format!("Drag failed: {err}.")));
+                }
+                self.file_drag = None;
+                Task::none()
             }
-
-            Message::WindowTitleBarPress => {
-                self.title_bar.drag_armed = true;
-                self.title_bar.press_origin = Some(self.last_cursor);
+            Message::DragWindowId(window_id) => self.drag_window_ready(window_id),
+            Message::SidebarResizeStart => {
+                self.sidebar_resize = Some(SidebarResize {
+                    origin_x: None,
+                    origin_width: self.sidebar_width,
+                });
                 Task::none()
             }
 
-            Message::WindowTitleBarRelease => {
-                self.title_bar.drag_armed = false;
-                self.title_bar.press_origin = None;
-                Task::none()
-            }
-
-            Message::WindowMinimize => on_window(|id| window::minimize(id, true)),
-
-            Message::WindowToggleMaximize => {
-                self.title_bar.drag_armed = false;
-                self.title_bar.press_origin = None;
-                on_window(|id| {
-                    window::toggle_maximize(id)
-                        .chain(window::is_maximized(id).map(Message::WindowMaximizedChanged))
-                })
-            }
-
-            Message::WindowMaximizedChanged(maximized) => {
-                self.window_maximized = maximized;
-                Task::none()
-            }
-
-            Message::SyncWindowMaximized => {
-                on_window(|id| window::is_maximized(id).map(Message::WindowMaximizedChanged))
-            }
-
-            Message::WindowResize(direction) => on_window(move |id| window::drag_resize(id, direction)),
-
-            Message::NoOp => Task::none(),
-
+            Message::StartupCachesReady(caches) => self.startup_caches_ready(caches),
+            Message::InsertDircache((dir, children)) => self.insert_walked_directory(dir, children),
             Message::WalkFailed(key) => {
                 self.walks_in_progress.remove(&key);
                 Task::none()
             }
+            Message::MetadataIndexed(entries) => {
+                self.metadata_cache.merge(entries);
+                self.refresh_search_if_active()
+            }
+            Message::PlayerWorkerReady(worker, events) => {
+                self.player.attach_worker(worker);
+                let events = Arc::try_unwrap(events).map_or_else(|_| Task::none(), |events| Task::run(events, Message::Player));
+                Task::batch([events, self.open_pending_launch()])
+            }
 
+            Message::Player(event) => {
+                self.player_event(event);
+                Task::none()
+            }
+            Message::TogglePlaying => {
+                self.player.toggle_playing();
+                Task::none()
+            }
+            Message::ToggleLoop => {
+                prefs::persist_looping(self.player.toggle_loop());
+                Task::none()
+            }
+            Message::StopPlayback => {
+                self.player.stop();
+                Task::none()
+            }
+            Message::VolumeChanged(volume) => {
+                self.player.set_volume(volume);
+                Task::none()
+            }
+            Message::VolumeCommit => {
+                prefs::persist_volume(self.player.controls.volume);
+                Task::none()
+            }
+            Message::PlaybackTick => {
+                self.player.sync_playback_ui();
+                Task::none()
+            }
+            Message::Waveform(message) => self.update_waveform(message),
+
+            Message::Window(message) => self.update_window(message),
+            Message::SetAlwaysOnTop(always_on_top) => {
+                self.always_on_top = always_on_top;
+                prefs::persist_always_on_top(always_on_top);
+                prefs::set_window_level(always_on_top)
+            }
             Message::About => {
                 self.dialog = Some(Dialog::about(format!(
                     "Tundra {}. FLAC, WAV, MP3, OGG, and AIFF. \
@@ -1167,1190 +355,45 @@ impl App {
                 )));
                 Task::none()
             }
-
             Message::DismissDialog => {
                 self.dialog = None;
                 Task::none()
             }
-
-            Message::OpenSettings => {
-                // First-run settings must be completed before anything else opens.
-                if self.modal == Modal::Settings && self.settings_first_run {
-                    return Task::none();
-                }
-                self.prepare_feature_modal();
-                self.modal = Modal::Settings;
-                self.settings_error = None;
-                Task::none()
-            }
-
-            Message::SetAlwaysOnTop(always_on_top) => {
-                self.always_on_top = always_on_top;
-                persist_always_on_top(always_on_top);
-                set_window_level(always_on_top)
-            }
-
-            Message::CloseSettings => {
-                if self.allowed_directories.is_empty() {
-                    self.settings_error =
-                        Some("Add at least one directory to search.".into());
-                    return Task::none();
-                }
-                self.modal = Modal::None;
-                self.settings_first_run = false;
-                self.settings_error = None;
-                self.prune_caches();
-                let warm = self.warm_allowed_caches();
-                let search = self.refresh_search_if_active();
-                let launch = self.maybe_open_pending_launch();
-                if let Some(task) = launch {
-                    return Task::batch([task, warm, search]);
-                }
-                let navigate = if let Some(dir) = self.allowed_directories.startup_directory() {
-                    if !self
-                        .allowed_directories
-                        .contains_path(&self.file_selector.current_dir)
-                    {
-                        Some(self.navigate_directory(dir))
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-                match navigate {
-                    Some(task) => Task::batch([task, warm, search]),
-                    None => Task::batch([warm, search]),
-                }
-            }
-
-            Message::PickAllowedDirectory => {
-                let start_dir = self
-                    .allowed_directories
-                    .startup_directory()
-                    .or_else(dirs::home_dir)
-                    .unwrap_or_else(startup_directory);
-                Task::perform(pick_folder(start_dir), Message::AllowedDirectoryPicked)
-            }
-
-            Message::AllowedDirectoryPicked(path) => {
-                if let Some(path) = path {
-                    match self.allowed_directories.add(path) {
-                        (AddDirectoryResult::Added, Some(resolved)) => {
-                            self.allowed_directories.persist();
-                            self.settings_error = None;
-                            if self.dir_cache.contains_key(&resolved) {
-                                return self.refresh_search_if_active();
-                            }
-                            return self.walk_task(resolved);
-                        }
-                        (AddDirectoryResult::Unresolved, _) => {
-                            self.settings_error =
-                                Some("Could not resolve that directory.".into());
-                        }
-                        (AddDirectoryResult::Duplicate, _) => {}
-                        (AddDirectoryResult::Added, None) => {}
-                    }
-                }
-                Task::none()
-            }
-
-            Message::RemoveAllowedDirectory(path) => {
-                self.allowed_directories.remove(&path);
-                self.allowed_directories.persist();
-                self.refresh_search_if_active()
-            }
-
-            Message::ChangeDirectory(parent_dir) => self.navigate_directory(parent_dir),
-
-            Message::Search(search_str) => {
-                self.filter_focus = FilterFocus::FileSearch;
-                self.file_list_focused = false;
-                self.file_selector.search_value = search_str;
-                Task::batch([
-                    self.start_file_search(),
-                    operation::focus(Id::new(FILE_SEARCH_INPUT_ID)),
-                ])
-            }
-
-            Message::ToggleSearchCaseSensitive => {
-                self.file_selector.search_case_sensitive =
-                    !self.file_selector.search_case_sensitive;
-                self.start_file_search()
-            }
-
-            Message::ToggleSearchShowDirectories => {
-                self.file_selector.search_show_directories =
-                    !self.file_selector.search_show_directories;
-                self.start_file_search()
-            }
-
-            Message::ToggleFavoritesOnly => {
-                self.file_selector.favorites_only = !self.file_selector.favorites_only;
-                self.refresh_after_favorites_change()
-            }
-
-            Message::ToggleFavorite(path) => {
-                if self.allowed_audio_error(&path).is_some() {
-                    return Task::none();
-                }
-                self.favorites.toggle(path);
-                self.favorites.persist();
-                self.refresh_after_favorites_change()
-            }
-
-            Message::OpenAutoTag => {
-                // First-run settings must be completed before anything else opens.
-                if self.modal == Modal::Settings && self.settings_first_run {
-                    return Task::none();
-                }
-                self.prepare_feature_modal();
-                self.modal = Modal::AutoTag;
-                let target = self.file_selector.selected_audio_path();
-                self.auto_tag.reset_for_target(target);
-                Task::none()
-            }
-
-            Message::OpenAutoTagFor(path) => {
-                // First-run settings must be completed before anything else opens.
-                if self.modal == Modal::Settings && self.settings_first_run {
-                    return Task::none();
-                }
-                self.prepare_feature_modal();
-                self.modal = Modal::AutoTag;
-                if let Some(err) = self.allowed_audio_error(&path) {
-                    self.auto_tag.reset_for_target(None);
-                    self.auto_tag.set_error(err);
-                    return Task::none();
-                }
-                self.auto_tag.reset_for_target(Some(path));
-                Task::none()
-            }
-
-            Message::CloseAutoTag => {
-                self.modal = Modal::None;
-                Task::none()
-            }
-
-            Message::OpenTagEditorFor(path) => self.open_tag_editor_for(path),
-
-            Message::CloseTagEditor => {
-                self.modal = Modal::None;
-                if !self.tag_editor.saving {
-                    self.tag_editor = TagEditorState::default();
-                }
-                Task::none()
-            }
-
-            Message::TagEditorInput(field, value) => {
-                self.tag_editor.set_field(field, value);
-                Task::none()
-            }
-
-            Message::TagEditorSave => {
-                let Some(path) = self.tag_editor.target.clone() else {
-                    self.tag_editor.set_error(SELECT_AUDIO_FIRST);
-                    return Task::none();
-                };
-                if let Some(err) = self.allowed_audio_error(&path) {
-                    self.tag_editor.set_error(err);
-                    return Task::none();
-                }
-                let edits = self.tag_editor.edits.clone();
-                self.tag_editor.begin_save();
-                Task::perform(
-                    run_blocking({
-                        let path = path.clone();
-                        move || write_manual_tags(&path, &edits)
-                    }),
-                    move |result| {
-                        let result = result
-                            .unwrap_or_else(|()| Err("Saving stopped unexpectedly.".into()));
-                        Message::TagEditorSaved(path.clone(), result)
-                    },
-                )
-            }
-
-            Message::TagEditorSaved(path, result) => {
-                // The file may have changed even if the editor moved on.
-                let changed = result.is_ok() && self.merge_path_metadata(&path);
-                if self.tag_editor.target.as_ref() == Some(&path) {
-                    self.tag_editor.finish_save(result);
-                }
-                if changed {
-                    self.refresh_search_if_active()
-                } else {
-                    Task::none()
-                }
-            }
-
-            Message::AutoTagPickFile => {
-                let start_dir = self
-                    .auto_tag
-                    .target
-                    .as_ref()
-                    .and_then(|path| path.parent().map(Path::to_path_buf))
-                    .unwrap_or_else(|| self.file_selector.current_dir.clone());
-                Task::perform(pick_audio_file(start_dir), Message::AutoTagFilePicked)
-            }
-
-            Message::AutoTagFilePicked(path) => {
-                if let Some(candidate) = path {
-                    if let Some(err) = self.allowed_audio_error(&candidate) {
-                        self.auto_tag.set_error(err);
-                    } else {
-                        self.auto_tag.reset_for_target(Some(candidate));
-                    }
-                }
-                Task::none()
-            }
-
-            Message::AutoTagRun => {
-                let Some(path) = self.auto_tag.target.clone() else {
-                    self.auto_tag.set_error(SELECT_AUDIO_FIRST);
-                    return Task::none();
-                };
-                if let Some(err) = self.allowed_audio_error(&path) {
-                    self.auto_tag.set_error(err);
-                    return Task::none();
-                }
-                if let Some(existing) = instrument_tag(&path) {
-                    self.auto_tag.existing_instrument = Some(existing);
-                }
-                if auto_tag_field_status(&path).is_some_and(|status| !status.allows_instrument_work()) {
-                    self.auto_tag.clear_error();
-                    self.auto_tag.status = AUTO_TAG_INSTRUMENT_PRESENT.into();
-                    return Task::none();
-                }
-                self.auto_tag.begin_run();
-                Task::perform(
-                    async move {
-                        let result = run_blocking({
-                            let path = path.clone();
-                            move || auto_tag::classify_file(&path)
-                        })
-                        .await
-                        .unwrap_or_else(|_| {
-                            Err(auto_tag::ClassifyError::new(
-                                "Couldn't analyze this file.",
-                                "Classifier thread stopped unexpectedly.",
-                            ))
-                        });
-                        (path, result)
-                    },
-                    |(path, result)| Message::AutoTagCompleted(path, result),
-                )
-            }
-
-            Message::AutoTagCompleted(path, result) => {
-                // The modal may have been closed and reopened on another file while
-                // this ran; a label for one file must never be offered for another.
-                if self.auto_tag.running && self.auto_tag.target.as_ref() == Some(&path) {
-                    self.auto_tag.finish_run(result);
-                }
-                Task::none()
-            }
-
-            Message::ToggleAutoTagDetails => {
-                self.auto_tag.details_open = !self.auto_tag.details_open;
-                Task::none()
-            }
-
-            Message::AutoTagApply => {
-                let Some(path) = self.auto_tag.target.clone() else {
-                    self.auto_tag.set_error(SELECT_AUDIO_FIRST);
-                    return Task::none();
-                };
-                if let Some(err) = self.allowed_audio_error(&path) {
-                    self.auto_tag.set_error(err);
-                    return Task::none();
-                }
-                let needs = self.auto_tag.path_status;
-                if needs.is_none_or(|status| status.is_complete()) {
-                    self.auto_tag
-                        .set_error(AUTO_TAG_ALREADY_COMPLETE);
-                    return Task::none();
-                }
-                // A missing or outdated Tundra instrument needs a fresh detection;
-                // re-stamping the old label would mark it current without checking.
-                let instrument = if needs.is_some_and(|status| status.allows_instrument_work()) {
-                    let Some(result) = self.auto_tag.result.clone() else {
-                        self.auto_tag
-                            .set_error("Detect an instrument before applying tags.");
-                        return Task::none();
-                    };
-                    result.instrument
-                } else {
-                    instrument_tag(&path).unwrap_or_default()
-                };
-                self.auto_tag.applying = true;
-                self.auto_tag.clear_error();
-                Task::perform(
-                    run_blocking({
-                        let (path, instrument) = (path.clone(), instrument.clone());
-                        move || write_auto_tags(&path, &instrument)
-                    }),
-                    move |result| {
-                        let result = result
-                            .unwrap_or_else(|()| Err("Applying tags stopped unexpectedly.".into()));
-                        Message::AutoTagApplied(path.clone(), instrument.clone(), result)
-                    },
-                )
-            }
-
-            Message::AutoTagApplied(path, instrument, result) => {
-                let written = matches!(result, Ok(true));
-                let changed = written && self.merge_path_metadata(&path);
-                if self.auto_tag.target.as_ref() == Some(&path) {
-                    self.auto_tag.applying = false;
-                    self.auto_tag.refresh_from_disk();
-                    match result {
-                        Ok(written) => {
-                            self.auto_tag.applied = true;
-                            self.auto_tag.result = None;
-                            self.auto_tag.status = if !written {
-                                AUTO_TAG_ALREADY_COMPLETE.into()
-                            } else if instrument.is_empty() {
-                                "Applied missing tags.".into()
-                            } else {
-                                format!("Applied tags (instrument: {instrument}).")
-                            };
-                        }
-                        Err(err) => {
-                            self.auto_tag.applied = false;
-                            self.auto_tag.set_error(err);
-                        }
-                    }
-                }
-                if changed {
-                    self.refresh_search_if_active()
-                } else {
-                    Task::none()
-                }
-            }
-
-            Message::OpenBulkAutoTag => {
-                if self.modal == Modal::Settings && self.settings_first_run {
-                    return Task::none();
-                }
-                self.dialog = None;
-                self.modal = Modal::None;
-                self.abort_bulk_scan();
-                self.bulk_auto_tag.open();
-                Task::none()
-            }
-
-            Message::CloseBulkAutoTag => {
-                let applying = matches!(
-                    self.bulk_auto_tag.phase,
-                    Some(BulkAutoTagPhase::Applying)
-                ) && self.bulk_apply_active.is_some();
-                if applying {
-                    if self.bulk_auto_tag.apply_stop_requested {
-                        self.abort_bulk_scan();
-                        self.bulk_auto_tag.close();
-                    } else {
-                        self.request_cancel_bulk_apply();
-                    }
-                    return Task::none();
-                }
-                self.abort_bulk_scan();
-                self.bulk_auto_tag.close();
-                Task::none()
-            }
-
-            Message::BulkAutoTagPickDirectory => {
-                let start_dir = self
-                    .bulk_auto_tag
-                    .root
-                    .clone()
-                    .unwrap_or_else(|| self.file_selector.current_dir.clone());
-                Task::perform(pick_folder(start_dir), Message::BulkAutoTagDirectoryPicked)
-            }
-
-            Message::BulkAutoTagDirectoryPicked(path) => {
-                if let Some(dir) = path {
-                    if self.allowed_directories.contains_path(&dir) {
-                        self.bulk_auto_tag.root = Some(dir);
-                        self.bulk_auto_tag.error = None;
-                    } else {
-                        self.bulk_auto_tag
-                            .set_error(FOLDER_OUTSIDE_ALLOWED);
-                    }
-                }
-                Task::none()
-            }
-
-            Message::BulkAutoTagRunScan => self.start_bulk_scan(),
-
-            Message::BulkAutoTagProgressTick => {
-                if let Some(progress) = &self.bulk_scan_progress {
-                    self.bulk_auto_tag
-                        .update_progress(progress.snapshot());
-                }
-                Task::none()
-            }
-
-            Message::BulkAutoTagScanCompleted { generation, result } => {
-                if self.bulk_scan_active != Some(generation) {
-                    return Task::none();
-                }
-                self.bulk_scan_progress = None;
-                self.bulk_scan_active = None;
-                match result {
-                    Ok(summary) if bulk_auto_tag::is_empty_scan(&summary) => {
-                        self.bulk_auto_tag
-                            .set_scan_all_complete(summary.root, summary.skipped_complete);
-                    }
-                    Ok(summary) => {
-                        self.bulk_auto_tag.finish_scan(summary);
-                    }
-                    Err(message) if message == "Scan cancelled." => {}
-                    Err(message) => {
-                        self.bulk_auto_tag.set_error(message);
-                    }
-                }
-                Task::none()
-            }
-
-            Message::BulkAutoTagSetFileAccepted {
-                dir_idx,
-                file_idx,
-                accepted,
-            } => {
-                self.bulk_auto_tag
-                    .set_file_accepted(dir_idx, file_idx, accepted);
-                Task::none()
-            }
-
-            Message::BulkAutoTagSelectFile {
-                dir_idx,
-                file_idx,
-                shift,
-                control,
-            } => {
-                self.bulk_auto_tag
-                    .select_file(dir_idx, file_idx, shift, control);
-                Task::none()
-            }
-
-            Message::BulkAutoTagSelectDirectory {
-                dir_idx,
-                shift,
-                control,
-            } => {
-                self.bulk_auto_tag
-                    .select_directory(dir_idx, shift, control);
-                Task::none()
-            }
-
-            Message::BulkAutoTagSelectAll => {
-                self.bulk_auto_tag.select_all_files();
-                Task::none()
-            }
-
-            Message::BulkAutoTagClearSelection => {
-                self.bulk_auto_tag.selected.clear();
-                self.bulk_auto_tag.selection_anchor = None;
-                Task::none()
-            }
-
-            Message::BulkAutoTagCheckSelected => {
-                self.bulk_auto_tag.set_selected_accepted(true);
-                Task::none()
-            }
-
-            Message::BulkAutoTagUncheckSelected => {
-                self.bulk_auto_tag.set_selected_accepted(false);
-                Task::none()
-            }
-
-            Message::BulkAutoTagAcceptAll => {
-                bulk_auto_tag::set_all_accepted(&mut self.bulk_auto_tag.groups, true);
-                Task::none()
-            }
-
-            Message::BulkAutoTagRejectAll => {
-                bulk_auto_tag::set_all_accepted(&mut self.bulk_auto_tag.groups, false);
-                Task::none()
-            }
-
-            Message::BulkAutoTagToggleDirectoryExpanded(dir_idx) => {
-                if let Some(group) = self.bulk_auto_tag.groups.get_mut(dir_idx) {
-                    group.expanded = !group.expanded;
-                }
-                Task::none()
-            }
-
-            Message::BulkAutoTagExpandAllDirectories => {
-                for group in &mut self.bulk_auto_tag.groups {
-                    group.expanded = true;
-                }
-                Task::none()
-            }
-
-            Message::BulkAutoTagCollapseAllDirectories => {
-                for group in &mut self.bulk_auto_tag.groups {
-                    group.expanded = false;
-                }
-                Task::none()
-            }
-
-            Message::BulkAutoTagApply => {
-                let items = bulk_auto_tag::collect_accepted(&self.bulk_auto_tag.groups);
-                let accepted = items.len();
-                if accepted == 0 {
-                    return Task::none();
-                }
-                self.bulk_apply_generation = self.bulk_apply_generation.wrapping_add(1);
-                let generation = self.bulk_apply_generation;
-                self.bulk_apply_active = Some(generation);
-                self.bulk_auto_tag.start_apply();
-                let progress = bulk_auto_tag::BulkScanProgress::new();
-                progress.set_applying(accepted);
-                self.bulk_scan_progress = Some(progress.clone());
-                let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
-                self.bulk_scan_cancel = Some(Arc::clone(&cancel));
-                Task::perform(
-                    async move {
-                        let summary = run_blocking(move || {
-                            bulk_auto_tag::apply_items(&items, Some(&progress), &cancel)
-                        })
-                        .await
-                        .unwrap_or_else(|_| bulk_auto_tag::BulkApplySummary {
-                            failed: vec![(
-                                PathBuf::new(),
-                                "Apply stopped unexpectedly; some files may not have been tagged."
-                                    .into(),
-                            )],
-                            ..Default::default()
-                        });
-                        (generation, summary)
-                    },
-                    |(generation, summary)| Message::BulkAutoTagApplyCompleted { generation, summary },
-                )
-            }
-
-            Message::BulkAutoTagApplyCompleted { generation, mut summary } => {
-                // Files were written whether or not the user is still watching.
-                self.metadata_cache
-                    .merge(std::mem::take(&mut summary.refreshed));
-                if self.bulk_apply_active != Some(generation) {
-                    return Task::none();
-                }
-                self.bulk_scan_progress = None;
-                self.bulk_apply_active = None;
-                if self.bulk_auto_tag.is_open() {
-                    self.bulk_auto_tag.finish_apply(summary);
-                }
-                self.refresh_search_if_active()
-            }
-
-            Message::SearchFocused(focused) => {
-                if focused {
-                    self.filter_focus = FilterFocus::FileSearch;
-                    self.file_list_focused = false;
-                    return operation::focus(Id::new(FILE_SEARCH_INPUT_ID));
-                }
-                Task::none()
-            }
-
-            // Tab walks file search -> tag search -> file list; Shift+Tab walks back up.
-            Message::FilterTab(shift) => {
-                operation::is_focused(Id::new(TAG_SEARCH_INPUT_ID)).map(move |on_tag| {
-                    match (on_tag, shift) {
-                        (false, false) => Message::TagSearchFocused(true),
-                        (true, false) => Message::TagSearchFocused(false),
-                        (true, true) => Message::SearchFocused(true),
-                        // Already at the top of the cycle; hold focus rather than fall through.
-                        (false, true) => Message::SearchFocused(true),
-                    }
-                })
-            }
-
-            Message::TagSearchInput(input) => {
-                self.filter_focus = FilterFocus::TagSearch;
-                self.file_list_focused = false;
-                self.file_selector.tag_search_error = None;
-                self.file_selector.tag_search_value = input;
-                operation::focus(Id::new(TAG_SEARCH_INPUT_ID))
-            }
-
-            Message::TagSearchSubmit => {
-                self.filter_focus = FilterFocus::TagSearch;
-                self.file_list_focused = false;
-                let input = self.file_selector.tag_search_value.clone();
-                if input.trim().is_empty() {
-                    if self.file_selector.tag_filters.is_empty() {
-                        return operation::focus(Id::new(TAG_SEARCH_INPUT_ID));
-                    }
-                    return self.start_file_search();
-                }
-                if !input.contains(':') {
-                    let trimmed = input.trim();
-                    if !trimmed.is_empty() {
-                        if tag_field_best_match(&input).is_some() {
-                            return self.autocomplete_tag_field();
-                        }
-                        self.file_selector.tag_search_error =
-                            Some(tag_parse_message(TagParseError::UnknownField).into());
-                        return operation::focus(Id::new(TAG_SEARCH_INPUT_ID));
-                    }
-                }
-                match parse_tag_filter(&input) {
-                    Ok(filter) => {
-                        self.file_selector.tag_search_error = None;
-                        self.file_selector.add_tag_filter(filter);
-                        self.file_selector.tag_search_value.clear();
-                        Task::batch([
-                            self.start_file_search(),
-                            operation::focus(Id::new(TAG_SEARCH_INPUT_ID)),
-                        ])
-                    }
-                    Err(err) => {
-                        self.file_selector.tag_search_error =
-                            Some(tag_parse_message(err).into());
-                        operation::focus(Id::new(TAG_SEARCH_INPUT_ID))
-                    }
-                }
-            }
-
-            Message::TagSearchAutocomplete => {
-                self.filter_focus = FilterFocus::TagSearch;
-                self.autocomplete_tag_field()
-            }
-
-            Message::TagSearchFocused(focused) => {
-                if focused {
-                    self.filter_focus = FilterFocus::TagSearch;
-                    self.file_list_focused = false;
-                    return operation::focus(Id::new(TAG_SEARCH_INPUT_ID));
-                }
-                // FilterTab(tag -> list) is the only sender; leave the file list focused.
-                self.release_filter_focus()
-            }
-
-            Message::TagFilterRemove(field) => {
-                self.file_selector
-                    .tag_filters
-                    .retain(|filter| filter.field != field);
-                self.start_file_search()
-            }
-
-            Message::TagSuggestionSelect(field) => self.select_tag_field(field),
-
-            Message::SearchCompleted { generation, result } => {
-                if generation != self.search_generation {
-                    return Task::none();
-                }
-                if !self.search_enabled() || !self.file_selector.search_active() {
-                    return Task::none();
-                }
-                if let Ok(result) = result {
-                    let mut cache_updated = false;
-                    for (root, children) in result.cached_roots {
-                        if self.allowed_directories.contains_path(&root) {
-                            self.dir_cache.insert(root, children);
-                            cache_updated = true;
-                        }
-                    }
-                    if cache_updated {
-                        self.dir_cache.persist();
-                    }
-                    self.metadata_cache.merge(result.new_metadata);
-                    // Search paths are pre-filtered to directories and audio files,
-                    // so dir-ness follows from the extension; avoids one stat per result.
-                    let results = result
-                        .paths
-                        .iter()
-                        .map(|x| {
-                            FileButton::with_kind(
-                                x.to_path_buf(),
-                                &self.file_selector.current_dir,
-                                !is_audio(x),
-                            )
-                        })
-                        .collect();
-                    self.file_selector.set_file_list(results, None);
-                }
-                Task::none()
-            }
-
-            Message::TogglePlaying => {
-                if self
-                    .player
-                    .controls
-                    .is_playing
-                    .load(Ordering::Acquire)
-                {
-                    self.player.pause();
-                } else {
-                    self.player.play();
-                }
-                Task::none()
-            }
-
-            Message::ToggleLoop => {
-                self.player.toggle_loop();
-                persist_looping(
-                    self.player
-                        .controls
-                        .looping
-                        .load(std::sync::atomic::Ordering::Relaxed),
-                );
-                Task::none()
-            }
-
-            Message::StopPlayback => {
-                self.player.stop();
-                Task::none()
-            }
-
-            Message::StartupCachesReady(caches) => {
-                self.dir_cache.finish_loading(caches.dirs);
-                self.metadata_cache.finish_loading(caches.metadata);
-                self.caches_ready = true;
-                let warm = self.warm_allowed_caches();
-                let search = if self.search_pending {
-                    self.search_pending = false;
-                    self.start_file_search()
-                } else {
-                    self.refresh_search_if_active()
-                };
-                Task::batch([
-                    warm,
-                    search,
-                    self.maybe_open_pending_launch()
-                        .unwrap_or_else(Task::none),
-                ])
-            }
-
-            Message::PlayerWorkerReady(worker, receiver) => {
-                self.player.attach_worker(worker);
-                let events = match Arc::try_unwrap(receiver) {
-                    Ok(receiver) => Task::run(receiver, Message::Player),
-                    Err(_) => Task::none(),
-                };
-                let launch = self.maybe_open_pending_launch().unwrap_or_else(Task::none);
-                Task::batch([events, launch])
-            }
-
-            Message::InsertDircache((parent_dir, children)) => {
-                self.walks_in_progress
-                    .remove(&crate::path_util::cache_key(parent_dir.clone()));
-                if !self.allowed_directories.contains_path(&parent_dir) {
-                    return Task::none();
-                }
-                self.dir_cache.insert(parent_dir, children.clone());
-                self.dir_cache.persist();
-                let metadata = self.metadata_cache.snapshot();
-                Task::perform(
-                    async move { index_paths(&children, metadata) },
-                    Message::MetadataIndexed,
-                )
-            }
-
-            Message::MetadataIndexed(new_metadata) => {
-                self.metadata_cache.merge(new_metadata);
-                self.refresh_search_if_active()
-            }
-
-            Message::InvalidateDircache => {
-                self.dir_cache.clear();
-                self.metadata_cache.clear();
-                auto_tag::clear_classify_cache();
-                let warm = self.warm_allowed_caches();
-                let search = self.refresh_search_if_active();
-                Task::batch([warm, search])
-            }
-
-            Message::Player(msg) => {
-                match msg {
-                    PlayerMsg::Ended(id) if self.player.is_current_track(id) => {
-                        self.player.on_ended();
-                    }
-                    PlayerMsg::Looped(id) if self.player.is_current_track(id) => {
-                        if let Some(state) = &mut self.player.controls.playback_progress {
-                            state.progress = 0.0;
-                        }
-                    }
-                    PlayerMsg::WaveformPeaksReady(id) if self.player.is_current_track(id) => {
-                        self.player.on_waveform_peaks_ready();
-                    }
-                    PlayerMsg::DeviceUnavailable => {
-                        self.show_error("Audio output unavailable. Check your sound device.".into());
-                    }
-                    PlayerMsg::FileFailed(id, err) if self.player.is_current_track(id) => {
-                        self.show_error(format!("Couldn't play this file. {err}"));
-                    }
-                    PlayerMsg::Ended(_)
-                    | PlayerMsg::Looped(_)
-                    | PlayerMsg::WaveformPeaksReady(_)
-                    | PlayerMsg::FileFailed(..) => {}
-                }
-                Task::none()
-            }
-
-            Message::WaveformViewChanged(view) => {
-                if let Some(waveform) = &mut self.player.waveform {
-                    waveform.set_view(view);
-                }
-                Task::none()
-            }
-
-            Message::WaveformPanStarted => {
-                if let Some(waveform) = &mut self.player.waveform {
-                    waveform.set_pan_active(true);
-                }
-                Task::none()
-            }
-
-            Message::WaveformPanEnded(view) => {
-                if let Some(waveform) = &mut self.player.waveform {
-                    waveform.set_pan_active(false);
-                    waveform.set_view(view);
-                }
-                Task::none()
-            }
-
-            Message::WaveformSpringTick => {
-                if let Some(waveform) = &mut self.player.waveform {
-                    let mut view = waveform.view_state();
-                    if view.overscroll != 0.0 {
-                        view.spring_overscroll();
-                        waveform.set_view(view);
-                    }
-                }
-                Task::none()
-            }
-
-            Message::WaveformZoomIn => {
-                if let Some(waveform) = &mut self.player.waveform {
-                    let mut view = waveform.view_state();
-                    view.zoom_in(waveform.sample_count());
-                    waveform.set_view(view);
-                }
-                Task::none()
-            }
-
-            Message::WaveformZoomOut => {
-                if let Some(waveform) = &mut self.player.waveform {
-                    let mut view = waveform.view_state();
-                    view.zoom_out(waveform.sample_count());
-                    waveform.set_view(view);
-                }
-                Task::none()
-            }
-
-            Message::WaveformHelp => {
-                self.dialog = Some(Dialog::waveform_help());
-                Task::none()
-            }
-
-            Message::WaveformHoverChanged(hovered) => {
-                self.waveform_hovered = hovered;
-                Task::none()
-            }
-
-            Message::ControlsHoverChanged(hovered) => {
-                self.controls_hovered = hovered;
-                Task::none()
-            }
-
-            Message::FileListHoverChanged(hovered) => {
-                self.file_list_hovered = hovered;
-                if !hovered {
-                    self.file_list_focused = false;
-                }
-                Task::none()
-            }
-
-            Message::WaveformKey(key) => {
-                if let Some(waveform) = &mut self.player.waveform {
-                    let mut view = waveform.view_state();
-                    if WaveFormView::apply_key(&mut view, &key, waveform.sample_count()) {
-                        waveform.set_view(view);
-                    }
-                }
-                Task::none()
-            }
-
-            Message::PlaybackTick => {
-                self.player.sync_playback_ui();
-                Task::none()
-            }
-
-            Message::ModifiersChanged(modifiers) => {
-                self.modifiers = modifiers;
-                if let Some(waveform) = &mut self.player.waveform {
-                    waveform.set_modifiers(modifiers);
-                }
-                Task::none()
-            }
-
-            Message::FileDragPress {
-                path,
-                from_file_list,
-            } => {
-                if from_file_list {
-                    self.filter_focus = FilterFocus::None;
-                    self.file_list_focused = true;
-                }
-                if from_file_list && self.modifiers.shift() {
-                    self.file_drag = Some(FileDragPending {
-                        kind: FileDragKind::Scroll,
-                        origin: self.last_cursor,
-                        last: self.last_cursor,
-                        threshold_met: true,
-                        origin_locked: true,
-                        awaiting_drag: false,
-                        open_on_click: false,
-                    });
-                    return Task::none();
-                }
-                self.file_drag = Some(FileDragPending {
-                    kind: FileDragKind::File(path),
-                    origin: self.last_cursor,
-                    last: self.last_cursor,
-                    threshold_met: false,
-                    origin_locked: false,
-                    awaiting_drag: false,
-                    open_on_click: from_file_list,
-                });
-                Task::none()
-            }
-
-            Message::FileDragMove(point) => {
-                let Some(drag) = &mut self.file_drag else {
-                    return Task::none();
-                };
-                if !drag.origin_locked {
-                    drag.origin = point;
-                    drag.last = point;
-                    drag.origin_locked = true;
-                    return Task::none();
-                }
-                match &drag.kind {
-                    FileDragKind::Scroll => {
-                        let dy = point.y - drag.last.y;
-                        drag.last = point;
-                        if dy.abs() < 0.5 {
-                            return Task::none();
-                        }
-                        operation::scroll_by(
-                            FILE_LIST_SCROLL_ID,
-                            AbsoluteOffset { x: 0.0, y: dy },
-                        )
-                    }
-                    FileDragKind::File(path) => {
-                        if drag.threshold_met || drag.awaiting_drag {
-                            return Task::none();
-                        }
-                        let dx = point.x - drag.origin.x;
-                        let dy = point.y - drag.origin.y;
-                        if dx * dx + dy * dy < FILE_DRAG_THRESHOLD * FILE_DRAG_THRESHOLD {
-                            return Task::none();
-                        }
-                        let path = path.clone();
-                        if self.drag_ready {
-                            drag.threshold_met = true;
-                            self.start_file_drag(path)
-                        } else {
-                            drag.awaiting_drag = true;
-                            Self::ensure_drag()
-                        }
-                    }
-                }
-            }
-
-            Message::FileDragRelease => {
-                let mut task = Task::none();
-                let click_to_open = self.file_drag.as_ref().and_then(|drag| {
-                    if self.native_drag.is_active() || drag.threshold_met || drag.awaiting_drag {
-                        return None;
-                    }
-                    if drag.open_on_click {
-                        if let FileDragKind::File(path) = &drag.kind {
-                            Some(path.clone())
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                });
-                if self.native_drag.is_active() {
-                    self.native_drag.update(true, true);
-                }
-                if !self.native_drag.is_active() {
-                    self.file_drag = None;
-                }
-                if let Some(path) = click_to_open {
-                    task = self.open_path(&path);
-                }
-                task
-            }
-
-            Message::FileDragTick => {
-                if self.native_drag.is_active() {
-                    self.native_drag.update(true, false);
-                    if !self.native_drag.is_active() {
-                        self.file_drag = None;
-                    }
-                }
-                Task::none()
-            }
-
-            Message::FileDragCompleted(result) => {
-                if let Err(err) = result {
-                    self.show_notice(drag_out_notice(format!("Drag failed: {err}.")));
-                }
-                self.file_drag = None;
-                Task::none()
-            }
-
-            Message::DragWindowId(window_id) => {
-                let Some(id) = window_id else {
-                    self.drag_ready = false;
-                    #[cfg(all(unix, not(target_os = "macos")))]
-                    self.show_notice(drag_out_notice(
-                        "Drag-out from the file list requires X11 and is unavailable on native Wayland.",
-                    ));
-                    #[cfg(not(all(unix, not(target_os = "macos"))))]
-                    self.show_notice(drag_out_notice("Could not initialize drag-out."));
-                    self.file_drag = None;
-                    return Task::none();
-                };
-                match self.native_drag.init_with_window_id(id) {
-                    Ok(()) => {
-                        self.drag_ready = true;
-                    }
-                    Err(err) => {
-                        self.drag_ready = false;
-                        self.show_notice(drag_out_notice(format!(
-                            "Could not initialize drag-out: {err}."
-                        )));
-                        self.file_drag = None;
-                        return Task::none();
-                    }
-                }
-                let path = {
-                    let Some(drag) = &mut self.file_drag else {
-                        return Task::none();
-                    };
-                    if !drag.awaiting_drag {
-                        return Task::none();
-                    }
-                    let path = match &drag.kind {
-                        FileDragKind::File(path) => path.clone(),
-                        FileDragKind::Scroll => {
-                            drag.awaiting_drag = false;
-                            return Task::none();
-                        }
-                    };
-                    drag.awaiting_drag = false;
-                    drag.threshold_met = true;
-                    path
-                };
-                self.start_file_drag(path)
-            }
-
-            Message::CursorMoved(point) => {
-                self.last_cursor = point;
-                if self.title_bar.drag_armed {
-                    let Some(origin) = self.title_bar.press_origin else {
-                        return Task::none();
-                    };
-                    let dx = point.x - origin.x;
-                    let dy = point.y - origin.y;
-                    if dx * dx + dy * dy < TITLE_DRAG_THRESHOLD * TITLE_DRAG_THRESHOLD {
-                        return Task::none();
-                    }
-                    self.title_bar.drag_armed = false;
-                    self.title_bar.press_origin = None;
-                    return on_window(window::drag);
-                }
-                Task::none()
-            }
-
-            Message::FileRowHover(index) => {
-                self.filter_focus = FilterFocus::None;
-                self.file_selector.hovered_file = Some(index);
-                Task::none()
-            }
-
-            Message::FileRowLeave => {
-                self.file_selector.hovered_file = None;
-                Task::none()
-            }
-
-            Message::FileListScrolled(viewport) => {
-                self.file_selector.list_scroll_offset = viewport.absolute_offset().y;
-                self.file_selector.list_viewport_height = viewport.bounds().height;
-                Task::none()
-            }
-
-            Message::FileListScrollbarPress {
-                track_y,
-                track_top,
-                track_height,
-            } => {
-                let metrics = file_list_scroll_metrics_for(&self.file_selector);
-                if metrics.max_scroll <= 0.0 {
-                    return Task::none();
-                }
-                let grab_offset = file_list_scrollbar_grab_offset(&metrics, track_y);
-                self.file_list_scrollbar_drag = Some(FileListScrollbarDrag {
-                    track_top,
-                    track_height,
-                    grab_offset,
-                });
-                let offset = file_list_scroll_offset_for_track_y(&metrics, track_y, grab_offset);
-                operation::scroll_to(
-                    Id::new(FILE_LIST_SCROLL_ID),
-                    AbsoluteOffset {
-                        x: Some(0.0),
-                        y: Some(offset),
-                    },
-                )
-            }
-
-            Message::FileListScrollbarDrag(point) => {
-                let Some(drag) = self.file_list_scrollbar_drag.as_ref() else {
-                    return Task::none();
-                };
-                let metrics = file_list_scroll_metrics_for(&self.file_selector);
-                if metrics.max_scroll <= 0.0 {
-                    return Task::none();
-                }
-                let track_y = (point.y - drag.track_top).clamp(0.0, drag.track_height);
-                let offset =
-                    file_list_scroll_offset_for_track_y(&metrics, track_y, drag.grab_offset);
-                operation::scroll_to(
-                    Id::new(FILE_LIST_SCROLL_ID),
-                    AbsoluteOffset {
-                        x: Some(0.0),
-                        y: Some(offset),
-                    },
-                )
-            }
-
-            Message::FileListScrollbarRelease => {
-                self.file_list_scrollbar_drag = None;
-                Task::none()
-            }
-
-            Message::VolumeChanged(volume) => {
-                self.player.set_volume(volume);
-                Task::none()
-            }
-
-            Message::VolumeCommit => {
-                persist_volume(self.player.controls.volume);
-                Task::none()
-            }
-
-            Message::WaveformScrub(progress) => {
+            Message::Quit => {
+                self.dir_cache.flush();
+                self.metadata_cache.flush();
+                iced::exit()
+            }
+            Message::NoOp => Task::none(),
+
+            Message::Settings(message) => self.update_settings(message),
+            Message::AutoTag(message) => self.update_auto_tag(message),
+            Message::TagEditor(message) => self.update_tag_editor(message),
+            Message::BulkAutoTag(message) => self.update_bulk_auto_tag(message),
+        }
+    }
+
+    fn player_event(&mut self, event: PlayerEvent) {
+        match event {
+            PlayerEvent::DeviceUnavailable => {
+                self.show_error("Audio output unavailable. Check your sound device.".into());
+            }
+            PlayerEvent::Ended(id) if self.player.is_current_track(id) => self.player.on_ended(),
+            PlayerEvent::Looped(id) if self.player.is_current_track(id) => self.player.set_progress(0.0),
+            PlayerEvent::WaveformPeaksReady(id) if self.player.is_current_track(id) => {
+                self.player.on_waveform_peaks_ready();
+            }
+            PlayerEvent::FileFailed(id, err) if self.player.is_current_track(id) => {
+                self.show_error(format!("Couldn't play this file. {err}"));
+            }
+            // Events for a track that has since been replaced.
+            PlayerEvent::Ended(_) | PlayerEvent::Looped(_) | PlayerEvent::WaveformPeaksReady(_) | PlayerEvent::FileFailed(..) => {}
+        }
+    }
+
+    fn update_waveform(&mut self, message: WaveformMsg) -> Task<Message> {
+        match message {
+            WaveformMsg::Scrub(progress) => {
                 self.waveform_scrubbing = true;
                 self.last_scrub_progress = progress;
                 self.player.controls.scrubbing = true;
@@ -2358,526 +401,113 @@ impl App {
                     waveform.set_ui_scrubbing(true);
                     waveform.set_scrub_progress(Some(progress));
                 }
-                if let Some(state) = &mut self.player.controls.playback_progress {
-                    state.progress = progress;
+                self.player.set_progress(progress);
+            }
+            WaveformMsg::ScrubEnd(progress) => self.finish_scrub(progress),
+            WaveformMsg::FileDragStart => {
+                if let Some(path) = self.player.current_file.clone() {
+                    self.file_drag = Some(FileDrag::file(path, false));
                 }
-                Task::none()
             }
-
-            Message::WaveformScrubEnd(progress) => self.finish_scrub(progress),
-
-            Message::WaveformScrubRelease => self.finish_scrub(self.last_scrub_progress),
-
-            Message::WaveformFileDragStart => {
-                let Some(path) = self.player.current_file.clone() else {
-                    return Task::none();
-                };
-                self.file_drag = Some(FileDragPending {
-                    kind: FileDragKind::File(path),
-                    origin: self.last_cursor,
-                    last: self.last_cursor,
-                    threshold_met: false,
-                    origin_locked: false,
-                    awaiting_drag: false,
-                    open_on_click: false,
-                });
-                Task::none()
-            }
-
-            Message::WaveformCopyName => self.with_current_file(clipboard_name),
-            Message::WaveformCopyPath => self.with_current_file(clipboard_path),
-            Message::WaveformRevealInFileManager => self.with_current_file(reveal_path),
-            Message::WaveformOpenAutoTag => match self.player.current_file.clone() {
-                Some(path) => self.update(Message::OpenAutoTagFor(path)),
-                None => Task::none(),
-            },
-            Message::WaveformEditTags => match self.player.current_file.clone() {
-                Some(path) => self.open_tag_editor_for(path),
-                None => Task::none(),
-            },
-
-            Message::FileCopyName(path) => clipboard_name(&path),
-            Message::FileCopyPath(path) => clipboard_path(&path),
-            Message::FileRevealInFileManager(path) => reveal_path(&path),
-
-            Message::SidebarResizeStart => {
-                self.sidebar_resize = Some(SidebarResize {
-                    origin_x: 0.0,
-                    origin_width: self.sidebar_width,
-                    pending_origin: true,
-                });
-                Task::none()
-            }
-
-            Message::SidebarResizeMove(cursor_x) => {
-                let Some(resize) = &mut self.sidebar_resize else {
-                    return Task::none();
-                };
-                if resize.pending_origin {
-                    resize.origin_x = cursor_x;
-                    resize.pending_origin = false;
-                    return Task::none();
+            WaveformMsg::ViewChanged(view) => self.edit_waveform_view(|current, _| *current = view),
+            WaveformMsg::PanStarted => {
+                if let Some(waveform) = &mut self.player.waveform {
+                    waveform.set_pan_active(true);
                 }
-                self.sidebar_width = (resize.origin_width + (cursor_x - resize.origin_x))
-                    .clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
-                Task::none()
             }
-
-            Message::SidebarResizeEnd => {
-                self.sidebar_resize = None;
-                persist_sidebar_width(self.sidebar_width);
-                Task::none()
-            }
-        }
-    }
-
-    fn sidebar_resizer(resizing: bool) -> Element<'static, Message> {
-        let gutter = (SIDEBAR_RESIZER_HIT_WIDTH - SIDEBAR_RESIZER_LINE_WIDTH) / 2.0;
-        let line = container(
-            Space::new()
-                .width(Length::Fill)
-                .height(Length::Fill),
-        )
-        .width(Length::Fixed(SIDEBAR_RESIZER_LINE_WIDTH))
-        .height(Length::Fill)
-        .style(move |theme: &Theme| {
-            let palette = theme.extended_palette();
-            let alpha = if resizing { 0.85 } else { 0.45 };
-            container::Style {
-                background: Some(
-                    palette
-                        .background
-                        .strong
-                        .color
-                        .scale_alpha(alpha)
-                        .into(),
-                ),
-                ..Default::default()
-            }
-        });
-
-        // Visual line underneath; transparent mouse_area on top receives hover/cursor.
-        stack![
-            row![
-                Space::new().width(Length::Fixed(gutter)),
-                line,
-                Space::new().width(Length::Fixed(gutter)),
-            ]
-            .width(Length::Fixed(SIDEBAR_RESIZER_HIT_WIDTH))
-            .height(Length::Fill),
-            mouse_area(
-                Space::new()
-                    .width(Length::Fixed(SIDEBAR_RESIZER_HIT_WIDTH))
-                    .height(Length::Fill),
-            )
-            .interaction(mouse::Interaction::ResizingColumn)
-            .on_press(Message::SidebarResizeStart),
-        ]
-        .width(Length::Fixed(SIDEBAR_RESIZER_HIT_WIDTH))
-        .height(Length::Fill)
-        .into()
-    }
-
-    fn sidebar_resize_overlay(resizing: bool) -> Element<'static, Message> {
-        if !resizing {
-            return Space::new().into();
-        }
-        mouse_area(
-            Space::new()
-                .width(Length::Fill)
-                .height(Length::Fill),
-        )
-        .interaction(mouse::Interaction::ResizingColumn)
-        .on_move(|point| Message::SidebarResizeMove(point.x))
-        .on_release(Message::SidebarResizeEnd)
-        .into()
-    }
-
-    fn window_resize_strip(
-        width: Length,
-        height: Length,
-        direction: window::Direction,
-        cursor: mouse::Interaction,
-    ) -> Element<'static, Message> {
-        mouse_area(
-            Space::new()
-                .width(width)
-                .height(height),
-        )
-        .on_press(Message::WindowResize(direction))
-        .interaction(cursor)
-        .into()
-    }
-
-    fn window_resize_frame(content: Element<'_, Message>) -> Element<'_, Message> {
-        let border = WINDOW_RESIZE_BORDER;
-        let corner = Length::Fixed(border);
-        let edge = Length::Fixed(border);
-        let fill = Length::Fill;
-
-        let edges = column![
-            row![
-                Self::window_resize_strip(
-                    corner,
-                    corner,
-                    window::Direction::NorthWest,
-                    mouse::Interaction::ResizingDiagonallyDown,
-                ),
-                Space::new()
-                    .width(Length::FillPortion(1))
-                    .height(edge),
-                Space::new()
-                    .width(Length::FillPortion(2))
-                    .height(edge),
-                Space::new()
-                    .width(Length::FillPortion(1))
-                    .height(edge),
-                Self::window_resize_strip(
-                    corner,
-                    corner,
-                    window::Direction::NorthEast,
-                    mouse::Interaction::ResizingDiagonallyUp,
-                ),
-            ]
-            .width(fill)
-            .height(edge),
-            row![
-                Self::window_resize_strip(
-                    edge,
-                    fill,
-                    window::Direction::West,
-                    mouse::Interaction::ResizingHorizontally,
-                ),
-                Space::new().width(fill).height(fill),
-                Self::window_resize_strip(
-                    edge,
-                    fill,
-                    window::Direction::East,
-                    mouse::Interaction::ResizingHorizontally,
-                ),
-            ]
-            .width(fill)
-            .height(fill),
-            row![
-                Self::window_resize_strip(
-                    corner,
-                    corner,
-                    window::Direction::SouthWest,
-                    mouse::Interaction::ResizingDiagonallyUp,
-                ),
-                Self::window_resize_strip(
-                    fill,
-                    edge,
-                    window::Direction::South,
-                    mouse::Interaction::ResizingVertically,
-                ),
-                Self::window_resize_strip(
-                    corner,
-                    corner,
-                    window::Direction::SouthEast,
-                    mouse::Interaction::ResizingDiagonallyDown,
-                ),
-            ]
-            .width(fill)
-            .height(edge),
-        ]
-        .width(fill)
-        .height(fill);
-
-        stack![
-            container(content).width(fill).height(fill),
-            edges,
-        ]
-        .width(fill)
-        .height(fill)
-        .into()
-    }
-
-    fn dialog_table_header(label: &'static str) -> Element<'static, Message> {
-        text(label)
-            .size(10)
-            .width(Length::FillPortion(1))
-            .style(|theme: &Theme| iced::widget::text::Style {
-                color: Some(
-                    theme
-                        .extended_palette()
-                        .background
-                        .base
-                        .text
-                        .scale_alpha(0.62),
-                ),
-            })
-            .into()
-    }
-
-    fn dialog_control_table(rows: &[(String, String)]) -> Element<'static, Message> {
-        let header = container(
-            row![
-                Self::dialog_table_header("Input"),
-                Self::dialog_table_header("Action"),
-            ]
-            .spacing(12)
-            .align_y(iced::Alignment::Center)
-            .width(Length::Fill),
-        )
-        .padding([6, 10])
-        .width(Length::Fill)
-        .style(|theme: &Theme| {
-            let palette = theme.extended_palette();
-            container::Style {
-                background: Some(palette.background.weak.color.scale_alpha(0.32).into()),
-                border: Border {
-                    width: 1.0,
-                    color: palette.background.strong.color.scale_alpha(0.18),
-                    radius: 0.0.into(),
-                },
-                ..Default::default()
-            }
-        });
-
-        let mut table = column![header].spacing(0).width(Length::Fill);
-        for (index, (input, action)) in rows.iter().enumerate() {
-            let zebra = index % 2 == 1;
-            table = table.push(
-                container(
-                    row![
-                        text(input.clone())
-                            .size(13)
-                            .width(Length::FillPortion(1)),
-                        text(action.clone())
-                            .size(13)
-                            .width(Length::FillPortion(1)),
-                    ]
-                    .spacing(12)
-                    .align_y(iced::Alignment::Center)
-                    .width(Length::Fill),
-                )
-                .padding([7, 10])
-                .width(Length::Fill)
-                .style(move |theme: &Theme| {
-                    let palette = theme.extended_palette();
-                    container::Style {
-                        background: Some(
-                            if zebra {
-                                palette.background.weak.color.scale_alpha(0.18)
-                            } else {
-                                Color::TRANSPARENT
-                            }
-                            .into(),
-                        ),
-                        ..Default::default()
-                    }
-                }),
-            );
-        }
-        container(table)
-            .width(Length::Fill)
-            .style(|theme: &Theme| {
-                let palette = theme.extended_palette();
-                container::Style {
-                    border: Border {
-                        width: 1.0,
-                        color: palette.background.strong.color.scale_alpha(0.22),
-                        radius: 6.0.into(),
-                    },
-                    ..Default::default()
+            WaveformMsg::PanEnded(view) => {
+                if let Some(waveform) = &mut self.player.waveform {
+                    waveform.set_pan_active(false);
+                    waveform.set_view(view);
                 }
-            })
-            .into()
-    }
-
-    fn dialog_view(dialog: &Dialog) -> Element<'_, Message> {
-        let mut body = column![text(&dialog.title).size(18)]
-            .spacing(12)
-            .padding(16)
-            .width(Length::Fixed(440.0));
-        if !dialog.body.is_empty() {
-            body = body.push(text(&dialog.body).size(14).width(Length::Fill));
-        }
-        if !dialog.rows.is_empty() {
-            body = body.push(Self::dialog_control_table(&dialog.rows));
-        }
-        body = body.push(
-            row![
-                Space::new().width(Length::Fill),
-                button(text("OK")).on_press(Message::DismissDialog),
-            ]
-            .align_y(iced::Alignment::Center),
-        );
-        opaque(
-            container(body)
-            .style(|theme: &Theme| {
-                let palette = theme.extended_palette();
-                container::Style {
-                    background: Some(palette.background.base.color.into()),
-                    border: Border {
-                        width: 1.0,
-                        color: palette.background.strong.color,
-                        radius: 8.0.into(),
-                    },
-                    shadow: Shadow {
-                        color: palette.background.base.text.scale_alpha(0.25),
-                        offset: iced::Vector::new(0.0, 4.0),
-                        blur_radius: 16.0,
-                    },
-                    ..Default::default()
-                }
+            }
+            WaveformMsg::SpringTick => self.edit_waveform_view(|view, _| {
+                view.spring_overscroll();
             }),
-        )
-    }
-
-    fn dim_scrim(_theme: &Theme) -> container::Style {
-        container::Style {
-            background: Some(Color::from_rgba(0.0, 0.0, 0.0, 0.55).into()),
-            ..Default::default()
-        }
-    }
-
-    fn with_dim_overlay<'a>(
-        base: Element<'a, Message>,
-        overlay: Element<'a, Message>,
-    ) -> Element<'a, Message> {
-        stack![
-            base,
-            opaque(container(center(overlay)).style(Self::dim_scrim)),
-        ]
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
-    }
-
-    fn with_dialog<'a>(base: Element<'a, Message>, dialog: &'a Dialog) -> Element<'a, Message> {
-        stack![
-            base,
-            opaque(
-                mouse_area(center(Self::dialog_view(dialog)).style(Self::dim_scrim))
-                    .on_press(Message::DismissDialog)
-            )
-        ]
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
-    }
-
-    pub fn view(&self) -> Element<'_, Message> {
-        let active_file = self
-            .player
-            .current_file
-            .as_ref()
-            .and_then(|path| crate::path_util::file_name_lossy(path));
-        let menu = self.menu.view(self.always_on_top, active_file.as_deref());
-
-        let file_selector = container(
-            self.file_selector
-                .view(
-                    self.search_enabled(),
-                    &self.favorites,
-                    self.modifiers,
-                    self.filter_focus,
-                ),
-        )
-            .width(Length::Fixed(self.sidebar_width))
-            .height(Length::Fill)
-            .style(|theme| {
-                let palette = theme.extended_palette();
-                let base = palette.background.base.color;
-                container::Style {
-                    background: Some(
-                        Color::from_rgb(base.r * 0.56, base.g * 0.56, base.b * 0.58).into(),
-                    ),
-                    border: Border {
-                        width: 1.0,
-                        color: palette.background.strong.color.scale_alpha(0.42),
-                        radius: 0.0.into(),
-                    },
-                    ..Default::default()
+            WaveformMsg::ZoomIn => self.edit_waveform_view(WaveFormView::zoom_in),
+            WaveformMsg::ZoomOut => self.edit_waveform_view(WaveFormView::zoom_out),
+            WaveformMsg::Help => self.dialog = Some(Dialog::waveform_help()),
+            WaveformMsg::HoverChanged(hovered) => self.waveform_hovered = hovered,
+            WaveformMsg::CopyName => return self.with_current_file(copy_name),
+            WaveformMsg::CopyPath => return self.with_current_file(copy_path),
+            WaveformMsg::RevealInFileManager => return self.with_current_file(reveal),
+            WaveformMsg::OpenAutoTag => {
+                if let Some(path) = self.player.current_file.clone() {
+                    return self.update_auto_tag(AutoTagMsg::OpenFor(path));
                 }
-            });
+            }
+            WaveformMsg::EditTags => {
+                if let Some(path) = self.player.current_file.clone() {
+                    return self.update_tag_editor(TagEditorMsg::OpenFor(path));
+                }
+            }
+        }
+        Task::none()
+    }
 
-        let resizing = self.sidebar_resize.is_some();
-        let resizer = Self::sidebar_resizer(resizing);
-
-        let tag_summary = self
-            .player
-            .current_file
-            .as_ref()
-            .and_then(|path| self.metadata_cache.cached_fields(path))
-            .map(|fields| control_bar_tags(&fields))
-            .unwrap_or_default();
-
-        let player = container(if self.drag_over {
-            stack![
-                self.player.view(tag_summary.clone()),
-                container(
-                    text("Drop audio file or folder")
-                        .size(18)
-                        .width(Length::Fill)
-                        .align_x(iced::alignment::Horizontal::Center),
-                )
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .center_x(Length::Fill)
-                .center_y(Length::Fill)
-                .style(|_theme| container::Style {
-                    background: Some(Color::from_rgba(0.08, 0.12, 0.18, 0.82).into()),
-                    ..Default::default()
-                }),
-            ]
-            .width(Length::Fill)
-            .height(Length::Fill)
-        } else {
-            stack![self.player.view(tag_summary)]
-                .width(Length::Fill)
-                .height(Length::Fill)
-        })
-        .width(Length::Fill)
-        .height(Length::Fill);
-
-        let workspace = stack![
-            row![file_selector, resizer, player]
-                .spacing(0)
-                .height(Length::Fill)
-                .width(Length::Fill),
-            Self::sidebar_resize_overlay(resizing),
-        ]
-        .width(Length::Fill)
-        .height(Length::Fill);
-
-        let workspace: Element<_> = if self.modal == Modal::Settings {
-            Self::with_dim_overlay(
-                workspace.into(),
-                settings::settings_view(
-                    self.allowed_directories.roots(),
-                    self.settings_first_run,
-                    self.settings_error.clone(),
-                ),
-            )
-        } else if self.bulk_auto_tag.is_open() {
-            Self::with_dim_overlay(
-                workspace.into(),
-                bulk_auto_tag_view(&self.bulk_auto_tag, self.modifiers),
-            )
-        } else if self.modal == Modal::TagEditor {
-            Self::with_dim_overlay(workspace.into(), tag_editor_view(&self.tag_editor))
-        } else if self.modal == Modal::AutoTag {
-            Self::with_dim_overlay(workspace.into(), auto_tag_view(&self.auto_tag))
-        } else if let Some(dialog) = &self.dialog {
-            Self::with_dialog(workspace.into(), dialog)
-        } else {
-            workspace.into()
-        };
-
-        let layout = column![menu, workspace]
-            .width(Length::Fill)
-            .height(Length::Fill);
-
-        if self.window_maximized {
-            container(layout)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .into()
-        } else {
-            Self::window_resize_frame(layout.into())
+    /// Changes the loaded waveform's zoom and pan; `change` also gets its sample count.
+    fn edit_waveform_view(&mut self, change: impl FnOnce(&mut WaveFormView, usize)) {
+        if let Some(waveform) = &mut self.player.waveform {
+            let mut view = waveform.view_state();
+            change(&mut view, waveform.sample_count());
+            waveform.set_view(view);
         }
     }
+
+    fn finish_scrub(&mut self, progress: f64) {
+        if !std::mem::take(&mut self.waveform_scrubbing) {
+            return;
+        }
+        self.player.controls.scrubbing = false;
+        if let Some(waveform) = &mut self.player.waveform {
+            waveform.set_ui_scrubbing(false);
+            waveform.set_scrub_progress(None);
+        }
+        self.player.seek(progress);
+    }
+
+    fn with_current_file(&self, action: impl FnOnce(&Path) -> Task<Message>) -> Task<Message> {
+        self.player.current_file.as_deref().map_or_else(Task::none, action)
+    }
+
+    fn show_error(&mut self, message: String) {
+        self.player.reset_on_error();
+        self.dialog = Some(Dialog::error(message));
+    }
+
+    fn show_notice(&mut self, message: String) {
+        self.dialog = Some(Dialog::notice(message));
+    }
+}
+
+fn copy_name(path: &Path) -> Task<Message> {
+    crate::path_util::file_name_lossy(path).map_or_else(Task::none, iced::clipboard::write)
+}
+
+fn copy_path(path: &Path) -> Task<Message> {
+    iced::clipboard::write(path.to_string_lossy().into_owned())
+}
+
+fn reveal(path: &Path) -> Task<Message> {
+    crate::path_util::reveal_in_file_manager(path);
+    Task::none()
+}
+
+async fn pick_folder(start_dir: PathBuf) -> Option<PathBuf> {
+    rfd::AsyncFileDialog::new()
+        .set_title("Select Folder")
+        .set_directory(&start_dir)
+        .pick_folder()
+        .await
+        .map(|folder| folder.path().to_path_buf())
+}
+
+async fn pick_audio_file(start_dir: PathBuf) -> Option<PathBuf> {
+    rfd::AsyncFileDialog::new()
+        .set_title("Select audio file")
+        .set_directory(&start_dir)
+        .add_filter("Audio", crate::metadata::AUDIO_EXTENSIONS)
+        .pick_file()
+        .await
+        .map(|file| file.path().to_path_buf())
 }

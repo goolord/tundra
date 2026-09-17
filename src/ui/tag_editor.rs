@@ -1,11 +1,12 @@
-use super::common::{
-    modal_button_style, modal_error_style, modal_info_row, modal_label_style, modal_shell,
-    truncate_path, Message,
-};
+//! The Edit Tags modal.
+
+use super::message::{Message, TagEditorMsg};
 use super::settings::NO_AUDIO_SELECTED;
-use crate::metadata::{ManualTagEdits, TagField, TagFields};
-use iced::widget::{button, row, text, text_input, Column, Space};
-use iced::{Alignment, Element, Length, Theme};
+use super::style;
+use super::widgets::{modal_button, modal_info_row, modal_shell, spacer};
+use crate::metadata::{ManualTagEdits, SavedTo, TagField, TagFields};
+use iced::widget::{column, row, text, text_input};
+use iced::{Alignment, Element, Length};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Default)]
@@ -18,12 +19,12 @@ pub struct TagEditorState {
 }
 
 impl TagEditorState {
-    pub fn reset_for_path(&mut self, path: PathBuf, fields: TagFields) {
-        self.target = Some(path);
-        self.edits = ManualTagEdits::from_tag_fields(&fields);
-        self.error = None;
-        self.status = None;
-        self.saving = false;
+    pub fn for_path(path: PathBuf, fields: &TagFields) -> Self {
+        Self {
+            target: Some(path),
+            edits: ManualTagEdits::from_tag_fields(fields),
+            ..Self::default()
+        }
     }
 
     pub fn begin_save(&mut self) {
@@ -32,18 +33,15 @@ impl TagEditorState {
         self.status = Some("Saving…".into());
     }
 
-    pub fn finish_save(&mut self, result: Result<crate::metadata::SavedTo, String>) {
+    pub fn finish_save(&mut self, result: Result<SavedTo, String>) {
         self.saving = false;
         match result {
-            Ok(crate::metadata::SavedTo::File) => {
+            Ok(saved) => {
                 self.error = None;
-                self.status = Some("Tags saved.".into());
-            }
-            Ok(crate::metadata::SavedTo::Sidecar(reason)) => {
-                self.error = None;
-                self.status = Some(format!(
-                    "Saved in Tundra only; the file was left unchanged. {reason}"
-                ));
+                self.status = Some(match saved {
+                    SavedTo::File => "Tags saved.".into(),
+                    SavedTo::Sidecar(reason) => format!("Saved in Tundra only; the file was left unchanged. {reason}"),
+                });
             }
             Err(err) => self.set_error(err),
         }
@@ -61,71 +59,46 @@ impl TagEditorState {
     }
 }
 
-fn field_input<'a>(field: TagField, value: &'a str) -> Element<'a, Message> {
-    row![
-        text(field.label())
-            .size(11)
-            .width(Length::Fixed(88.0))
-            .style(modal_label_style),
-        text_input("", value)
-            .on_input(move |input| Message::TagEditorInput(field, input))
-            .padding([6, 8])
-            .width(Length::Fill),
-    ]
-    .spacing(8)
-    .align_y(Alignment::Center)
-    .width(Length::Fill)
-    .into()
-}
-
-pub fn tag_editor_view<'a>(state: &'a TagEditorState) -> Element<'a, Message> {
+pub fn tag_editor_view(state: &TagEditorState) -> Element<'_, Message> {
     let target_label = state
         .target
-        .as_ref()
-        .map(|path| truncate_path(path, 56))
-        .unwrap_or_else(|| NO_AUDIO_SELECTED.to_string());
+        .as_deref()
+        .map_or_else(|| NO_AUDIO_SELECTED.to_string(), |path| crate::path_util::truncate_path(path, 56));
 
-    let mut body = Column::new()
-        .spacing(12)
-        .push(text("Edit Tags").size(18))
-        .push(
-            text("Edit metadata directly. Blank instrument, artist, or comment leaves those unchanged; other empty fields clear stored values.")
-                .size(13)
-                .width(Length::Fill),
-        )
-        .push(modal_info_row("File", target_label));
+    let mut body = column![
+        text("Edit Tags").size(18),
+        text("Edit metadata directly. Blank instrument, artist, or comment leaves those unchanged; other empty fields clear stored values.")
+            .size(13)
+            .width(Length::Fill),
+        modal_info_row("File", target_label),
+    ]
+    .spacing(12);
 
     for field in ManualTagEdits::EDITOR_FIELDS {
-        body = body.push(field_input(field, state.edits.field_value(field)));
+        body = body.push(
+            row![
+                text(field.label()).size(11).width(Length::Fixed(88.0)).style(style::faded_text(0.65)),
+                text_input("", state.edits.field_value(field))
+                    .on_input(move |input| TagEditorMsg::Input(field, input).into())
+                    .padding([6, 8])
+                    .width(Length::Fill),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        );
     }
 
     if let Some(error) = &state.error {
-        body = body.push(
-            text(error)
-                .size(12)
-                .style(modal_error_style),
-        );
+        body = body.push(text(error).size(12).color(style::ERROR));
     } else if let Some(status) = &state.status {
-        body = body.push(
-            text(status)
-                .size(12)
-                .style(|theme: &Theme| iced::widget::text::Style {
-                    color: Some(theme.extended_palette().primary.base.color),
-                }),
-        );
+        body = body.push(text(status).size(12).style(style::primary_text));
     }
 
     body = body.push(
         row![
-            button(text("Cancel").size(12))
-                .padding([6, 12])
-                .on_press(Message::CloseTagEditor)
-                .style(|theme, status| modal_button_style(theme, status, false)),
-            Space::new().width(Length::Fill),
-            button(text("Save").size(12))
-                .padding([6, 14])
-                .on_press_maybe((!state.saving).then_some(Message::TagEditorSave))
-                .style(|theme, status| modal_button_style(theme, status, true)),
+            modal_button("Cancel", Some(TagEditorMsg::Close.into()), false),
+            spacer(Length::Fill, Length::Shrink),
+            modal_button("Save", (!state.saving).then(|| TagEditorMsg::Save.into()), true).padding([6, 14]),
         ]
         .spacing(8)
         .align_y(Alignment::Center)

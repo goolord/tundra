@@ -1,3 +1,5 @@
+//! The playhead, shared lock-free between the audio thread and the UI.
+
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -45,6 +47,12 @@ impl PlaybackPosition {
         self.frame.store(capped, Ordering::Release);
     }
 
+    /// Moves the playhead to `progress` (0 to 1) of the track.
+    pub fn seek_to(&self, progress: f64) {
+        let total = self.total_frames();
+        self.set_frame((progress.clamp(0.0, 1.0) * total as f64).round() as u64);
+    }
+
     pub fn reset(&self) {
         self.frame.store(0, Ordering::Release);
     }
@@ -61,5 +69,12 @@ mod tests {
         assert_eq!(position.progress(), 0.0);
         position.set_total_frames(1_000);
         assert!((position.progress() - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn ended_position_reports_full_progress() {
+        let position = PlaybackPosition::new(44100);
+        position.set_frame(position.total_frames());
+        assert_eq!(position.progress(), 1.0);
     }
 }

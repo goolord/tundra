@@ -20,7 +20,7 @@ use lofty::tag::Accessor;
 use lofty::TextEncoding;
 
 use crate::path_util::{open_file, path_io_error};
-use crate::ui::is_audio;
+use super::read::is_audio;
 
 use super::auto_tag::AutoTagFieldStatus;
 use super::fields::ManualTagEdits;

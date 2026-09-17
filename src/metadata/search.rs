@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::Arc;
 
-use crate::ui::is_audio;
+use super::read::is_audio;
 
 #[cfg(test)]
 use super::cache::CachedMetadata;

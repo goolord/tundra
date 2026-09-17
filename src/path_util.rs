@@ -234,6 +234,87 @@ pub fn file_label(path: &Path) -> String {
     file_name_lossy(path).unwrap_or_else(|| path.display().to_string())
 }
 
+/// `path` as text, keeping the end when it is longer than `max_chars`.
+pub fn truncate_path(path: &Path, max_chars: usize) -> String {
+    let rendered = path.display().to_string();
+    let count = rendered.chars().count();
+    if count <= max_chars {
+        return rendered;
+    }
+    let tail: String = rendered.chars().skip(count - max_chars.saturating_sub(1)).collect();
+    format!("…{tail}")
+}
+
+/// Dot-files, plus files the OS marks hidden.
+pub fn is_hidden(path: &Path) -> bool {
+    if path.file_name().is_some_and(|name| name.to_string_lossy().starts_with('.')) {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+        if let Ok(meta) = std::fs::metadata(path) {
+            return meta.file_attributes() & FILE_ATTRIBUTE_HIDDEN != 0;
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::macos::fs::MetadataExt;
+        const UF_HIDDEN: u32 = 0x8000;
+        if let Ok(meta) = std::fs::metadata(path) {
+            return meta.st_flags() & UF_HIDDEN != 0;
+        }
+    }
+    false
+}
+
+/// What the platform calls "show this file in its folder".
+pub fn file_manager_label() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "Open in Explorer"
+    } else if cfg!(target_os = "macos") {
+        "Open in Finder"
+    } else {
+        "Open in File browser"
+    }
+}
+
+/// Opens the system file manager with `path` selected (or opened, for a folder).
+pub fn reveal_in_file_manager(path: &Path) {
+    #[cfg(target_os = "windows")]
+    let command = {
+        use std::os::windows::process::CommandExt;
+        let mut command = std::process::Command::new("explorer");
+        if path.is_dir() {
+            command.arg(path);
+        } else {
+            command.raw_arg(format!("/select,\"{}\"", path.display()));
+        }
+        hide_console(&mut command);
+        command
+    };
+    #[cfg(target_os = "macos")]
+    let command = {
+        let mut command = std::process::Command::new("open");
+        if path.is_file() {
+            command.arg("-R");
+        }
+        command.arg(path);
+        command
+    };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let command = {
+        let mut command = std::process::Command::new("xdg-open");
+        command.arg(if path.is_dir() { path } else { path.parent().unwrap_or(path) });
+        command
+    };
+    let mut command = command;
+    if let Err(err) = command.spawn() {
+        eprintln!("Could not open the file manager for {}: {err}", path.display());
+    }
+}
+
 pub fn path_io_error(verb: &str, path: &Path, err: impl std::fmt::Display) -> String {
     format!("Failed to {verb} {}: {err}", path.display())
 }

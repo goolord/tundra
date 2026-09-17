@@ -46,6 +46,21 @@ impl Drop for ScratchDir {
     }
 }
 
+/// Extensions of the `tests/assets/tone.*` fixtures, one per supported container.
+pub const ASSET_FORMATS: [&str; 5] = ["wav", "flac", "mp3", "ogg", "aiff"];
+
+/// `tests/assets/tone.<ext>`, a short real recording in each format.
+pub fn asset(ext: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/assets").join(format!("tone.{ext}"))
+}
+
+/// Copies `tone.<ext>` to `dir/<stem>.<ext>` so a test can modify it.
+pub fn copy_asset(dir: &Path, stem: &str, ext: &str) -> PathBuf {
+    let target = dir.join(format!("{stem}.{ext}"));
+    fs::copy(asset(ext), &target).unwrap_or_else(|err| panic!("copy {ext} fixture: {err}"));
+    target
+}
+
 pub fn count_tundra_sidecars(dir: &Path) -> usize {
     fs::read_dir(dir)
         .map(|entries| {

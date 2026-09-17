@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
-use super::settings::AllowedDirectories;
+use super::AllowedDirectories;
 use crate::metadata::{refresh_cached_metadata, CachedMetadata, PersistedCaches, TagFields};
 
 pub type Listings = HashMap<PathBuf, Vec<PathBuf>>;
@@ -36,7 +36,7 @@ pub struct PersistedMap<V> {
 pub type DirCache = PersistedMap<Vec<PathBuf>>;
 pub type MetadataCache = PersistedMap<CachedMetadata>;
 
-fn lock_read<V>(map: &Shared<V>) -> Arc<HashMap<PathBuf, V>> {
+pub fn lock_read<V>(map: &Shared<V>) -> Arc<HashMap<PathBuf, V>> {
     Arc::clone(&map.read().unwrap_or_else(std::sync::PoisonError::into_inner))
 }
 
@@ -53,11 +53,11 @@ where
         }
     }
 
-    pub(crate) fn share(&self) -> Shared<V> {
+    pub fn share(&self) -> Shared<V> {
         Arc::clone(&self.map)
     }
 
-    pub(crate) fn snapshot(&self) -> Arc<HashMap<PathBuf, V>> {
+    pub fn snapshot(&self) -> Arc<HashMap<PathBuf, V>> {
         lock_read(&self.map)
     }
 
@@ -71,7 +71,7 @@ where
 
     /// Entries loaded from disk at start-up. Anything recorded before the load
     /// finished is newer and wins.
-    pub(crate) fn finish_loading(&mut self, loaded: HashMap<PathBuf, V>) {
+    pub fn finish_loading(&mut self, loaded: HashMap<PathBuf, V>) {
         // Already cleared by the user while loading: the file is stale.
         if self.loaded.load(Ordering::SeqCst) {
             return;
@@ -85,13 +85,13 @@ where
     }
 
     /// Replace everything with an empty map and save that.
-    pub(crate) fn clear(&mut self) {
+    pub fn clear(&mut self) {
         self.update(HashMap::clear);
         self.loaded.store(true, Ordering::SeqCst);
         self.persist();
     }
 
-    pub(crate) fn retain(&mut self, mut keep: impl FnMut(&PathBuf) -> bool) -> bool {
+    pub fn retain(&mut self, mut keep: impl FnMut(&PathBuf) -> bool) -> bool {
         self.update(|map| {
             let before = map.len();
             map.retain(|path, _| keep(path));
@@ -99,7 +99,7 @@ where
         })
     }
 
-    pub(crate) fn persist_map_to(path: &Path, map: &HashMap<PathBuf, V>) {
+    pub fn persist_map_to(path: &Path, map: &HashMap<PathBuf, V>) {
         // Borrowed keys and values encode to the same bytes as the owned map.
         let persistable: HashMap<&PathBuf, &V> =
             map.iter().filter(|(_, value)| value.worth_saving()).collect();
@@ -108,7 +108,7 @@ where
 
     /// Write now, on this thread. Used on exit, when a pending background save
     /// would be killed with the process.
-    pub(crate) fn flush(&self) {
+    pub fn flush(&self) {
         if self.loaded.load(Ordering::SeqCst)
             && self.save_pending.swap(false, Ordering::SeqCst)
             && let Some(path) = crate::path_util::cache_file(self.file)
@@ -119,7 +119,7 @@ where
 
     /// Schedule a save. Calls within `SAVE_DELAY` share one write, and saves
     /// are serialized so an older snapshot never lands after a newer one.
-    pub(crate) fn persist(&self) {
+    pub fn persist(&self) {
         static SAVE_LOCK: Mutex<()> = Mutex::new(());
         if !self.loaded.load(Ordering::SeqCst) || self.save_pending.swap(true, Ordering::SeqCst) {
             return;
@@ -154,30 +154,30 @@ impl Persistable for CachedMetadata {
 }
 
 impl DirCache {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self::empty(DIR_CACHE_FILE)
     }
 
-    pub(crate) fn insert(&mut self, dir: PathBuf, listing: Vec<PathBuf>) {
+    pub fn insert(&mut self, dir: PathBuf, listing: Vec<PathBuf>) {
         let key = crate::path_util::cache_key(dir);
         self.update(|map| map.insert(key, listing));
         self.persist();
     }
 
-    pub(crate) fn contains_key(&self, dir: &Path) -> bool {
+    pub fn contains_key(&self, dir: &Path) -> bool {
         self.snapshot()
             .contains_key(&crate::path_util::cache_key(dir.to_path_buf()))
     }
 }
 
 impl MetadataCache {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self::empty(METADATA_CACHE_FILE)
     }
 
     /// Add entries, never replacing a newer one: a search that read a file
     /// before a tag save may finish after it.
-    pub(crate) fn merge(&mut self, entries: MetadataMap) {
+    pub fn merge(&mut self, entries: MetadataMap) {
         if entries.is_empty() {
             return;
         }
@@ -189,7 +189,7 @@ impl MetadataCache {
         self.persist();
     }
 
-    pub(crate) fn merge_path(&mut self, path: &Path, entry: CachedMetadata) {
+    pub fn merge_path(&mut self, path: &Path, entry: CachedMetadata) {
         self.merge(HashMap::from([(
             crate::path_util::cache_key(path.to_path_buf()),
             entry,
@@ -197,7 +197,7 @@ impl MetadataCache {
     }
 
     /// Indexed tags without touching the disk, for display.
-    pub(crate) fn cached_fields(&self, path: &Path) -> Option<TagFields> {
+    pub fn cached_fields(&self, path: &Path) -> Option<TagFields> {
         let map = self.snapshot();
         crate::path_util::cache_lookup_keys(path)
             .iter()
@@ -206,7 +206,7 @@ impl MetadataCache {
     }
 
     /// Tags for `path`, re-read when the file changed since it was indexed.
-    pub(crate) fn tag_fields_for(&mut self, path: &Path) -> TagFields {
+    pub fn tag_fields_for(&mut self, path: &Path) -> TagFields {
         if let Some(mtime_secs) = crate::metadata::file_mtime_secs(path) {
             let map = self.snapshot();
             let current = crate::path_util::cache_lookup_keys(path)
@@ -242,7 +242,7 @@ fn load_map<V: serde::de::DeserializeOwned>(file: &str) -> HashMap<PathBuf, V> {
 }
 
 /// Runs off the UI thread at start-up.
-pub(crate) fn load_startup_caches(allowed: AllowedDirectories) -> PersistedCaches {
+pub fn load_startup_caches(allowed: AllowedDirectories) -> PersistedCaches {
     // Temps from an atomic save that crashed; the live file is intact.
     for dir in [crate::path_util::tundra_cache_dir(), crate::path_util::tundra_config_dir()]
         .into_iter()

@@ -1,17 +1,21 @@
-use super::common::{
-    modal_button_style, modal_error_style, modal_shell, modal_warn_style, resource_svg,
-    selection_stripe, truncate_path, ui_muted_text, Message, MODAL_OK, MODAL_WARN, TUNDRA_ACCENT,
-    UI_DANGER,
-};
-use crate::bulk_auto_tag::{BulkApplySummary, BulkDirGroup, BulkProgressSnapshot, BulkScanSummary};
-use iced::widget::{button, checkbox, container, progress_bar, row, scrollable, text, Button, Column, Row, Space};
-use iced::widget::button::{Status as ButtonStatus, Style as ButtonStyle};
-use iced::widget::Id;
-use iced::{Alignment, Border, Color, Element, Length, Shadow, Theme, keyboard::Modifiers, theme};
-use std::collections::HashSet;
-use std::path::PathBuf;
+//! The Bulk Auto Tag modal: pick a folder, scan it, review proposals grouped
+//! by directory, then apply the checked ones.
 
-const BULK_LIST_SCROLL_ID: &str = "bulk-auto-tag-scroll";
+use super::message::{BulkAutoTagMsg, Message};
+use super::selection::Selection;
+use super::style::{self, ACCENT};
+use super::widgets::{icon, modal_button, modal_shell, selection_stripe, spacer};
+use crate::bulk_auto_tag::{BulkApplySummary, BulkDirGroup, BulkFileProposal, BulkScanProgress, BulkScanSummary};
+use crate::path_util::truncate_path;
+use iced::keyboard::Modifiers;
+use iced::widget::{
+    button, checkbox, column, container, progress_bar, row, scrollable, text, Column, Row, Text,
+};
+use iced::{Alignment, Color, Element, Length, Theme};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
 const CONF_HIGH: Color = Color::from_rgb8(0x5c, 0xb8, 0x85);
 const CONF_MED: Color = Color::from_rgb8(0xd4, 0xa5, 0x4a);
 const CONF_LOW: Color = Color::from_rgb8(0x9a, 0x9a, 0xa8);
@@ -22,32 +26,15 @@ const SELECTION_STRIPE_WIDTH: f32 = 3.0;
 const CHECKBOX_COLUMN_WIDTH: f32 = 28.0;
 const EXPAND_TOGGLE_WIDTH: f32 = 32.0;
 
-fn folder_icon() -> iced::widget::Svg<'static> {
-    resource_svg("folder-solid.svg")
-        .width(Length::Fixed(12.0))
-        .height(Length::Fixed(12.0))
-        .style(|_theme, _status| iced::widget::svg::Style {
-            color: Some(TUNDRA_ACCENT.scale_alpha(0.75)),
-        })
-}
-
-fn list_row(content: Element<'static, Message>) -> Element<'static, Message> {
-    Row::new()
-        .align_y(Alignment::Center)
-        .height(Length::Fixed(ROW_HEIGHT))
-        .push(content)
-        .width(Length::Fill)
-        .into()
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BulkFileKey {
     pub dir_idx: usize,
     pub file_idx: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BulkAutoTagPhase {
+    #[default]
     PickDirectory,
     Running,
     Review,
@@ -55,8 +42,18 @@ pub enum BulkAutoTagPhase {
     Done,
 }
 
+/// A scan or apply running in the background.
+#[derive(Debug, Clone)]
+pub struct BulkJob {
+    /// Completions carrying another generation belong to an abandoned job.
+    pub generation: u64,
+    pub progress: Arc<BulkScanProgress>,
+    pub cancel: Arc<AtomicBool>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct BulkAutoTagState {
+    /// `None` while the modal is closed.
     pub phase: Option<BulkAutoTagPhase>,
     pub root: Option<PathBuf>,
     pub groups: Vec<BulkDirGroup>,
@@ -65,252 +62,206 @@ pub struct BulkAutoTagState {
     pub status: String,
     pub error: Option<String>,
     pub apply_summary: Option<BulkApplySummary>,
-    pub selected: HashSet<BulkFileKey>,
-    pub selection_anchor: Option<BulkFileKey>,
-    pub progress_done: usize,
-    pub progress_total: usize,
+    pub selection: Selection<BulkFileKey>,
     pub progress_fraction: f32,
     pub progress_label: String,
     pub progress_detail: String,
     pub apply_stop_requested: bool,
+    pub job: Option<BulkJob>,
+    /// Survives closing the modal, so a job from an earlier session can never match.
+    last_generation: u64,
 }
 
 impl BulkAutoTagState {
-    pub fn open(&mut self) {
+    /// Closed, or reopened fresh at the folder picker. Any running job is cancelled.
+    fn reset(&mut self, phase: Option<BulkAutoTagPhase>) {
+        self.cancel_job();
         *self = Self {
-            phase: Some(BulkAutoTagPhase::PickDirectory),
+            phase,
+            last_generation: self.last_generation,
             ..Self::default()
         };
     }
 
+    pub fn open(&mut self) {
+        self.reset(Some(BulkAutoTagPhase::PickDirectory));
+    }
+
     pub fn close(&mut self) {
-        *self = Self::default();
+        self.reset(None);
     }
 
     pub fn is_open(&self) -> bool {
         self.phase.is_some()
     }
 
-    fn clear_selection(&mut self) {
-        self.selected.clear();
-        self.selection_anchor = None;
+    /// Signals the running job to stop and stops listening for its result.
+    pub fn cancel_job(&mut self) {
+        if let Some(job) = self.job.take() {
+            job.cancel.store(true, Ordering::Relaxed);
+        }
     }
 
+    /// Replaces any running job with a new one.
+    pub fn start_job(&mut self) -> BulkJob {
+        self.cancel_job();
+        self.last_generation = self.last_generation.wrapping_add(1);
+        let job = BulkJob {
+            generation: self.last_generation,
+            progress: BulkScanProgress::new(),
+            cancel: Arc::new(AtomicBool::new(false)),
+        };
+        self.job = Some(job.clone());
+        job
+    }
+
+    /// Ends the job if `generation` is the one running. False for a stale result.
+    pub fn finish_job(&mut self, generation: u64) -> bool {
+        let current = self.job.as_ref().is_some_and(|job| job.generation == generation);
+        if current {
+            self.job = None;
+        }
+        current
+    }
+
+    fn file(&self, key: BulkFileKey) -> Option<&BulkFileProposal> {
+        self.groups.get(key.dir_idx)?.files.get(key.file_idx)
+    }
+
+    fn files_mut(&mut self) -> impl Iterator<Item = &mut BulkFileProposal> {
+        self.groups.iter_mut().flat_map(|group| &mut group.files)
+    }
+
+    /// Every file that could be applied, in display order.
     fn actionable_keys(&self) -> Vec<BulkFileKey> {
-        let mut keys = Vec::new();
-        for (dir_idx, group) in self.groups.iter().enumerate() {
-            for (file_idx, file) in group.files.iter().enumerate() {
-                if file.suggested.is_some() && file.error.is_none() {
-                    keys.push(BulkFileKey { dir_idx, file_idx });
-                }
-            }
-        }
-        keys
+        self.groups
+            .iter()
+            .enumerate()
+            .flat_map(|(dir_idx, group)| {
+                group
+                    .files
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, file)| file.is_actionable())
+                    .map(move |(file_idx, _)| BulkFileKey { dir_idx, file_idx })
+            })
+            .collect()
     }
 
-    pub fn is_selected(&self, dir_idx: usize, file_idx: usize) -> bool {
-        self.selected.contains(&BulkFileKey { dir_idx, file_idx })
+    pub fn select_file(&mut self, key: BulkFileKey, shift: bool, control: bool) {
+        if self.file(key).is_some_and(BulkFileProposal::is_actionable) {
+            let order = self.actionable_keys();
+            self.selection.click(key, shift, control, &order);
+        }
     }
 
-    pub fn selected_count(&self) -> usize {
-        self.selected.len()
-    }
-
-    pub fn select_file(&mut self, dir_idx: usize, file_idx: usize, shift: bool, control: bool) {
-        let key = BulkFileKey { dir_idx, file_idx };
-        if !self.is_actionable(dir_idx, file_idx) {
-            return;
-        }
-
-        if control {
-            if self.selected.contains(&key) {
-                self.selected.remove(&key);
-            } else {
-                self.selected.insert(key.clone());
-            }
-            self.selection_anchor = Some(key);
-            return;
-        }
-
-        if shift {
-            if let Some(anchor) = self.selection_anchor.clone() {
-                let keys = self.actionable_keys();
-                let Some(start) = keys.iter().position(|entry| entry == &anchor) else {
-                    self.selected.clear();
-                    self.selected.insert(key.clone());
-                    self.selection_anchor = Some(key);
-                    return;
-                };
-                let Some(end) = keys.iter().position(|entry| entry == &key) else {
-                    return;
-                };
-                let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
-                self.selected.clear();
-                for entry in &keys[lo..=hi] {
-                    self.selected.insert(entry.clone());
-                }
-                return;
-            }
-        }
-
-        self.selected.clear();
-        self.selected.insert(key.clone());
-        self.selection_anchor = Some(key);
-    }
-
+    /// Clicking a folder row selects its files. Ctrl toggles them as a block;
+    /// Shift extends from the anchor through the folder's last file.
     pub fn select_directory(&mut self, dir_idx: usize, shift: bool, control: bool) {
-        let dir_keys: Vec<BulkFileKey> = self.groups.get(dir_idx).map(|group| {
-            group
-                .files
-                .iter()
-                .enumerate()
-                .filter(|(_, file)| file.suggested.is_some() && file.error.is_none())
-                .map(|(file_idx, _)| BulkFileKey { dir_idx, file_idx })
-                .collect()
-        }).unwrap_or_default();
-
-        if dir_keys.is_empty() {
+        let keys = self.actionable_keys();
+        let dir_keys: Vec<BulkFileKey> = keys.iter().copied().filter(|key| key.dir_idx == dir_idx).collect();
+        let Some(&first) = dir_keys.first() else {
             return;
-        }
+        };
 
         if control {
-            let all_selected = dir_keys.iter().all(|key| self.selected.contains(key));
-            if all_selected {
-                for key in dir_keys {
-                    self.selected.remove(&key);
-                }
+            if dir_keys.iter().all(|key| self.selection.contains(key)) {
+                dir_keys.iter().for_each(|key| self.selection.remove(key));
             } else {
-                for key in dir_keys {
-                    self.selected.insert(key);
-                }
+                dir_keys.into_iter().for_each(|key| self.selection.insert(key));
             }
             return;
         }
-
-        if shift {
-            if let Some(anchor) = self.selection_anchor.clone() {
-                let keys = self.actionable_keys();
-                let Some(start) = keys.iter().position(|entry| entry == &anchor) else {
-                    self.selected.clear();
-                    for key in &dir_keys {
-                        self.selected.insert(key.clone());
-                    }
-                    self.selection_anchor = dir_keys.first().cloned();
-                    return;
-                };
-                let Some(last_in_dir) = keys.iter().rposition(|entry| entry.dir_idx == dir_idx) else {
-                    return;
-                };
-                let (lo, hi) = if start <= last_in_dir {
-                    (start, last_in_dir)
-                } else {
-                    (last_in_dir, start)
-                };
-                self.selected.clear();
-                for entry in &keys[lo..=hi] {
-                    self.selected.insert(entry.clone());
+        if shift && let Some(anchor) = self.selection.anchor().copied() {
+            match keys.iter().position(|key| *key == anchor) {
+                Some(start) => {
+                    let end = keys.iter().rposition(|key| key.dir_idx == dir_idx).unwrap_or(start);
+                    self.selection.set(keys[start.min(end)..=start.max(end)].iter().copied(), Some(anchor));
                 }
-                return;
+                None => self.selection.set(dir_keys, Some(first)),
             }
+            return;
         }
-
-        if !shift {
-            self.selected.clear();
-        }
-        for key in dir_keys {
-            self.selected.insert(key);
-        }
-        self.selection_anchor = self.selected.iter().next().cloned();
+        // Shift with no anchor adds the folder to the selection.
+        let mut selected: Vec<BulkFileKey> = if shift { self.selection.iter().copied().collect() } else { Vec::new() };
+        selected.extend(dir_keys);
+        self.selection.set(selected, Some(first));
     }
 
     pub fn select_all_files(&mut self) {
-        self.selected = self.actionable_keys().into_iter().collect();
-        self.selection_anchor = self.selected.iter().next().cloned();
+        let keys = self.actionable_keys();
+        let first = keys.first().copied();
+        self.selection.set(keys, first);
     }
 
     pub fn set_selected_accepted(&mut self, accepted: bool) {
-        for key in self.selected.clone() {
-            if let Some(file) = self
-                .groups
-                .get_mut(key.dir_idx)
-                .and_then(|group| group.files.get_mut(key.file_idx))
-            {
-                if file.suggested.is_some() && file.error.is_none() {
-                    file.accepted = accepted;
-                }
-            }
+        let selected: Vec<BulkFileKey> = self.selection.iter().copied().collect();
+        for key in selected {
+            self.set_file_accepted(key, accepted);
         }
     }
 
-    fn is_actionable(&self, dir_idx: usize, file_idx: usize) -> bool {
-        self.groups
-            .get(dir_idx)
-            .and_then(|group| group.files.get(file_idx))
-            .is_some_and(|file| file.suggested.is_some() && file.error.is_none())
-    }
-
-    pub fn set_file_accepted(&mut self, dir_idx: usize, file_idx: usize, accepted: bool) {
-        let Some(file) = self
+    pub fn set_file_accepted(&mut self, key: BulkFileKey, accepted: bool) {
+        if let Some(file) = self
             .groups
-            .get_mut(dir_idx)
-            .and_then(|group| group.files.get_mut(file_idx))
-        else {
-            return;
-        };
-        if file.suggested.is_none() || file.error.is_some() {
-            return;
+            .get_mut(key.dir_idx)
+            .and_then(|group| group.files.get_mut(key.file_idx))
+            .filter(|file| file.is_actionable())
+        {
+            file.accepted = accepted;
         }
-        file.accepted = accepted;
+    }
+
+    pub fn set_all_accepted(&mut self, accepted: bool) {
+        self.files_mut().filter(|file| file.is_actionable()).for_each(|file| file.accepted = accepted);
+    }
+
+    pub fn set_all_expanded(&mut self, expanded: bool) {
+        self.groups.iter_mut().for_each(|group| group.expanded = expanded);
     }
 
     pub fn start_running(&mut self, root: PathBuf) {
         self.root = Some(root);
         self.phase = Some(BulkAutoTagPhase::Running);
-        self.status = String::new();
-        self.progress_done = 0;
-        self.progress_total = 0;
+        self.status.clear();
         self.progress_fraction = 0.0;
         self.progress_label = "Scanning folder…".into();
         self.progress_detail = "Starting…".into();
         self.error = None;
         self.groups.clear();
-        self.clear_selection();
+        self.selection.clear();
     }
 
-    pub fn update_progress(&mut self, snapshot: BulkProgressSnapshot) {
-        self.progress_done = snapshot.done();
-        self.progress_total = snapshot.total();
-        self.progress_fraction = snapshot.fraction();
-        self.progress_label = snapshot.label().into();
-        self.progress_detail = snapshot.detail();
-    }
-
-    pub fn set_scan_all_complete(&mut self, root: PathBuf, skipped_complete: usize) {
-        self.root = Some(root);
-        self.skipped_complete = skipped_complete;
-        self.phase = Some(BulkAutoTagPhase::PickDirectory);
-        self.status = if skipped_complete > 0 {
-            format!("No files need auto tags ({skipped_complete} already complete).")
-        } else {
-            "No files need auto tags.".into()
-        };
-        self.error = None;
-        self.groups.clear();
-        self.failed = 0;
-        self.apply_summary = None;
-        self.clear_selection();
+    pub fn update_progress(&mut self) {
+        if let Some(job) = &self.job {
+            let snapshot = job.progress.snapshot();
+            self.progress_fraction = snapshot.fraction();
+            self.progress_label = snapshot.label().into();
+            self.progress_detail = snapshot.detail();
+        }
     }
 
     pub fn finish_scan(&mut self, summary: BulkScanSummary) {
+        let summary_is_empty = summary.is_empty();
         self.root = Some(summary.root);
-        self.groups = summary.groups;
         self.skipped_complete = summary.skipped_complete;
         self.failed = summary.failed;
+        self.groups = summary.groups;
         self.apply_summary = None;
         self.error = None;
-        self.phase = Some(BulkAutoTagPhase::Review);
-        self.status = String::new();
-        self.select_all_files();
+        self.selection.clear();
+        if summary_is_empty {
+            // Nothing to review: stay on the picker and say why.
+            self.phase = Some(BulkAutoTagPhase::PickDirectory);
+            self.status = match self.skipped_complete {
+                0 => "No files need auto tags.".into(),
+                skipped => format!("No files need auto tags ({skipped} already complete)."),
+            };
+        } else {
+            self.phase = Some(BulkAutoTagPhase::Review);
+            self.status.clear();
+            self.select_all_files();
+        }
     }
 
     pub fn set_error(&mut self, message: impl Into<String>) {
@@ -323,18 +274,18 @@ impl BulkAutoTagState {
         self.phase = Some(BulkAutoTagPhase::Applying);
         self.apply_stop_requested = false;
         self.progress_label = "Writing tags…".into();
-        self.progress_done = 0;
-        self.progress_total = self.accepted_count();
         self.progress_fraction = 0.0;
-        self.progress_detail = if self.progress_total > 0 {
-            format!("0 / {}", self.progress_total)
-        } else {
-            "Starting…".into()
+        self.progress_detail = match self.accepted_count() {
+            0 => "Starting…".into(),
+            total => format!("0 / {total}"),
         };
         self.error = None;
     }
 
     pub fn request_stop_apply(&mut self) {
+        if let Some(job) = &self.job {
+            job.cancel.store(true, Ordering::Relaxed);
+        }
         self.apply_stop_requested = true;
         self.progress_label = "Stopping… already-written tags stay.".into();
     }
@@ -343,325 +294,343 @@ impl BulkAutoTagState {
         self.apply_summary = Some(summary);
         self.phase = Some(BulkAutoTagPhase::Done);
         self.status.clear();
-        self.clear_selection();
+        self.selection.clear();
     }
 
     pub fn actionable_count(&self) -> usize {
-        crate::bulk_auto_tag::total_actionable(&self.groups)
+        self.groups.iter().map(BulkDirGroup::actionable_count).sum()
     }
 
     pub fn accepted_count(&self) -> usize {
-        crate::bulk_auto_tag::total_accepted(&self.groups)
+        self.groups.iter().map(BulkDirGroup::accepted_count).sum()
     }
 }
 
-fn list_row_button_style(
-    theme: &theme::Theme,
-    status: ButtonStatus,
-    selected: bool,
-    accepted: bool,
-    zebra: bool,
-) -> ButtonStyle {
-    let palette = theme.extended_palette();
-    let mut style = ButtonStyle {
-        text_color: palette.background.base.text,
-        border: Border {
-            width: 0.0,
-            radius: 0.0.into(),
-            ..Default::default()
-        },
-        shadow: Shadow::default(),
-        ..ButtonStyle::default()
-    };
-
-    let zebra_bg = if zebra {
-        palette.background.weak.color.scale_alpha(0.16)
-    } else {
-        Color::TRANSPARENT
-    };
-
-    let base_bg = if accepted {
-        TUNDRA_ACCENT.scale_alpha(0.10)
-    } else {
-        zebra_bg
-    };
-
-    match status {
-        ButtonStatus::Active | ButtonStatus::Disabled => {
-            style.background = Some(
-                if selected {
-                    TUNDRA_ACCENT.scale_alpha(0.22)
-                } else {
-                    base_bg
-                }
-                .into(),
-            );
-        }
-        ButtonStatus::Hovered => {
-            style.background = Some(TUNDRA_ACCENT.scale_alpha(if selected { 0.30 } else { 0.14 }).into());
-        }
-        ButtonStatus::Pressed => {
-            style.background = Some(TUNDRA_ACCENT.scale_alpha(0.36).into());
-        }
-    }
-    style
+fn muted(label: impl text::IntoFragment<'static>, size: u32) -> Text<'static> {
+    text(label).size(size).style(style::muted_text)
 }
 
-fn small_button(label: String, message: Message, primary: bool) -> Element<'static, Message> {
+fn small_button(label: &'static str, message: BulkAutoTagMsg) -> Element<'static, Message> {
     button(text(label).size(11))
         .padding([4, 10])
-        .on_press(message)
-        .style(move |theme, status| modal_button_style(theme, status, primary))
+        .on_press(message.into())
+        .style(style::modal_button(false))
         .into()
 }
 
-fn stat_chip(label: String, value: usize, accent: bool) -> Element<'static, Message> {
-    container(
-        row![
-            text(label)
-                .size(10)
-                .style(|theme: &Theme| iced::widget::text::Style {
-                    color: Some(ui_muted_text(theme)),
-                }),
-            text(format!("{value}"))
-                .size(11)
-                .font(iced::Font {
-                    weight: iced::font::Weight::Semibold,
-                    ..iced::Font::default()
-                })
-                .style(move |theme: &Theme| iced::widget::text::Style {
-                    color: Some(if accent {
-                        TUNDRA_ACCENT.scale_alpha(0.95)
-                    } else {
-                        theme.extended_palette().background.base.text
-                    }),
-                }),
-        ]
-        .spacing(4)
-        .align_y(Alignment::Center),
-    )
-    .padding([4, 8])
-    .style(move |theme: &Theme| {
-        let palette = theme.extended_palette();
-        container::Style {
-            background: Some(
-                if accent {
-                    TUNDRA_ACCENT.scale_alpha(0.12)
-                } else {
-                    palette.background.weak.color.scale_alpha(0.42)
-                }
-                .into(),
-            ),
-            border: Border {
-                radius: 10.0.into(),
-                width: 1.0,
-                color: if accent {
-                    TUNDRA_ACCENT.scale_alpha(0.28)
-                } else {
-                    palette.background.strong.color.scale_alpha(0.18)
-                },
-            },
-            ..Default::default()
-        }
-    })
+fn folder_line(root: &Path, label: String) -> Element<'static, Message> {
+    row![
+        icon("folder-solid.svg", 12.0, |_| ACCENT.scale_alpha(0.75)),
+        muted(label, 11).width(Length::Fill),
+        button(text("Open folder").size(11))
+            .padding([4, 10])
+            .on_press(Message::FileRevealInFileManager(root.to_path_buf()))
+            .style(style::modal_button(false)),
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center)
+    .width(Length::Fill)
     .into()
 }
 
-fn instrument_chip(instrument: String) -> Element<'static, Message> {
-    container(
-        text(instrument)
-            .size(11)
-            .font(iced::Font {
-                weight: iced::font::Weight::Semibold,
-                ..iced::Font::default()
-            })
-            .style(|_theme: &Theme| iced::widget::text::Style {
-                color: Some(TUNDRA_ACCENT.scale_alpha(0.95)),
-            }),
-    )
-    .padding([3, 10])
-    .style(|_theme: &Theme| container::Style {
-        background: Some(TUNDRA_ACCENT.scale_alpha(0.14).into()),
-        border: Border {
-            radius: 12.0.into(),
-            width: 1.0,
-            color: TUNDRA_ACCENT.scale_alpha(0.32),
-        },
-        ..Default::default()
-    })
-    .into()
+/// A rounded, tinted label: counts, suggestions, confidence.
+fn chip(content: impl Into<Element<'static, Message>>, tone: Color, padding: [u16; 2], radius: f32) -> Element<'static, Message> {
+    container(content).padding(padding).style(style::tinted(tone, 0.14, 0.32, radius)).into()
+}
+
+fn stat_chip(label: &'static str, value: usize, accent: bool) -> Element<'static, Message> {
+    let value = text(value.to_string()).size(11).font(style::SEMIBOLD).style(move |theme: &Theme| text::Style {
+        color: Some(if accent { ACCENT.scale_alpha(0.95) } else { theme.extended_palette().background.base.text }),
+    });
+    let content = row![muted(label, 10), value].spacing(4).align_y(Alignment::Center);
+    if accent {
+        container(content).padding([4, 8]).style(style::tinted(ACCENT, 0.12, 0.28, 10.0)).into()
+    } else {
+        container(content).padding([4, 8]).style(style::panel(0.42, 0.18, 10.0)).into()
+    }
 }
 
 fn dir_count_badge(accepted: usize, total: usize) -> Element<'static, Message> {
     let all_checked = total > 0 && accepted == total;
+    let count_color = match (all_checked, accepted > 0) {
+        (true, _) => CONF_HIGH,
+        (false, true) => ACCENT,
+        (false, false) => CONF_LOW,
+    };
+    let (tone, fill, border) = if all_checked { (CONF_HIGH, 0.12, 0.30) } else { (ACCENT, 0.10, 0.22) };
     container(
         row![
-            text(format!("{accepted}"))
-                .size(10)
-                .font(iced::Font {
-                    weight: iced::font::Weight::Semibold,
-                    ..iced::Font::default()
-                })
-                .style(move |_theme: &Theme| iced::widget::text::Style {
-                    color: Some(if all_checked {
-                        CONF_HIGH.scale_alpha(0.95)
-                    } else if accepted > 0 {
-                        TUNDRA_ACCENT.scale_alpha(0.95)
-                    } else {
-                        CONF_LOW.scale_alpha(0.95)
-                    }),
-                }),
-            text(format!("/ {total}"))
-                .size(10)
-                .style(|theme: &Theme| iced::widget::text::Style {
-                    color: Some(ui_muted_text(theme)),
-                }),
+            text(accepted.to_string()).size(10).font(style::SEMIBOLD).color(count_color.scale_alpha(0.95)),
+            muted(format!("/ {total}"), 10),
         ]
         .spacing(2)
         .align_y(Alignment::Center),
     )
     .padding([3, 8])
-    .style(move |_theme: &Theme| container::Style {
-        background: Some(
-            if all_checked {
-                CONF_HIGH.scale_alpha(0.12)
-            } else {
-                TUNDRA_ACCENT.scale_alpha(0.10)
-            }
-            .into(),
-        ),
-        border: Border {
-            radius: 10.0.into(),
-            width: 1.0,
-            color: if all_checked {
-                CONF_HIGH.scale_alpha(0.30)
-            } else {
-                TUNDRA_ACCENT.scale_alpha(0.22)
-            },
-        },
-        ..Default::default()
-    })
+    .style(style::tinted(tone, fill, border, 10.0))
     .into()
-}
-
-fn expand_toggle_button_style(theme: &theme::Theme, status: ButtonStatus, expanded: bool) -> ButtonStyle {
-    let palette = theme.extended_palette();
-    let mut style = ButtonStyle {
-        text_color: if expanded {
-            Color::WHITE
-        } else {
-            TUNDRA_ACCENT.scale_alpha(0.92)
-        },
-        border: Border {
-            radius: 0.0.into(),
-            width: 1.0,
-            color: if expanded {
-                TUNDRA_ACCENT.scale_alpha(0.55)
-            } else {
-                palette.background.strong.color.scale_alpha(0.28)
-            },
-        },
-        shadow: Shadow::default(),
-        ..ButtonStyle::default()
-    };
-    match status {
-        ButtonStatus::Active | ButtonStatus::Disabled => {
-            style.background = Some(
-                if expanded {
-                    TUNDRA_ACCENT.scale_alpha(0.72)
-                } else {
-                    palette.background.weak.color.scale_alpha(0.50)
-                }
-                .into(),
-            );
-        }
-        ButtonStatus::Hovered => {
-            style.text_color = Color::WHITE;
-            style.background = Some(TUNDRA_ACCENT.scale_alpha(0.88).into());
-            style.border.color = TUNDRA_ACCENT.scale_alpha(0.70);
-        }
-        ButtonStatus::Pressed => {
-            style.text_color = Color::WHITE;
-            style.background = Some(TUNDRA_ACCENT.scale_alpha(0.95).into());
-            style.border.color = TUNDRA_ACCENT;
-        }
-    }
-    style
-}
-
-fn expand_toggle_button(expanded: bool, dir_idx: usize) -> Element<'static, Message> {
-    let chevron = if expanded { "▾" } else { "▸" };
-    button(
-        text(chevron)
-            .size(17)
-            .font(iced::Font {
-                weight: iced::font::Weight::Semibold,
-                ..iced::Font::default()
-            }),
-    )
-    .width(Length::Fixed(EXPAND_TOGGLE_WIDTH))
-    .height(Length::Fixed(ROW_HEIGHT))
-    .padding(0)
-    .on_press(Message::BulkAutoTagToggleDirectoryExpanded(dir_idx))
-    .style(move |theme, status| expand_toggle_button_style(theme, status, expanded))
-    .into()
-}
-
-fn checkbox_cell(checkbox: Element<'static, Message>) -> Element<'static, Message> {
-    container(checkbox)
-        .width(Length::Fixed(CHECKBOX_COLUMN_WIDTH))
-        .height(Length::Fixed(ROW_HEIGHT))
-        .align_x(iced::alignment::Horizontal::Center)
-        .align_y(Alignment::Center)
-        .into()
 }
 
 fn confidence_badge(confidence: Option<f64>) -> Element<'static, Message> {
-    let label = crate::auto_tag::confidence_percent(confidence);
     let tone = match confidence {
         Some(value) if value >= crate::auto_tag::HIGH_CLASSIFIER_CONFIDENCE => CONF_HIGH,
         Some(value) if value >= crate::auto_tag::MEDIUM_CLASSIFIER_CONFIDENCE => CONF_MED,
         _ => CONF_LOW,
     };
-    container(
-        text(label)
-            .size(10)
-            .font(iced::Font {
-                weight: iced::font::Weight::Medium,
-                ..iced::Font::default()
-            })
-            .style(move |_theme: &Theme| iced::widget::text::Style {
-                color: Some(tone.scale_alpha(0.95)),
-            }),
-    )
-    .padding([2, 7])
-    .style(move |_theme: &Theme| container::Style {
-        background: Some(tone.scale_alpha(0.14).into()),
-        border: Border {
-            radius: 8.0.into(),
-            width: 1.0,
-            color: tone.scale_alpha(0.35),
+    let label = text(crate::auto_tag::confidence_percent(confidence))
+        .size(10)
+        .font(style::MEDIUM)
+        .color(tone.scale_alpha(0.95));
+    container(label).padding([2, 7]).style(style::tinted(tone, 0.14, 0.35, 8.0)).into()
+}
+
+fn list_row_button_style(theme: &Theme, status: button::Status, selected: bool, accepted: bool, zebra: bool) -> button::Style {
+    let idle = if selected {
+        ACCENT.scale_alpha(0.22)
+    } else if accepted {
+        ACCENT.scale_alpha(0.10)
+    } else if zebra {
+        theme.extended_palette().background.weak.color.scale_alpha(0.16)
+    } else {
+        Color::TRANSPARENT
+    };
+    button::Style {
+        text_color: theme.extended_palette().background.base.text,
+        ..button::Style::default()
+    }
+    .with_background(style::by_status(
+        status,
+        idle,
+        ACCENT.scale_alpha(if selected { 0.30 } else { 0.14 }),
+        ACCENT.scale_alpha(0.36),
+    ))
+}
+
+fn fixed_cell<'a>(content: impl Into<Element<'a, Message>>, width: f32) -> Element<'a, Message> {
+    container(content)
+        .width(Length::Fixed(width))
+        .height(Length::Fixed(ROW_HEIGHT))
+        .center_x(Length::Fixed(width))
+        .align_y(Alignment::Center)
+        .into()
+}
+
+fn list_row(cells: Vec<Element<'static, Message>>) -> Element<'static, Message> {
+    Row::with_children(cells)
+        .align_y(Alignment::Center)
+        .height(Length::Fixed(ROW_HEIGHT))
+        .width(Length::Fill)
+        .into()
+}
+
+fn file_row(state: &BulkAutoTagState, modifiers: Modifiers, key: BulkFileKey, file: &BulkFileProposal, zebra: bool) -> Element<'static, Message> {
+    let name = crate::path_util::file_label(&file.path);
+    let indent = || -> Element<'static, Message> { spacer(Length::Fixed(FILE_INDENT), Length::Shrink).into() };
+
+    if let Some(error) = file.error.clone() {
+        let body = container(
+            row![
+                text("✕").size(11).color(style::ERROR),
+                text(name).size(11).width(Length::Fill),
+                muted(error, 10),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .width(Length::Fill),
+        )
+        .width(Length::Fill)
+        .height(Length::Fixed(ROW_HEIGHT))
+        .align_y(Alignment::Center)
+        .padding([0, 10])
+        .style(move |theme: &Theme| {
+            let strong = theme.extended_palette().background.strong.color;
+            container::background(style::DANGER.scale_alpha(if zebra { 0.06 } else { 0.08 }))
+                .border(style::outline(strong.scale_alpha(0.10), 0.0))
+        });
+        return list_row(vec![indent(), body.into()]);
+    }
+
+    let selected = state.selection.contains(&key);
+    let accepted = file.accepted;
+    let label = row![
+        icon("music-solid.svg", 13.0, move |theme| {
+            if selected || accepted { ACCENT.scale_alpha(0.9) } else { style::muted(theme) }
+        }),
+        text(name).size(12).width(Length::FillPortion(2)).style(move |theme: &Theme| text::Style {
+            color: Some(if selected { theme.extended_palette().background.base.text } else { style::muted(theme) }),
+        }),
+        chip(
+            text(file.suggested.clone().unwrap_or_default()).size(11).font(style::SEMIBOLD).color(ACCENT.scale_alpha(0.95)),
+            ACCENT,
+            [3, 10],
+            12.0,
+        ),
+        confidence_badge(file.confidence),
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center)
+    .width(Length::Fill);
+
+    let select = BulkAutoTagMsg::SelectFile {
+        key,
+        shift: modifiers.shift(),
+        control: modifiers.control() || modifiers.logo(),
+    };
+    list_row(vec![
+        indent(),
+        selection_stripe(selected, SELECTION_STRIPE_WIDTH, Length::Fixed(ROW_HEIGHT)),
+        fixed_cell(
+            checkbox(accepted).on_toggle(move |accepted| BulkAutoTagMsg::SetFileAccepted { key, accepted }.into()),
+            CHECKBOX_COLUMN_WIDTH,
+        ),
+        button(label)
+            .width(Length::Fill)
+            .height(Length::Fixed(ROW_HEIGHT))
+            .padding([0, 10])
+            .on_press(select.into())
+            .style(move |theme, status| list_row_button_style(theme, status, selected, accepted, zebra))
+            .into(),
+    ])
+}
+
+fn directory_group(state: &BulkAutoTagState, modifiers: Modifiers, root: &Path, dir_idx: usize, group: &BulkDirGroup) -> Element<'static, Message> {
+    let label = group.path.strip_prefix(root).map_or_else(
+        |_| truncate_path(&group.path, 48),
+        |relative| match relative.to_string_lossy() {
+            text if text.is_empty() => ".".into(),
+            text => text.into_owned(),
         },
-        ..Default::default()
-    })
+    );
+    let count = group.actionable_count();
+    let accepted = group.accepted_count();
+    let expanded = group.expanded;
+    let dir_selected = count > 0
+        && group
+            .files
+            .iter()
+            .enumerate()
+            .filter(|(_, file)| file.is_actionable())
+            .all(|(file_idx, _)| state.selection.contains(&BulkFileKey { dir_idx, file_idx }));
+
+    let toggle = button(text(if expanded { "▾" } else { "▸" }).size(17).font(style::SEMIBOLD))
+        .width(Length::Fixed(EXPAND_TOGGLE_WIDTH))
+        .height(Length::Fixed(ROW_HEIGHT))
+        .padding(0)
+        .on_press(BulkAutoTagMsg::ToggleDirectoryExpanded(dir_idx).into())
+        .style(move |theme: &Theme, status| {
+            let palette = theme.extended_palette();
+            let (idle_text, idle_bg, idle_border) = if expanded {
+                (Color::WHITE, ACCENT.scale_alpha(0.72), ACCENT.scale_alpha(0.55))
+            } else {
+                (ACCENT.scale_alpha(0.92), palette.background.weak.color.scale_alpha(0.50), palette.background.strong.color.scale_alpha(0.28))
+            };
+            button::Style {
+                text_color: style::by_status(status, idle_text, Color::WHITE, Color::WHITE),
+                border: style::outline(style::by_status(status, idle_border, ACCENT.scale_alpha(0.70), ACCENT), 0.0),
+                ..button::Style::default()
+            }
+            .with_background(style::by_status(status, idle_bg, ACCENT.scale_alpha(0.88), ACCENT.scale_alpha(0.95)))
+        });
+
+    let select = BulkAutoTagMsg::SelectDirectory {
+        dir_idx,
+        shift: modifiers.shift(),
+        control: modifiers.control() || modifiers.logo(),
+    };
+    let header_button = button(
+        row![
+            icon("folder-solid.svg", 14.0, move |theme| {
+                if dir_selected || accepted > 0 { ACCENT.scale_alpha(0.95) } else { style::muted(theme) }
+            }),
+            text(label).size(12).font(style::SEMIBOLD).width(Length::Fill),
+            dir_count_badge(accepted, count),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .width(Length::Fill),
+    )
+    .width(Length::Fill)
+    .height(Length::Fixed(ROW_HEIGHT))
+    .padding([0, 10])
+    .on_press(select.into())
+    .style(move |theme, status| list_row_button_style(theme, status, dir_selected, accepted > 0, false));
+
+    let header = container(list_row(vec![
+        selection_stripe(dir_selected, SELECTION_STRIPE_WIDTH, Length::Fixed(ROW_HEIGHT)),
+        toggle.into(),
+        header_button.into(),
+    ]))
+    .height(Length::Fixed(ROW_HEIGHT))
+    .width(Length::Fill)
+    .style(move |theme: &Theme| {
+        let palette = theme.extended_palette();
+        let (border, radius) = if expanded {
+            (ACCENT.scale_alpha(0.22), 8.0)
+        } else {
+            (palette.background.strong.color.scale_alpha(0.18), 6.0)
+        };
+        container::background(palette.background.weak.color.scale_alpha(0.32)).border(style::outline(border, radius))
+    });
+
+    if !expanded {
+        return header.into();
+    }
+    let files = group.files.iter().enumerate().map(|(file_idx, file)| {
+        file_row(state, modifiers, BulkFileKey { dir_idx, file_idx }, file, file_idx % 2 == 1)
+    });
+    column![
+        header,
+        container(Column::with_children(files)).width(Length::Fill).style(|theme: &Theme| {
+            container::background(theme.extended_palette().background.base.color.scale_alpha(0.35))
+                .border(style::outline(ACCENT.scale_alpha(0.12), 0.0))
+        }),
+    ]
+    .width(Length::Fill)
     .into()
 }
 
-fn table_header_label<'a>(label: &'a str) -> iced::widget::Text<'a> {
-    text(label).size(10).style(|theme: &Theme| iced::widget::text::Style {
-        color: Some(ui_muted_text(theme)),
-    })
-}
+fn review_body(state: &BulkAutoTagState, modifiers: Modifiers) -> Element<'static, Message> {
+    let root = state.root.clone().unwrap_or_default();
+    let dir_count = state.groups.len();
+    let file_count: usize = state.groups.iter().map(|group| group.files.len()).sum();
 
-fn table_header() -> Element<'static, Message> {
-    container(
+    let stats = row![
+        stat_chip("Ready", state.actionable_count(), true),
+        stat_chip("Checked", state.accepted_count(), true),
+        stat_chip("Selected", state.selection.len(), false),
+        stat_chip("Skipped", state.skipped_complete, false),
+        stat_chip("Classify failed", state.failed, state.failed > 0),
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center);
+
+    let mut toolbar = row![
+        small_button("Select all", BulkAutoTagMsg::SelectAll),
+        small_button("Clear selection", BulkAutoTagMsg::ClearSelection),
+        small_button("Check selected", BulkAutoTagMsg::CheckSelected),
+        small_button("Uncheck selected", BulkAutoTagMsg::UncheckSelected),
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center);
+    if dir_count > 1 {
+        toolbar = toolbar
+            .push(small_button("Expand all", BulkAutoTagMsg::ExpandAllDirectories))
+            .push(small_button("Collapse all", BulkAutoTagMsg::CollapseAllDirectories));
+    }
+    let toolbar = toolbar
+        .push(spacer(Length::Fill, Length::Shrink))
+        .push(small_button("Check all", BulkAutoTagMsg::AcceptAll))
+        .push(small_button("Uncheck all", BulkAutoTagMsg::RejectAll))
+        .width(Length::Fill);
+
+    let header_cell = |label| muted(label, 10);
+    let table_header = container(
         row![
-            Space::new().width(Length::Fixed(FILE_INDENT)),
-            Space::new().width(Length::Fixed(SELECTION_STRIPE_WIDTH)),
-            Space::new().width(Length::Fixed(CHECKBOX_COLUMN_WIDTH)),
-            table_header_label("File").width(Length::FillPortion(2)),
-            table_header_label("Suggested tag").width(Length::FillPortion(1)),
-            table_header_label("Confidence").width(Length::Fixed(72.0)),
+            // Lines "File" up with the names, past each row's icon.
+            spacer(Length::Fixed(FILE_INDENT + SELECTION_STRIPE_WIDTH + CHECKBOX_COLUMN_WIDTH + 16.0), Length::Shrink),
+            header_cell("File").width(Length::FillPortion(2)),
+            header_cell("Suggested tag").width(Length::FillPortion(1)),
+            header_cell("Confidence").width(Length::Fixed(72.0)),
         ]
         .spacing(8)
         .align_y(Alignment::Center)
@@ -671,715 +640,250 @@ fn table_header() -> Element<'static, Message> {
     .align_y(Alignment::Center)
     .padding([0, 10])
     .width(Length::Fill)
-    .style(|theme: &Theme| {
-        let palette = theme.extended_palette();
-        container::Style {
-            background: Some(palette.background.weak.color.scale_alpha(0.28).into()),
-            border: Border {
-                radius: 0.0.into(),
-                width: 1.0,
-                color: palette.background.strong.color.scale_alpha(0.16),
-            },
-            ..Default::default()
-        }
-    })
-    .into()
-}
+    .style(style::panel(0.28, 0.16, 0.0));
 
-fn dir_label(root: &PathBuf, dir: &PathBuf) -> String {
-    dir.strip_prefix(root)
-        .map(|relative| {
-            let text = relative.to_string_lossy();
-            if text.is_empty() {
-                ".".to_string()
-            } else {
-                text.into_owned()
-            }
-        })
-        .unwrap_or_else(|_| truncate_path(dir, 48))
-}
-
-fn file_row(
-    state: &BulkAutoTagState,
-    modifiers: Modifiers,
-    dir_idx: usize,
-    file_idx: usize,
-    file: &crate::bulk_auto_tag::BulkFileProposal,
-    zebra: bool,
-) -> Element<'static, Message> {
-    let name = crate::path_util::file_label(&file.path);
-    let selected = state.is_selected(dir_idx, file_idx);
-    let shift = modifiers.shift();
-    let control = modifiers.control() || modifiers.logo();
-
-    if let Some(error) = file.error.clone() {
-        return list_row(
-            Row::new()
-                .align_y(Alignment::Center)
-                .height(Length::Fixed(ROW_HEIGHT))
-                .push(Space::new().width(Length::Fixed(FILE_INDENT)))
-                .push(
-                    container(
-                        row![
-                            text("✕").size(11).style(modal_error_style),
-                            text(name).size(11).width(Length::Fill),
-                            text(error).size(10).style(|theme: &Theme| iced::widget::text::Style {
-                                color: Some(ui_muted_text(theme)),
-                            }),
-                        ]
-                        .spacing(8)
-                        .align_y(Alignment::Center)
-                        .width(Length::Fill),
-                    )
-                    .width(Length::Fill)
-                    .height(Length::Fixed(ROW_HEIGHT))
-                    .align_y(Alignment::Center)
-                    .padding([0, 10])
-                    .style(move |theme: &Theme| {
-                        let palette = theme.extended_palette();
-                        container::Style {
-                            background: Some(
-                                if zebra {
-                                    UI_DANGER.scale_alpha(0.06)
-                                } else {
-                                    UI_DANGER.scale_alpha(0.08)
-                                }
-                                .into(),
-                            ),
-                            border: Border {
-                                radius: 0.0.into(),
-                                width: 1.0,
-                                color: palette.background.strong.color.scale_alpha(0.10),
-                            },
-                            ..Default::default()
-                        }
-                    }),
-                )
-                .width(Length::Fill)
-                .into(),
-        )
-        .into();
-    }
-
-    let suggested = file.suggested.clone().unwrap_or_default();
-    let confidence = file.confidence;
-    let accepted = file.accepted;
-
-    let select_message = Message::BulkAutoTagSelectFile {
-        dir_idx,
-        file_idx,
-        shift,
-        control,
-    };
-
-    let label_row = row![
-        resource_svg("music-solid.svg")
-            .width(Length::Fixed(13.0))
-            .height(Length::Fixed(13.0))
-            .style(move |theme, _status| iced::widget::svg::Style {
-                color: Some(if selected || accepted {
-                    TUNDRA_ACCENT.scale_alpha(0.9)
-                } else {
-                    ui_muted_text(theme)
-                }),
-            }),
-        text(name)
-            .size(12)
-            .width(Length::FillPortion(2))
-            .style(move |theme: &Theme| iced::widget::text::Style {
-                color: Some(if selected {
-                    theme.extended_palette().background.base.text
-                } else {
-                    ui_muted_text(theme)
-                }),
-            }),
-        instrument_chip(suggested),
-        confidence_badge(confidence),
-    ]
-    .spacing(8)
-    .align_y(Alignment::Center)
-    .width(Length::Fill);
-
-    list_row(
-        Row::new()
-            .align_y(Alignment::Center)
-            .height(Length::Fixed(ROW_HEIGHT))
-            .push(Space::new().width(Length::Fixed(FILE_INDENT)))
-            .push(selection_stripe(selected, SELECTION_STRIPE_WIDTH, Length::Fixed(ROW_HEIGHT)))
-            .push(checkbox_cell(
-                checkbox(accepted)
-                    .on_toggle(move |checked| Message::BulkAutoTagSetFileAccepted {
-                        dir_idx,
-                        file_idx,
-                        accepted: checked,
-                    })
-                    .into(),
-            ))
-            .push(
-                Button::new(label_row)
-                    .width(Length::Fill)
-                    .height(Length::Fixed(ROW_HEIGHT))
-                    .padding([0, 10])
-                    .on_press(select_message)
-                    .style(move |theme, status| {
-                        list_row_button_style(theme, status, selected, accepted, zebra)
-                    }),
-            )
-            .width(Length::Fill)
-            .into(),
-    )
-    .into()
-}
-
-fn directory_group(
-    state: &BulkAutoTagState,
-    modifiers: Modifiers,
-    root: &PathBuf,
-    dir_idx: usize,
-    group: &BulkDirGroup,
-) -> Element<'static, Message> {
-    let label = dir_label(root, &group.path);
-    let count = group.actionable_count();
-    let accepted = group.accepted_count();
-    let expanded = group.expanded;
-    let dir_selected = group
-        .files
-        .iter()
-        .enumerate()
-        .filter(|(_, file)| file.suggested.is_some() && file.error.is_none())
-        .all(|(file_idx, _)| state.is_selected(dir_idx, file_idx))
-        && count > 0;
-    let shift = modifiers.shift();
-    let control = modifiers.control() || modifiers.logo();
-
-    let header = container(
-        list_row(
-            Row::new()
-                .align_y(Alignment::Center)
-                .height(Length::Fixed(ROW_HEIGHT))
-                .push(selection_stripe(dir_selected, SELECTION_STRIPE_WIDTH, Length::Fixed(ROW_HEIGHT)))
-                .push(expand_toggle_button(expanded, dir_idx))
-                .push(
-                    Button::new(
-                        row![
-                            resource_svg("folder-solid.svg")
-                                .width(Length::Fixed(14.0))
-                                .height(Length::Fixed(14.0))
-                                .style(move |theme, _status| iced::widget::svg::Style {
-                                    color: Some(if dir_selected || accepted > 0 {
-                                        TUNDRA_ACCENT.scale_alpha(0.95)
-                                    } else {
-                                        ui_muted_text(theme)
-                                    }),
-                                }),
-                            text(label)
-                                .size(12)
-                                .font(iced::Font {
-                                    weight: iced::font::Weight::Semibold,
-                                    ..iced::Font::default()
-                                })
-                                .width(Length::Fill),
-                            dir_count_badge(accepted, count),
-                        ]
-                        .spacing(8)
-                        .align_y(Alignment::Center)
-                        .width(Length::Fill),
-                    )
-                    .width(Length::Fill)
-                    .height(Length::Fixed(ROW_HEIGHT))
-                    .padding([0, 10])
-                    .on_press(Message::BulkAutoTagSelectDirectory {
-                        dir_idx,
-                        shift,
-                        control,
-                    })
-                    .style(move |theme, status| {
-                        list_row_button_style(theme, status, dir_selected, accepted > 0, false)
-                    }),
-                )
-                .width(Length::Fill)
-                .into(),
-        ),
-    )
-    .height(Length::Fixed(ROW_HEIGHT))
-    .width(Length::Fill)
-    .style(move |theme: &Theme| {
-        let palette = theme.extended_palette();
-        container::Style {
-            background: Some(palette.background.weak.color.scale_alpha(0.32).into()),
-            border: Border {
-                radius: if expanded {
-                    8.0.into()
-                } else {
-                    6.0.into()
-                },
-                width: 1.0,
-                color: if expanded {
-                    TUNDRA_ACCENT.scale_alpha(0.22)
-                } else {
-                    palette.background.strong.color.scale_alpha(0.18)
-                },
-            },
-            ..Default::default()
-        }
-    });
-
-    let mut column = Column::new().spacing(0).width(Length::Fill).push(header);
-
-    if expanded {
-        let file_rows: Vec<Element<Message>> = group
-            .files
-            .iter()
-            .enumerate()
-            .map(|(file_idx, file)| {
-                file_row(
-                    state,
-                    modifiers,
-                    dir_idx,
-                    file_idx,
-                    file,
-                    file_idx % 2 == 1,
-                )
-            })
-            .collect();
-
-        column = column.push(
-            container(Column::with_children(file_rows).spacing(0))
-                .width(Length::Fill)
-                .style(|theme: &Theme| {
-                    let palette = theme.extended_palette();
-                    container::Style {
-                        background: Some(palette.background.base.color.scale_alpha(0.35).into()),
-                        border: Border {
-                            radius: 0.0.into(),
-                            width: 1.0,
-                            color: TUNDRA_ACCENT.scale_alpha(0.12),
-                        },
-                        ..Default::default()
-                    }
-                }),
-        );
-    }
-
-    container(column)
-        .width(Length::Fill)
-        .into()
-}
-
-fn review_body(state: &BulkAutoTagState, modifiers: Modifiers) -> Element<'static, Message> {
-    let root = state.root.clone().unwrap_or_default();
-    let root_label = truncate_path(&root, 64);
-    let dir_count = state.groups.len();
-    let file_count: usize = state.groups.iter().map(|group| group.files.len()).sum();
-    let all_collapsed = dir_count > 0 && state.groups.iter().all(|group| !group.expanded);
-    let many_groups = dir_count > 1;
-
-    let groups: Vec<Element<Message>> = state
+    let groups = state
         .groups
         .iter()
         .enumerate()
-        .map(|(dir_idx, group)| directory_group(state, modifiers, &root, dir_idx, group))
-        .collect();
+        .map(|(dir_idx, group)| directory_group(state, modifiers, &root, dir_idx, group));
+    let list = container(column![
+        table_header,
+        scrollable(Column::with_children(groups).spacing(4)).height(Length::Fill),
+    ])
+    .height(Length::Fill)
+    .width(Length::Fill)
+    .style(style::panel(0.18, 0.22, 8.0));
 
-    let mut body = Column::new().spacing(10).push(
-        row![
-            stat_chip("Ready".to_string(), state.actionable_count(), true),
-            stat_chip("Checked".to_string(), state.accepted_count(), true),
-            stat_chip("Selected".to_string(), state.selected_count(), false),
-            stat_chip("Skipped".to_string(), state.skipped_complete, false),
-            stat_chip("Classify failed".to_string(), state.failed, state.failed > 0),
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center),
-    );
-
-    body = body.push(
-        row![
-            folder_icon(),
-            text(format!("{root_label}  ·  {dir_count} folders · {file_count} files"))
-                .size(11)
-                .style(|theme: &Theme| iced::widget::text::Style {
-                    color: Some(ui_muted_text(theme)),
-                })
-                .width(Length::Fill),
-            small_button(
-                "Open folder".to_string(),
-                Message::FileRevealInFileManager(root.clone()),
-                false,
-            ),
-        ]
-        .spacing(6)
-        .align_y(Alignment::Center)
-        .width(Length::Fill),
-    );
-
-    if all_collapsed {
+    let mut body = column![
+        stats,
+        folder_line(&root, format!("{}  ·  {dir_count} folders · {file_count} files", truncate_path(&root, 64))),
+    ]
+    .spacing(10);
+    if dir_count > 0 && state.groups.iter().all(|group| !group.expanded) {
         body = body.push(
             text("Folders start collapsed for large scans — expand one or use Expand all.")
                 .size(10)
-                .style(|_theme: &Theme| iced::widget::text::Style {
-                    color: Some(TUNDRA_ACCENT.scale_alpha(0.80)),
-                }),
+                .color(ACCENT.scale_alpha(0.80)),
         );
     }
-
-    let mut toolbar = row![
-        small_button("Select all".to_string(), Message::BulkAutoTagSelectAll, false),
-        small_button("Clear selection".to_string(), Message::BulkAutoTagClearSelection, false),
-        small_button("Check selected".to_string(), Message::BulkAutoTagCheckSelected, false),
-        small_button("Uncheck selected".to_string(), Message::BulkAutoTagUncheckSelected, false),
-    ]
-    .spacing(6)
-    .align_y(Alignment::Center);
-
-    if many_groups {
-        toolbar = toolbar.push(small_button(
-            "Expand all".to_string(),
-            Message::BulkAutoTagExpandAllDirectories,
-            false,
-        ));
-        toolbar = toolbar.push(small_button(
-            "Collapse all".to_string(),
-            Message::BulkAutoTagCollapseAllDirectories,
-            false,
-        ));
-    }
-
-    toolbar = toolbar
-        .push(Space::new().width(Length::Fill))
-        .push(small_button(
-            "Check all".to_string(),
-            Message::BulkAutoTagAcceptAll,
-            false,
-        ))
-        .push(small_button(
-            "Uncheck all".to_string(),
-            Message::BulkAutoTagRejectAll,
-            false,
-        ))
-        .width(Length::Fill);
-
-    body = body.push(toolbar).push(
-        container(
-            Column::new()
-                .spacing(0)
-                .height(Length::Fill)
-                .push(table_header())
-                .push(
-                    scrollable(Column::with_children(groups).spacing(4))
-                        .id(Id::new(BULK_LIST_SCROLL_ID))
-                        .height(Length::Fill),
-                ),
-        )
-        .height(Length::Fill)
-        .width(Length::Fill)
-        .style(|theme: &Theme| {
-            let palette = theme.extended_palette();
-            container::Style {
-                background: Some(palette.background.weak.color.scale_alpha(0.18).into()),
-                border: Border {
-                    radius: 8.0.into(),
-                    width: 1.0,
-                    color: palette.background.strong.color.scale_alpha(0.22),
-                },
-                ..Default::default()
-            }
-        }),
-    );
-
-    body.height(Length::Fill).into()
+    body.push(toolbar).push(list).height(Length::Fill).into()
 }
 
-pub fn bulk_auto_tag_view<'a>(
-    state: &'a BulkAutoTagState,
-    modifiers: Modifiers,
-) -> Element<'a, Message> {
-    let phase = state.phase.clone().unwrap_or(BulkAutoTagPhase::PickDirectory);
-    let busy = matches!(
-        phase,
-        BulkAutoTagPhase::Running | BulkAutoTagPhase::Applying
-    );
-    let is_review = matches!(phase, BulkAutoTagPhase::Review);
-
-    let header = Column::new()
-        .spacing(12)
-        .push(
-            row![
-                text("Bulk Auto Tag").size(20),
-                Space::new().width(Length::Fill),
-                if is_review {
-                    text("Shift/Ctrl+click to multi-select")
-                        .size(10)
-                        .style(|theme: &Theme| iced::widget::text::Style {
-                            color: Some(ui_muted_text(theme)),
-                        })
-                } else {
-                    text("").size(10)
-                },
-            ]
-            .align_y(Alignment::Center)
-            .width(Length::Fill),
-        )
-        .push(
-            text("Pick a folder, analyze audio, then review and apply missing instrument, artist, and comment tags.")
-                .size(13)
-                .style(|theme: &Theme| iced::widget::text::Style {
-                    color: Some(ui_muted_text(theme)),
-                })
-                .width(Length::Fill),
+fn done_body(state: &BulkAutoTagState) -> Element<'static, Message> {
+    let mut done = Column::new().spacing(8);
+    if let Some(summary) = &state.apply_summary {
+        let plural = |count: usize, word: &str| format!("{count} {word}{}", if count == 1 { "" } else { "s" });
+        let (message, tone, banner) = if summary.cancelled {
+            let message = match summary.written {
+                0 => "Apply cancelled. No files were tagged.".to_string(),
+                written => format!("Apply cancelled after {}.", plural(written, "file")),
+            };
+            (message, style::WARN, CONF_MED)
+        } else {
+            let mut message = format!("Wrote tags to {}", plural(summary.written, "file"));
+            if summary.unchanged > 0 {
+                message.push_str(&format!(". {} unchanged", summary.unchanged));
+            }
+            message.push_str(&match summary.failed.len() {
+                0 => ". Done.".to_string(),
+                failed => format!(". {failed} failed. See errors below."),
+            });
+            (message, style::OK, CONF_HIGH)
+        };
+        done = done.push(
+            container(text(message).size(13).font(style::MEDIUM).color(tone))
+                .padding([10, 12])
+                .width(Length::Fill)
+                .style(style::tinted(banner, 0.12, 0.35, 6.0)),
         );
-    let header = if is_review {
-        header.push(
+        if !summary.failed.is_empty() {
+            let lines = summary.failed.iter().map(|(path, err)| {
+                let line = if path.as_os_str().is_empty() {
+                    err.clone()
+                } else {
+                    format!("{} — {err}", truncate_path(path, 42))
+                };
+                text(line).size(11).into()
+            });
+            done = done.push(scrollable(Column::with_children(lines).spacing(4)).height(Length::Fixed(120.0)));
+        }
+    }
+    if let Some(root) = &state.root {
+        done = done.push(folder_line(root, truncate_path(root, 64)));
+    }
+    done.into()
+}
+
+pub fn bulk_auto_tag_view(state: &BulkAutoTagState, modifiers: Modifiers) -> Element<'_, Message> {
+    let phase = state.phase.unwrap_or_default();
+    let busy = matches!(phase, BulkAutoTagPhase::Running | BulkAutoTagPhase::Applying);
+    let is_review = phase == BulkAutoTagPhase::Review;
+
+    let mut header = column![
+        row![
+            text("Bulk Auto Tag").size(20),
+            spacer(Length::Fill, Length::Shrink),
+            muted(if is_review { "Shift/Ctrl+click to multi-select" } else { "" }, 10),
+        ]
+        .align_y(Alignment::Center)
+        .width(Length::Fill),
+        muted("Pick a folder, analyze audio, then review and apply missing instrument, artist, and comment tags.", 13)
+            .width(Length::Fill),
+    ]
+    .spacing(12);
+    if is_review {
+        header = header.push(
             text("Apply writes tags permanently. There is no undo. Untagged files may get a new tag container (for example ID3 on WAV).")
                 .size(11)
-                .style(modal_warn_style)
+                .color(style::WARN)
                 .width(Length::Fill),
-        )
-    } else {
-        header
-    };
+        );
+    }
 
-    let content: Element<Message> = match phase {
+    let content: Element<'_, Message> = match phase {
         BulkAutoTagPhase::PickDirectory => {
             let root_label = state
                 .root
-                .as_ref()
-                .map(|path| truncate_path(path, 56))
-                .unwrap_or_else(|| "No folder selected".to_string());
-            let mut pick = Column::new()
-                .spacing(10)
-                .push(
-                    container(
-                        row![
-                            resource_svg("folder-solid.svg")
-                                .width(Length::Fixed(14.0))
-                                .height(Length::Fixed(14.0))
-                                .style(|_theme, _status| iced::widget::svg::Style {
-                                    color: Some(TUNDRA_ACCENT.scale_alpha(0.9)),
-                                }),
-                            text(root_label).size(12).width(Length::Fill),
-                        ]
-                        .spacing(10)
-                        .align_y(Alignment::Center),
-                    )
-                    .padding([8, 10])
-                    .width(Length::Fill)
-                    .style(|theme: &Theme| {
-                        let palette = theme.extended_palette();
-                        container::Style {
-                            background: Some(palette.background.weak.color.scale_alpha(0.35).into()),
-                            border: Border {
-                                radius: 6.0.into(),
-                                width: 1.0,
-                                color: palette.background.strong.color.scale_alpha(0.22),
-                            },
-                            ..Default::default()
-                        }
-                    }),
-                );
+                .as_deref()
+                .map_or_else(|| "No folder selected".to_string(), |path| truncate_path(path, 56));
+            let mut pick = column![
+                container(
+                    row![
+                        icon("folder-solid.svg", 14.0, |_| ACCENT.scale_alpha(0.9)),
+                        text(root_label).size(12).width(Length::Fill),
+                    ]
+                    .spacing(10)
+                    .align_y(Alignment::Center),
+                )
+                .padding([8, 10])
+                .width(Length::Fill)
+                .style(style::panel(0.35, 0.22, 6.0)),
+            ]
+            .spacing(10);
             if !state.status.is_empty() {
                 pick = pick.push(text(&state.status).size(12));
             }
             if let Some(error) = &state.error {
-                pick = pick.push(
-                    text(error)
-                        .size(12)
-                        .style(modal_error_style),
-                );
+                pick = pick.push(text(error).size(12).color(style::ERROR));
             }
             pick.into()
         }
         BulkAutoTagPhase::Running | BulkAutoTagPhase::Applying => container(
-            Column::new()
-                .spacing(8)
-                .push(
-                    text(&state.progress_label)
-                        .size(12)
-                        .width(Length::Fill),
-                )
-                .push(progress_bar(0.0..=1.0, state.progress_fraction))
-                .push(
-                    text(&state.progress_detail)
-                        .size(11)
-                        .style(|theme: &Theme| iced::widget::text::Style {
-                            color: Some(ui_muted_text(theme)),
-                        }),
-                ),
+            column![
+                text(&state.progress_label).size(12).width(Length::Fill),
+                progress_bar(0.0..=1.0, state.progress_fraction),
+                muted(state.progress_detail.clone(), 11),
+            ]
+            .spacing(8),
         )
         .padding([10, 12])
         .width(Length::Fill)
-        .style(|_theme: &Theme| container::Style {
-            background: Some(TUNDRA_ACCENT.scale_alpha(0.10).into()),
-            border: Border {
-                radius: 6.0.into(),
-                width: 1.0,
-                color: TUNDRA_ACCENT.scale_alpha(0.22),
-            },
-            ..Default::default()
-        })
+        .style(style::tinted(ACCENT, 0.10, 0.22, 6.0))
         .into(),
-        BulkAutoTagPhase::Review => container(review_body(state, modifiers))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into(),
-        BulkAutoTagPhase::Done => {
-            let mut done = Column::new().spacing(8);
-            if let Some(summary) = &state.apply_summary {
-                let (message, tone) = if summary.cancelled {
-                    (
-                        if summary.written == 0 {
-                            "Apply cancelled. No files were tagged.".to_string()
-                        } else {
-                            format!(
-                                "Apply cancelled after {} file{}.",
-                                summary.written,
-                                if summary.written == 1 { "" } else { "s" }
-                            )
-                        },
-                        MODAL_WARN,
-                    )
-                } else {
-                    let file_word = if summary.written == 1 { "file" } else { "files" };
-                    let mut message = format!("Wrote tags to {} {file_word}", summary.written);
-                    if summary.unchanged > 0 {
-                        message.push_str(&format!(". {} unchanged", summary.unchanged));
-                    }
-                    if summary.failed.is_empty() {
-                        message.push_str(". Done.");
-                    } else {
-                        message.push_str(&format!(
-                            ". {} failed. See errors below.",
-                            summary.failed.len()
-                        ));
-                    }
-                    (message, MODAL_OK)
-                };
-                let banner = if summary.cancelled {
-                    CONF_MED
-                } else {
-                    CONF_HIGH
-                };
-                done = done.push(
-                    container(
-                        text(message)
-                        .size(13)
-                        .font(iced::Font {
-                            weight: iced::font::Weight::Medium,
-                            ..iced::Font::default()
-                        })
-                        .style(move |_theme: &Theme| iced::widget::text::Style {
-                            color: Some(tone),
-                        }),
-                    )
-                    .padding([10, 12])
-                    .width(Length::Fill)
-                    .style(move |_theme: &Theme| container::Style {
-                        background: Some(banner.scale_alpha(0.12).into()),
-                        border: Border {
-                            radius: 6.0.into(),
-                            width: 1.0,
-                            color: banner.scale_alpha(0.35),
-                        },
-                        ..Default::default()
-                    }),
-                );
-                if !summary.failed.is_empty() {
-                    let lines: Vec<Element<Message>> = summary
-                        .failed
-                        .iter()
-                        .map(|(path, err)| {
-                            let line = if path.as_os_str().is_empty() {
-                                err.clone()
-                            } else {
-                                format!("{} — {err}", truncate_path(path, 42))
-                            };
-                            text(line).size(11).into()
-                        })
-                        .collect();
-                    done = done.push(
-                        scrollable(Column::with_children(lines).spacing(4))
-                            .height(Length::Fixed(120.0)),
-                    );
-                }
-            }
-            if let Some(root) = state.root.clone() {
-                let root_label = truncate_path(&root, 64);
-                done = done.push(
-                    row![
-                        folder_icon(),
-                        text(root_label)
-                            .size(11)
-                            .style(|theme: &Theme| iced::widget::text::Style {
-                                color: Some(ui_muted_text(theme)),
-                            })
-                            .width(Length::Fill),
-                        small_button(
-                            "Open folder".to_string(),
-                            Message::FileRevealInFileManager(root),
-                            false,
-                        ),
-                    ]
-                    .spacing(6)
-                    .align_y(Alignment::Center)
-                    .width(Length::Fill),
-                );
-            }
-            done.into()
-        }
+        BulkAutoTagPhase::Review => container(review_body(state, modifiers)).width(Length::Fill).height(Length::Fill).into(),
+        BulkAutoTagPhase::Done => done_body(state),
     };
 
-    let can_scan = matches!(phase, BulkAutoTagPhase::PickDirectory) && !busy;
-    let can_apply = matches!(phase, BulkAutoTagPhase::Review) && state.accepted_count() > 0;
-
+    let can_scan = phase == BulkAutoTagPhase::PickDirectory;
     let footer = row![
-        button(text("Choose folder…").size(12))
-            .padding([6, 12])
-            .on_press_maybe(if can_scan {
-                Some(Message::BulkAutoTagPickDirectory)
-            } else {
-                None
-            })
-            .style(|theme, status| modal_button_style(theme, status, false)),
-        button(text("Scan folder").size(12))
-            .padding([6, 12])
-            .on_press_maybe(if can_scan && state.root.is_some() {
-                Some(Message::BulkAutoTagRunScan)
-            } else {
-                None
-            })
-            .style(|theme, status| modal_button_style(theme, status, false)),
-        button(text("Apply checked").size(12))
-            .padding([6, 12])
-            .on_press_maybe(if can_apply {
-                Some(Message::BulkAutoTagApply)
-            } else {
-                None
-            })
-            .style(|theme, status| modal_button_style(theme, status, true)),
-        Space::new().width(Length::Fill),
-        button(text(if busy { "Cancel" } else { "Close" }).size(12))
-            .padding([6, 14])
-            .on_press(Message::CloseBulkAutoTag)
-            .style(|theme, status| modal_button_style(theme, status, false)),
+        modal_button("Choose folder…", can_scan.then(|| BulkAutoTagMsg::PickDirectory.into()), false),
+        modal_button("Scan folder", (can_scan && state.root.is_some()).then(|| BulkAutoTagMsg::RunScan.into()), false),
+        modal_button("Apply checked", (is_review && state.accepted_count() > 0).then(|| BulkAutoTagMsg::Apply.into()), true),
+        spacer(Length::Fill, Length::Shrink),
+        modal_button(if busy { "Cancel" } else { "Close" }, Some(BulkAutoTagMsg::Close.into()), false).padding([6, 14]),
     ]
     .spacing(8)
     .align_y(Alignment::Center)
     .width(Length::Fill);
 
-    let mut layout = Column::new()
-        .spacing(12)
-        .push(header)
-        .push(content)
-        .push(footer);
-    if is_review {
-        layout = layout.height(Length::Fill);
+    let layout = column![header, content, footer].spacing(12).padding(20);
+    let (layout, height) = if is_review {
+        (layout.height(Length::Fill), Length::Fixed(REVIEW_MODAL_HEIGHT))
+    } else {
+        (layout, Length::Shrink)
+    };
+    modal_shell(layout, 820.0).height(height).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn proposal(name: &str, actionable: bool) -> BulkFileProposal {
+        BulkFileProposal {
+            path: PathBuf::from(name),
+            suggested: actionable.then(|| "Kick".into()),
+            confidence: None,
+            accepted: false,
+            error: (!actionable).then(|| "failed".into()),
+        }
     }
 
-    modal_shell(layout.padding(20), 820.0)
-        .height(if is_review {
-            Length::Fixed(REVIEW_MODAL_HEIGHT)
-        } else {
-            Length::Shrink
-        })
-        .into()
+    fn state() -> BulkAutoTagState {
+        let group = |path: &str, files| BulkDirGroup {
+            path: PathBuf::from(path),
+            files,
+            expanded: true,
+        };
+        BulkAutoTagState {
+            groups: vec![
+                group("a", vec![proposal("a1", true), proposal("a2", false), proposal("a3", true)]),
+                group("b", vec![proposal("b1", true), proposal("b2", true)]),
+            ],
+            ..BulkAutoTagState::default()
+        }
+    }
+
+    fn key(dir_idx: usize, file_idx: usize) -> BulkFileKey {
+        BulkFileKey { dir_idx, file_idx }
+    }
+
+    #[test]
+    fn failed_files_cannot_be_selected_or_checked() {
+        let mut state = state();
+        state.select_file(key(0, 1), false, false);
+        assert!(state.selection.is_empty());
+        state.set_all_accepted(true);
+        assert_eq!(state.accepted_count(), 4);
+        assert!(!state.groups[0].files[1].accepted);
+    }
+
+    #[test]
+    fn shift_click_ranges_skip_failed_files() {
+        let mut state = state();
+        state.select_file(key(0, 0), false, false);
+        state.select_file(key(1, 0), true, false);
+        assert_eq!(state.selection.len(), 3);
+        assert!(!state.selection.contains(&key(0, 1)));
+    }
+
+    #[test]
+    fn folder_clicks_select_toggle_and_extend() {
+        let mut state = state();
+        state.select_directory(1, false, false);
+        assert_eq!(state.selection.len(), 2);
+        state.select_directory(1, false, true);
+        assert!(state.selection.is_empty(), "ctrl+click on a fully selected folder clears it");
+
+        state.select_file(key(0, 2), false, false);
+        state.select_directory(1, true, false);
+        assert_eq!(state.selection.len(), 3, "shift extends from the anchor through the folder's last file");
+    }
+
+    #[test]
+    fn stale_job_results_are_ignored() {
+        let mut state = state();
+        let first = state.start_job();
+        let second = state.start_job();
+        assert!(first.cancel.load(Ordering::Relaxed), "starting a job cancels the previous one");
+        assert!(!state.finish_job(first.generation));
+        assert!(state.finish_job(second.generation));
+
+        let before_close = state.start_job();
+        state.close();
+        state.open();
+        let after_reopen = state.start_job();
+        assert_ne!(before_close.generation, after_reopen.generation);
+    }
 }

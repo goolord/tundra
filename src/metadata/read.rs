@@ -3,8 +3,6 @@ use lofty::ogg::tag::VorbisComments;
 use lofty::tag::{Accessor, ItemKey, ItemValue, Tag};
 use std::path::Path;
 
-use crate::ui::is_audio;
-
 use super::fields::TagFields;
 use super::hints::artist_hint_from_path;
 
@@ -118,6 +116,17 @@ pub fn tundra_tagged_file(path: &Path, comment: &str, native_instrument: &str) -
         || (native_instrument.trim().is_empty() && crate::tag_store::tundra_instrument(path).is_some())
 }
 
+/// File extensions Tundra lists and plays; one per `Container`, plus `aif`.
+pub const AUDIO_EXTENSIONS: &[&str] = &["flac", "wav", "mp3", "ogg", "aiff", "aif"];
+
+/// Whether `path` has a supported audio extension. Does not touch the disk.
+pub fn is_audio(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .and_then(Container::from_extension)
+        .is_some()
+}
+
 /// Containers Tundra tags natively. Each maps the instrument label to the one
 /// key third-party taggers read back, so a write is always round-trippable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,7 +158,7 @@ impl Container {
         })
     }
 
-    fn from_extension(ext: &str) -> Option<Self> {
+    pub(crate) fn from_extension(ext: &str) -> Option<Self> {
         match ext.to_ascii_lowercase().as_str() {
             "wav" => Some(Self::Wav),
             "flac" => Some(Self::Flac),

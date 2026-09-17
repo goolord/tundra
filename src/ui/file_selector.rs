@@ -1,280 +1,63 @@
-pub use super::common::*;
-use crate::metadata::{tag_field_best_match, tag_field_suggestions, TagField, TagFilter};
-use super::settings::FavoritesStore;
-use iced::widget::button::{Status as ButtonStatus, Style as ButtonStyle};
-use iced::widget::canvas::{self, Action, Event, Frame, Program};
-use iced::widget::canvas::Path as CanvasPath;
-use iced::widget::scrollable::{self, Scrollbar, Status as ScrollableStatus};
-use iced::widget::text::Wrapping;
-use iced::widget::{button, container, mouse_area, row, scrollable as scrollable_widget, stack, text, Button, Column, Row, Space, TextInput};
-use iced::widget::Id;
-use iced::{Alignment, Background, Border, Color, Element, Length, Rectangle, Shadow, theme};
+//! The sidebar: the file list with its custom scrollbar, and the filter dock
+//! (file search and tag filters) under it.
+
+use super::message::{AutoTagMsg, FilterMsg, Message, TagEditorMsg};
+use super::selection::Selection;
+use super::style::{self, ACCENT, MUTED_ICON};
+use super::widgets::{bar, file_context_menu, icon, selection_stripe, spacer, FileMenuExtras};
+use crate::library::FavoritesStore;
+use crate::metadata::{is_audio, tag_field_best_match, tag_field_suggestions, TagField, TagFilter};
 use iced::keyboard::Modifiers;
 use iced::mouse::{self, Cursor};
-use iced_aw::ContextMenu;
-
-use std::collections::HashSet;
-use std::fs;
+use iced::widget::canvas::{self, Action, Event, Frame, Program};
+use iced::widget::scrollable::{self, Scrollbar};
+use iced::widget::text::Wrapping;
+use iced::widget::{
+    button, column, container, mouse_area, row, stack, text, Column, Id, Row, TextInput,
+};
+use iced::{Alignment, Color, Element, Length, Padding, Rectangle, Theme};
 use std::path::{Path, PathBuf};
 
-const TUNDRA_MUTED_ICON: Color = Color::from_rgb8(0x52, 0x56, 0x5c);
-const TAG_CHIP_RADIUS: f32 = 16.0;
-const FILTER_INPUT_RADIUS: f32 = 0.0;
 pub const FILE_LIST_SCROLL_ID: &str = "file-list-scroll";
-/// Fixed height of every file row; windowed rendering relies on this being exact.
-pub const FILE_ROW_HEIGHT: f32 = 31.0;
-/// Extra rows rendered above and below the viewport to absorb fast scrolling.
-const FILE_ROW_OVERDRAW: usize = 12;
-/// Fallback for windowed row rendering until the first scroll event reports height.
-const FILE_LIST_RENDER_VIEWPORT_FALLBACK: f32 = 2400.0;
-pub const FILE_LIST_SCROLLBAR_WIDTH: f32 = 10.0;
-pub const FILE_LIST_SCROLLBAR_MIN_THUMB: f32 = 36.0;
 pub const TAG_SEARCH_INPUT_ID: &str = "tag-search-input";
 pub const FILE_SEARCH_INPUT_ID: &str = "file-search-input";
+/// Fixed height of every file row; windowed rendering relies on this being exact.
+const FILE_ROW_HEIGHT: f32 = 31.0;
+/// Extra rows rendered above and below the viewport to absorb fast scrolling.
+const FILE_ROW_OVERDRAW: usize = 12;
+/// Rows to render until the first scroll event reports the real viewport height.
+const FALLBACK_VIEWPORT_HEIGHT: f32 = 2400.0;
+const SCROLLBAR_WIDTH: f32 = 10.0;
+const SCROLLBAR_MIN_THUMB: f32 = 36.0;
+const FILTER_CLEAR_TEXT_SIZE: f32 = 13.0;
+const FILTER_CLEAR_PAD: [f32; 2] = [4.0, 8.0];
+/// Right padding inside a filter input that the × button sits in.
+const FILTER_CLEAR_INSET: f32 = FILTER_CLEAR_TEXT_SIZE + 2.0 * FILTER_CLEAR_PAD[1];
 
-fn file_list_scrollable_style(_theme: &theme::Theme, _status: ScrollableStatus) -> scrollable::Style {
-    let transparent_scroller = scrollable::Scroller {
-        background: Background::Color(Color::TRANSPARENT),
-        border: Border {
-            width: 0.0,
-            color: Color::TRANSPARENT,
-            radius: 0.0.into(),
-        },
-    };
-    let transparent_rail = scrollable::Rail {
-        background: None,
-        border: Border {
-            width: 0.0,
-            color: Color::TRANSPARENT,
-            radius: 0.0.into(),
-        },
-        scroller: transparent_scroller,
-    };
-    scrollable::Style {
-        container: container::Style::default(),
-        vertical_rail: transparent_rail,
-        horizontal_rail: transparent_rail,
-        gap: None,
-        auto_scroll: scrollable::AutoScroll {
-            background: Background::Color(Color::TRANSPARENT),
-            border: Border::default(),
-            shadow: Shadow::default(),
-            icon: Color::TRANSPARENT,
-        },
-    }
+/// Which filter-bar text field owns keyboard focus. At most one is active; the other gets a
+/// click-catcher overlay so two TextInputs cannot stay focused together.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FilterFocus {
+    #[default]
+    None,
+    FileSearch,
+    TagSearch,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct FileListScrollMetrics {
-    pub max_scroll: f32,
-    pub thumb_height: f32,
-    pub thumb_top: f32,
-    pub scroll_range: f32,
-}
-
-pub fn file_list_render_viewport_height(list_viewport_height: f32) -> f32 {
-    if list_viewport_height > 0.0 {
-        list_viewport_height
-    } else {
-        FILE_LIST_RENDER_VIEWPORT_FALLBACK
-    }
-}
-
-pub fn file_list_scroll_metrics(
-    total_rows: usize,
-    scroll_offset: f32,
-    track_height: f32,
-) -> FileListScrollMetrics {
-    if track_height <= 0.0 {
-        return FileListScrollMetrics {
-            max_scroll: 0.0,
-            thumb_height: 0.0,
-            thumb_top: 0.0,
-            scroll_range: 0.0,
-        };
-    }
-
-    let content_height = total_rows as f32 * FILE_ROW_HEIGHT;
-    let max_scroll = (content_height - track_height).max(0.0);
-    if max_scroll <= 0.0 {
-        return FileListScrollMetrics {
-            max_scroll: 0.0,
-            thumb_height: track_height,
-            thumb_top: 0.0,
-            scroll_range: 0.0,
-        };
-    }
-
-    let ratio = track_height / content_height;
-    let min_thumb = FILE_LIST_SCROLLBAR_MIN_THUMB.min(track_height * 0.9);
-    let mut thumb_height = (track_height * ratio).clamp(min_thumb, track_height);
-    let mut scroll_range = track_height - thumb_height;
-    if scroll_range <= 0.0 {
-        thumb_height = track_height * 0.25;
-        scroll_range = track_height - thumb_height;
-    }
-    let thumb_top = (scroll_offset / max_scroll) * scroll_range;
-    FileListScrollMetrics {
-        max_scroll,
-        thumb_height,
-        thumb_top,
-        scroll_range,
-    }
-}
-
-pub fn file_list_scroll_metrics_for(selector: &FileSelector) -> FileListScrollMetrics {
-    let track_height = selector.list_viewport_height.max(0.0);
-    file_list_scroll_metrics(
-        selector.file_list.len(),
-        selector.list_scroll_offset,
-        track_height,
-    )
-}
-
-pub fn file_list_scrollbar_grab_offset(metrics: &FileListScrollMetrics, track_y: f32) -> f32 {
-    if track_y >= metrics.thumb_top && track_y <= metrics.thumb_top + metrics.thumb_height {
-        track_y - metrics.thumb_top
-    } else {
-        metrics.thumb_height / 2.0
-    }
-}
-
-pub fn file_list_scroll_offset_for_track_y(
-    metrics: &FileListScrollMetrics,
-    track_y: f32,
-    grab_offset: f32,
-) -> f32 {
-    if metrics.scroll_range <= 0.0 || metrics.max_scroll <= 0.0 {
-        return 0.0;
-    }
-    let thumb_top = (track_y - grab_offset).clamp(0.0, metrics.scroll_range);
-    (thumb_top / metrics.scroll_range) * metrics.max_scroll
-}
-
-#[derive(Debug, Clone)]
-struct FileListScrollbar {
-    total_rows: usize,
-    scroll_offset: f32,
-    list_viewport_height: f32,
-}
-
-impl FileListScrollbar {
-    fn metrics(&self) -> FileListScrollMetrics {
-        file_list_scroll_metrics(
-            self.total_rows,
-            self.scroll_offset,
-            self.list_viewport_height.max(0.0),
-        )
-    }
-}
-
-impl Program<Message> for FileListScrollbar {
-    type State = ();
-
-    fn update(
-        &self,
-        _state: &mut Self::State,
-        event: &Event,
-        bounds: Rectangle,
-        cursor: Cursor,
-    ) -> Option<Action<Message>> {
-        let metrics = self.metrics();
-        if metrics.max_scroll <= 0.0 {
-            return None;
-        }
-        match event {
-            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
-                cursor.position_in(bounds).map(|position| {
-                    Action::publish(Message::FileListScrollbarPress {
-                        track_y: position.y,
-                        track_top: bounds.y,
-                        track_height: bounds.height,
-                    })
-                    .and_capture()
-                })
-            }
-            _ => None,
-        }
-    }
-
-    fn draw(
-        &self,
-        _state: &Self::State,
-        renderer: &iced::Renderer,
-        theme: &theme::Theme,
-        bounds: Rectangle,
-        cursor: Cursor,
-    ) -> Vec<canvas::Geometry> {
-        let metrics = self.metrics();
-        let mut frame = Frame::new(renderer, bounds.size());
-        if metrics.max_scroll <= 0.0 {
-            return vec![frame.into_geometry()];
-        }
-
-        let thumb_bounds = Rectangle {
-            x: 1.0,
-            y: metrics.thumb_top,
-            width: bounds.width - 2.0,
-            height: metrics.thumb_height,
-        };
-        let hovered = cursor
-            .position_in(bounds)
-            .is_some_and(|point| {
-                point.y >= thumb_bounds.y
-                    && point.y <= thumb_bounds.y + thumb_bounds.height
-            });
-
-        let thumb_color = ui_muted_text(theme).scale_alpha(if hovered { 0.72 } else { 0.48 });
-        let thumb = CanvasPath::rectangle(thumb_bounds.position(), thumb_bounds.size());
-        frame.fill(&thumb, thumb_color);
-        vec![frame.into_geometry()]
-    }
-
-    fn mouse_interaction(
-        &self,
-        _state: &Self::State,
-        bounds: Rectangle,
-        cursor: Cursor,
-    ) -> mouse::Interaction {
-        let metrics = self.metrics();
-        if metrics.max_scroll <= 0.0 {
-            return mouse::Interaction::default();
-        }
-        let Some(point) = cursor.position_in(bounds) else {
-            return mouse::Interaction::default();
-        };
-        let on_thumb =
-            point.y >= metrics.thumb_top && point.y <= metrics.thumb_top + metrics.thumb_height;
-        if on_thumb {
-            mouse::Interaction::Grab
-        } else {
-            mouse::Interaction::Pointer
-        }
-    }
-}
-
-fn file_list_scrollbar(
-    total_rows: usize,
-    scroll_offset: f32,
-    list_viewport_height: f32,
-) -> Element<'static, Message> {
-    iced::widget::canvas(FileListScrollbar {
-        total_rows,
-        scroll_offset,
-        list_viewport_height,
-    })
-    .width(Length::Fixed(FILE_LIST_SCROLLBAR_WIDTH))
-    .height(Length::Fill)
-    .into()
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileButton {
+    pub file_path: PathBuf,
+    pub label: String,
+    pub is_dir: bool,
 }
 
 #[derive(Debug, Clone)]
 pub struct FileSelector {
     pub current_dir: PathBuf,
     pub file_list: Vec<FileButton>,
-    selected: HashSet<usize>,
-    selection_anchor: Option<usize>,
+    selection: Selection<usize>,
     pub hovered_file: Option<usize>,
+    pub filter_focus: FilterFocus,
     pub search_value: String,
     pub search_case_sensitive: bool,
     pub search_show_directories: bool,
@@ -287,23 +70,490 @@ pub struct FileSelector {
     pub list_viewport_height: f32,
 }
 
-pub struct FileList;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FileButton {
-    pub file_path: PathBuf,
-    pub label: String,
-    pub is_dir: bool,
+/// Where the scrollbar thumb sits for a given list length and scroll offset.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ScrollMetrics {
+    pub max_scroll: f32,
+    thumb_height: f32,
+    thumb_top: f32,
+    scroll_range: f32,
 }
 
-pub struct DirUp;
+impl ScrollMetrics {
+    fn new(total_rows: usize, scroll_offset: f32, track_height: f32) -> Self {
+        let track_height = track_height.max(0.0);
+        let content_height = total_rows as f32 * FILE_ROW_HEIGHT;
+        let max_scroll = (content_height - track_height).max(0.0);
+        if track_height <= 0.0 || max_scroll <= 0.0 {
+            return Self {
+                thumb_height: track_height,
+                ..Self::default()
+            };
+        }
+        let min_thumb = SCROLLBAR_MIN_THUMB.min(track_height * 0.9);
+        let mut thumb_height = (track_height * track_height / content_height).clamp(min_thumb, track_height);
+        if track_height - thumb_height <= 0.0 {
+            thumb_height = track_height * 0.25;
+        }
+        let scroll_range = track_height - thumb_height;
+        Self {
+            max_scroll,
+            thumb_height,
+            thumb_top: scroll_offset / max_scroll * scroll_range,
+            scroll_range,
+        }
+    }
 
-fn sidebar_panel(theme: &theme::Theme) -> Color {
+    fn on_thumb(&self, track_y: f32) -> bool {
+        (self.thumb_top..=self.thumb_top + self.thumb_height).contains(&track_y)
+    }
+
+    /// Where on the thumb a press at `track_y` grabbed it; its middle when the press missed.
+    pub fn grab_offset(&self, track_y: f32) -> f32 {
+        if self.on_thumb(track_y) {
+            track_y - self.thumb_top
+        } else {
+            self.thumb_height / 2.0
+        }
+    }
+
+    /// The scroll offset that puts the grabbed point of the thumb under `track_y`.
+    pub fn offset_for_track_y(&self, track_y: f32, grab_offset: f32) -> f32 {
+        if self.scroll_range <= 0.0 || self.max_scroll <= 0.0 {
+            return 0.0;
+        }
+        let thumb_top = (track_y - grab_offset).clamp(0.0, self.scroll_range);
+        thumb_top / self.scroll_range * self.max_scroll
+    }
+}
+
+/// The scrollable's own scrollbar is hidden; this canvas draws a thin one
+/// that stays visible and supports click-to-jump and dragging.
+struct FileListScrollbar(ScrollMetrics);
+
+impl Program<Message> for FileListScrollbar {
+    type State = ();
+
+    fn update(&self, _state: &mut (), event: &Event, bounds: Rectangle, cursor: Cursor) -> Option<Action<Message>> {
+        if self.0.max_scroll <= 0.0 {
+            return None;
+        }
+        let Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) = event else {
+            return None;
+        };
+        let position = cursor.position_in(bounds)?;
+        Some(
+            Action::publish(Message::FileListScrollbarPress {
+                track_y: position.y,
+                track_top: bounds.y,
+                track_height: bounds.height,
+            })
+            .and_capture(),
+        )
+    }
+
+    fn draw(
+        &self,
+        _state: &(),
+        renderer: &iced::Renderer,
+        theme: &Theme,
+        bounds: Rectangle,
+        cursor: Cursor,
+    ) -> Vec<canvas::Geometry> {
+        let mut frame = Frame::new(renderer, bounds.size());
+        let metrics = self.0;
+        if metrics.max_scroll > 0.0 {
+            let hovered = cursor.position_in(bounds).is_some_and(|point| metrics.on_thumb(point.y));
+            let alpha = if hovered { 0.72 } else { 0.48 };
+            frame.fill_rectangle(
+                iced::Point::new(1.0, metrics.thumb_top),
+                iced::Size::new(bounds.width - 2.0, metrics.thumb_height),
+                style::muted(theme).scale_alpha(alpha),
+            );
+        }
+        vec![frame.into_geometry()]
+    }
+
+    fn mouse_interaction(&self, _state: &(), bounds: Rectangle, cursor: Cursor) -> mouse::Interaction {
+        match cursor.position_in(bounds) {
+            Some(_) if self.0.max_scroll <= 0.0 => mouse::Interaction::default(),
+            Some(point) if self.0.on_thumb(point.y) => mouse::Interaction::Grab,
+            Some(_) => mouse::Interaction::Pointer,
+            None => mouse::Interaction::default(),
+        }
+    }
+}
+
+impl FileButton {
+    pub fn new(path: PathBuf, base_path: &Path, is_dir: bool) -> Self {
+        let label = path
+            .strip_prefix(base_path)
+            .ok()
+            .and_then(crate::path_util::file_name_lossy)
+            .unwrap_or_else(|| crate::path_util::file_label(&path));
+        FileButton {
+            file_path: path,
+            label,
+            is_dir,
+        }
+    }
+}
+
+/// Folders first, then files, each alphabetically; or an error row's text.
+pub fn list_buttons(dir: &Path) -> (Vec<FileButton>, Option<String>) {
+    match crate::library::list_directory(dir) {
+        Ok(entries) => {
+            let mut buttons: Vec<FileButton> = entries
+                .into_iter()
+                .map(|entry| FileButton::new(entry.path, dir, entry.is_dir))
+                .collect();
+            buttons.sort_by_cached_key(|button| (!button.is_dir, button.label.to_lowercase()));
+            (buttons, None)
+        }
+        Err(err) => (Vec::new(), Some(err)),
+    }
+}
+
+impl FileSelector {
+    pub fn new(dir: &Path) -> Self {
+        let (file_list, list_error) = list_buttons(dir);
+        FileSelector {
+            current_dir: dir.to_owned(),
+            file_list,
+            selection: Selection::default(),
+            hovered_file: None,
+            filter_focus: FilterFocus::None,
+            search_value: String::new(),
+            search_case_sensitive: false,
+            search_show_directories: true,
+            favorites_only: false,
+            tag_search_value: String::new(),
+            tag_filters: Vec::new(),
+            tag_search_error: None,
+            list_error,
+            list_scroll_offset: 0.0,
+            list_viewport_height: 0.0,
+        }
+    }
+
+    /// Moves to `dir`. An active search keeps its results; otherwise the list is reloaded.
+    pub fn reload_directory(&mut self, dir: &Path) {
+        self.current_dir = dir.to_owned();
+        if !self.search_active() {
+            (self.file_list, self.list_error) = list_buttons(dir);
+        }
+        self.selection.clear();
+        self.hovered_file = None;
+    }
+
+    pub fn search_active(&self) -> bool {
+        crate::metadata::file_search_active(&self.search_value, &self.tag_filters)
+    }
+
+    pub fn tag_only_search(&self) -> bool {
+        !self.tag_filters.is_empty() && self.search_value.trim().is_empty()
+    }
+
+    /// Tab completes the tag field name only while the input is a bare, matching field prefix.
+    pub fn tag_search_can_autocomplete(&self) -> bool {
+        let input = &self.tag_search_value;
+        !input.contains(':') && !input.trim().is_empty() && tag_field_best_match(input).is_some()
+    }
+
+    pub fn scroll_metrics(&self) -> ScrollMetrics {
+        ScrollMetrics::new(self.file_list.len(), self.list_scroll_offset, self.list_viewport_height)
+    }
+
+    pub fn select_row(&mut self, index: usize, shift: bool, control: bool) {
+        if index >= self.file_list.len() {
+            return;
+        }
+        let order: Vec<usize> = (0..self.file_list.len()).collect();
+        self.selection.click(index, shift, control, &order);
+    }
+
+    /// Swap in a new listing. Selection is carried over by path: row indices
+    /// from the old listing would otherwise point at different files, and
+    /// actions on "the selected file" (auto-tag, tag editor) would hit them.
+    pub fn set_file_list(&mut self, file_list: Vec<FileButton>, list_error: Option<String>) {
+        let key_at = |list: &[FileButton], index: usize| {
+            list.get(index)
+                .map(|entry| crate::path_util::cache_key(entry.file_path.clone()))
+        };
+        let selected: std::collections::HashSet<PathBuf> = self
+            .selection
+            .iter()
+            .filter_map(|&index| key_at(&self.file_list, index))
+            .collect();
+        let anchor = self.selection.anchor().and_then(|&index| key_at(&self.file_list, index));
+
+        self.file_list = file_list;
+        self.list_error = list_error;
+        self.hovered_file = None;
+        self.selection.clear();
+        if selected.is_empty() {
+            return;
+        }
+        let mut new_anchor = None;
+        let mut indices = Vec::new();
+        for (index, entry) in self.file_list.iter().enumerate() {
+            let key = crate::path_util::cache_key(entry.file_path.clone());
+            if selected.contains(&key) {
+                indices.push(index);
+                if anchor.as_ref() == Some(&key) {
+                    new_anchor = Some(index);
+                }
+            }
+        }
+        self.selection.set(indices, new_anchor);
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.selection.clear();
+    }
+
+    pub fn sync_selection_for_path(&mut self, path: &Path) {
+        let key = crate::path_util::cache_key(path.to_path_buf());
+        if let Some(index) = self
+            .file_list
+            .iter()
+            .position(|entry| crate::path_util::cache_key(entry.file_path.clone()) == key)
+        {
+            self.selection.select_only(index);
+        }
+    }
+
+    pub fn selected_audio_path(&self) -> Option<PathBuf> {
+        self.selection
+            .anchor()
+            .or_else(|| self.selection.iter().min())
+            .and_then(|&index| self.file_list.get(index))
+            .filter(|entry| !entry.is_dir && is_audio(&entry.file_path))
+            .map(|entry| entry.file_path.clone())
+    }
+
+    /// Adds `filter`, replacing any filter on the same field.
+    pub fn add_tag_filter(&mut self, filter: TagFilter) {
+        match self.tag_filters.iter_mut().find(|entry| entry.field == filter.field) {
+            Some(existing) => *existing = filter,
+            None => self.tag_filters.push(filter),
+        }
+    }
+
+    pub fn view(&self, search_enabled: bool, favorites: &FavoritesStore, modifiers: Modifiers) -> Column<'_, Message> {
+        let mut column = Column::new().height(Length::Fill).push(if self.favorites_only {
+            favorites_list_header()
+        } else {
+            parent_directory_button(&self.current_dir)
+        });
+
+        if self.selection.len() > 1 {
+            column = column.push(
+                container(
+                    text(format!("{} selected · Shift/Ctrl+click to extend", self.selection.len()))
+                        .size(10)
+                        .style(style::faded_text(0.58)),
+                )
+                .padding([4, 10])
+                .width(Length::Fill),
+            );
+        }
+
+        if let Some(error) = &self.list_error {
+            column = column.push(
+                container(text(error).size(12).color(Color::from_rgb(0.92, 0.55, 0.55)))
+                    .padding([8, 12])
+                    .width(Length::Fill),
+            );
+        }
+
+        let list = mouse_area(
+            row![
+                self.rows_view(search_enabled, favorites, modifiers),
+                canvas::Canvas::new(FileListScrollbar(self.scroll_metrics()))
+                    .width(Length::Fixed(SCROLLBAR_WIDTH))
+                    .height(Length::Fill),
+            ]
+            .height(Length::Fill),
+        )
+        .on_enter(Message::FileListHoverChanged(true))
+        .on_exit(Message::FileListHoverChanged(false));
+
+        column = column.push(list);
+        if search_enabled {
+            column = column.push(self.filter_dock());
+        }
+        column
+    }
+
+    /// Windowed rendering: only rows near the viewport become widgets;
+    /// spacers stand in for the rest so the scroll range stays correct.
+    fn rows_view(&self, search_enabled: bool, favorites: &FavoritesStore, modifiers: Modifiers) -> Element<'_, Message> {
+        let total = self.file_list.len();
+        let viewport_height = if self.list_viewport_height > 0.0 {
+            self.list_viewport_height
+        } else {
+            FALLBACK_VIEWPORT_HEIGHT
+        };
+        let rows_in_view = (viewport_height / FILE_ROW_HEIGHT).ceil() as usize + 1;
+        let first_in_view =
+            ((self.list_scroll_offset / FILE_ROW_HEIGHT).floor() as usize).min(total.saturating_sub(rows_in_view));
+        let start = first_in_view.saturating_sub(FILE_ROW_OVERDRAW);
+        let end = (first_in_view + rows_in_view + FILE_ROW_OVERDRAW).min(total);
+        let gap = |rows: usize| -> Element<'_, Message> { spacer(Length::Fill, Length::Fixed(rows as f32 * FILE_ROW_HEIGHT)).into() };
+
+        let rows = self.file_list[start..end].iter().enumerate().map(|(offset, entry)| {
+            let index = start + offset;
+            file_row(
+                entry,
+                index,
+                self.selection.contains(&index),
+                self.hovered_file == Some(index),
+                search_enabled,
+                favorites.contains_listed(&entry.file_path),
+                modifiers,
+            )
+        });
+        let children = (start > 0)
+            .then(|| gap(start))
+            .into_iter()
+            .chain(rows)
+            .chain((end < total).then(|| gap(total - end)));
+
+        iced::widget::scrollable(Column::with_children(children))
+            .id(Id::new(FILE_LIST_SCROLL_ID))
+            .direction(scrollable::Direction::Vertical(Scrollbar::hidden()))
+            .style(hidden_scrollbar_style)
+            .on_scroll(Message::FileListScrolled)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
+    }
+
+    fn filter_dock(&self) -> Element<'_, Message> {
+        let mut body = column![
+            filter_label_row(file_search_header(self)),
+            filter_input(
+                TextInput::new("Search files…", &self.search_value)
+                    .id(Id::new(FILE_SEARCH_INPUT_ID))
+                    .on_input(|value| FilterMsg::Search(value).into())
+                    .size(13),
+                !self.search_value.is_empty(),
+                FilterMsg::Search(String::new()),
+                FilterMsg::SearchFocused(true),
+                self.filter_focus == FilterFocus::FileSearch,
+            ),
+            bar(Length::Fill, Length::Fixed(1.0), |theme| {
+                theme.extended_palette().background.strong.color.scale_alpha(0.22)
+            }),
+            filter_label_row(tag_section_header(self.tag_filters.len())),
+        ];
+
+        if !self.tag_filters.is_empty() {
+            body = body.push(
+                container(
+                    Row::with_children(self.tag_filters.iter().map(tag_chip))
+                        .spacing(8)
+                        .align_y(Alignment::Center)
+                        .width(Length::Fill)
+                        .wrap()
+                        .vertical_spacing(8),
+                )
+                .width(Length::Fill)
+                .padding([4, 10]),
+            );
+        }
+
+        body = body.push(filter_label_row(
+            text("Add filters like bpm:120, key:Am, or instrument:Kick")
+                .size(10)
+                .style(|theme: &Theme| text::Style {
+                    color: Some(style::muted(theme).scale_alpha(0.85)),
+                }),
+        ));
+
+        if let Some(error) = &self.tag_search_error {
+            body = body.push(
+                container(text(error).size(11).color(style::ERROR))
+                    .padding([6, 10])
+                    .width(Length::Fill)
+                    .style(style::tinted(style::DANGER, 0.12, 0.28, 0.0)),
+            );
+        }
+
+        if !self.tag_search_value.is_empty() && !self.tag_search_value.contains(':') {
+            let best_match = tag_field_best_match(&self.tag_search_value);
+            let suggestions: Vec<Element<'static, Message>> = tag_field_suggestions(&self.tag_search_value)
+                .into_iter()
+                .map(|field| tag_suggestion_row(field, best_match == Some(field)))
+                .collect();
+            if !suggestions.is_empty() {
+                body = body.push(tag_suggestions_panel(suggestions));
+            }
+        }
+
+        body = body.push(filter_input(
+            TextInput::new("title:value — Enter or Tab", &self.tag_search_value)
+                .id(Id::new(TAG_SEARCH_INPUT_ID))
+                .on_input(|value| FilterMsg::TagSearchInput(value).into())
+                .on_submit(FilterMsg::TagSearchSubmit.into())
+                .size(12),
+            !self.tag_search_value.is_empty(),
+            FilterMsg::TagSearchInput(String::new()),
+            FilterMsg::TagSearchFocused(true),
+            self.filter_focus == FilterFocus::TagSearch,
+        ));
+
+        container(column![bar(Length::Fill, Length::Fixed(2.0), |_| ACCENT.scale_alpha(0.42)), body])
+            .width(Length::Fill)
+            .style(|theme: &Theme| {
+                let palette = theme.extended_palette();
+                container::Style::default()
+                    .background(sidebar_panel(theme).scale_alpha(0.98))
+                    .border(style::outline(palette.background.strong.color.scale_alpha(0.30), 0.0))
+                    .shadow(style::drop_shadow(palette.background.base.color.scale_alpha(0.55), -4.0, 14.0))
+            })
+            .into()
+    }
+}
+
+/// Hides the scrollable's own scrollbar and middle-click autoscroll marker.
+fn hidden_scrollbar_style(_theme: &Theme, _status: scrollable::Status) -> scrollable::Style {
+    let rail = scrollable::Rail {
+        background: None,
+        border: iced::Border::default(),
+        scroller: scrollable::Scroller {
+            background: Color::TRANSPARENT.into(),
+            border: iced::Border::default(),
+        },
+    };
+    scrollable::Style {
+        container: container::Style::default(),
+        vertical_rail: rail,
+        horizontal_rail: rail,
+        gap: None,
+        auto_scroll: scrollable::AutoScroll {
+            background: Color::TRANSPARENT.into(),
+            border: iced::Border::default(),
+            shadow: iced::Shadow::default(),
+            icon: Color::TRANSPARENT,
+        },
+    }
+}
+
+fn sidebar_panel(theme: &Theme) -> Color {
     let base = theme.extended_palette().background.base.color;
     Color::from_rgb(base.r * 0.52, base.g * 0.52, base.b * 0.54)
 }
 
-fn tree_icon_color(theme: &theme::Theme, emphasized: bool) -> Color {
+fn sidebar_section_style(theme: &Theme) -> container::Style {
+    let strong = theme.extended_palette().background.strong.color;
+    container::Style::default()
+        .background(sidebar_panel(theme))
+        .border(style::outline(strong.scale_alpha(0.35), 0.0))
+}
+
+fn tree_icon_color(theme: &Theme, emphasized: bool) -> Color {
     let palette = theme.extended_palette();
     if emphasized {
         palette.primary.base.color.scale_alpha(0.85)
@@ -312,434 +562,47 @@ fn tree_icon_color(theme: &theme::Theme, emphasized: bool) -> Color {
     }
 }
 
-fn file_tree_button_style(
-    theme: &theme::Theme,
-    status: ButtonStatus,
-    selected: bool,
-) -> ButtonStyle {
-    let palette = theme.extended_palette();
-    let mut style = ButtonStyle {
-        text_color: if selected {
-            palette.background.base.text
-        } else {
-            ui_muted_text(theme)
-        },
-        border: Border {
-            width: 0.0,
-            radius: 0.0.into(),
-            ..Default::default()
-        },
-        shadow: Shadow::default(),
-        ..ButtonStyle::default()
+fn file_tree_button_style(theme: &Theme, status: button::Status, selected: bool) -> button::Style {
+    let idle = if selected { ACCENT.scale_alpha(0.20) } else { Color::TRANSPARENT };
+    let hovered = ACCENT.scale_alpha(if selected { 0.28 } else { 0.12 });
+    let text_color = if selected || style::by_status(status, false, true, true) {
+        theme.extended_palette().background.base.text
+    } else {
+        style::muted(theme)
     };
-
-    match status {
-        ButtonStatus::Active | ButtonStatus::Disabled => {
-            style.background = Some(
-                if selected {
-                    TUNDRA_ACCENT.scale_alpha(0.20)
-                } else {
-                    Color::TRANSPARENT
-                }
-                .into(),
-            );
-        }
-        ButtonStatus::Hovered => {
-            style.text_color = palette.background.base.text;
-            style.background = Some(
-                if selected {
-                    TUNDRA_ACCENT.scale_alpha(0.28)
-                } else {
-                    TUNDRA_ACCENT.scale_alpha(0.12)
-                }
-                .into(),
-            );
-        }
-        ButtonStatus::Pressed => {
-            style.text_color = palette.background.base.text;
-            style.background = Some(TUNDRA_ACCENT.scale_alpha(0.34).into());
-        }
+    button::Style {
+        text_color,
+        ..button::Style::default()
     }
-
-    style
+    .with_background(style::by_status(status, idle, hovered, ACCENT.scale_alpha(0.34)))
 }
 
-fn file_tree_row_container_style(
-    theme: &theme::Theme,
-    status: ButtonStatus,
-    selected: bool,
-) -> container::Style {
-    let button = file_tree_button_style(theme, status, selected);
-    container::Style {
-        background: button.background,
-        ..Default::default()
-    }
-}
-
-fn file_tree_row(content: Element<'_, Message>, selected: bool) -> Element<'_, Message> {
-    Row::new()
-        .push(selection_stripe(selected, 3.0, Length::Fill))
-        .push(content)
+fn parent_directory_button(cwd: &Path) -> Element<'static, Message> {
+    let parent = cwd.parent().unwrap_or(cwd).to_path_buf();
+    container(
+        button(
+            row![
+                icon("up_chevron.svg", 14.0, |theme| tree_icon_color(theme, false)),
+                text(crate::path_util::truncate_path(cwd, 32)).size(11).style(style::muted_text),
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center),
+        )
+        .on_press(Message::ChangeDirectory(parent))
         .width(Length::Fill)
-        .height(Length::Fixed(FILE_ROW_HEIGHT))
-        .into()
-}
-
-fn file_row_menu<'a>(
-    content: impl Into<Element<'a, Message>>,
-    path: PathBuf,
-    extras: bool,
-    search_enabled: bool,
-    favorite_label: Option<String>,
-    selected: bool,
-) -> Element<'a, Message> {
-    file_tree_row(
-        ContextMenu::new(content, move || {
-            file_context_menu(
-                Message::FileCopyName(path.clone()),
-                Message::FileCopyPath(path.clone()),
-                Message::FileRevealInFileManager(path.clone()),
-                (extras && search_enabled).then(|| Message::OpenAutoTagFor(path.clone())),
-                extras.then(|| {
-                    (
-                        favorite_label
-                            .clone()
-                            .unwrap_or_else(|| "Add to favorites".into()),
-                        Message::ToggleFavorite(path.clone()),
-                    )
-                }),
-                extras.then(|| Message::OpenTagEditorFor(path.clone())),
-            )
-        })
-        .style(context_menu_style)
-        .into(),
-        selected,
-    )
-}
-
-fn tag_chip_close_style(theme: &theme::Theme, status: ButtonStatus) -> ButtonStyle {
-    let palette = theme.extended_palette();
-    let mut style = ButtonStyle {
-        text_color: palette.background.base.text.scale_alpha(0.55),
-        border: Border {
-            radius: 8.0.into(),
-            ..Default::default()
-        },
-        shadow: Shadow::default(),
-        ..ButtonStyle::default()
-    };
-    match status {
-        ButtonStatus::Active | ButtonStatus::Disabled => {
-            style.background = Some(Color::TRANSPARENT.into());
-        }
-        ButtonStatus::Hovered => {
-            style.text_color = palette.background.base.text;
-            style.background = Some(UI_DANGER.scale_alpha(0.22).into());
-        }
-        ButtonStatus::Pressed => {
-            style.text_color = palette.background.base.text;
-            style.background = Some(UI_DANGER.scale_alpha(0.38).into());
-        }
-    }
-    style
-}
-
-fn tag_chip(filter: &TagFilter) -> Element<'static, Message> {
-    let field = filter.field;
-    let accent = tag_field_color(field);
-    let value = filter.value.clone();
-
-    container(
-        row![
-            container(
-                text(field.as_str())
-                    .size(10)
-                    .font(iced::Font {
-                        weight: iced::font::Weight::Semibold,
-                        ..iced::Font::default()
-                    })
-                    .style(move |theme: &theme::Theme| {
-                        let palette = theme.extended_palette();
-                        iced::widget::text::Style {
-                            color: Some(palette.background.base.text.scale_alpha(0.95)),
-                        }
-                    }),
-            )
-            .padding([3, 7])
-            .style(move |_theme| container::Style {
-                background: Some(accent.scale_alpha(0.55).into()),
-                border: Border {
-                    radius: 6.0.into(),
-                    ..Default::default()
-                },
-                ..Default::default()
-            }),
-            text(value)
-                .size(12)
-                .font(iced::Font {
-                    weight: iced::font::Weight::Medium,
-                    ..iced::Font::default()
-                })
-                .style(|theme: &theme::Theme| iced::widget::text::Style {
-                    color: Some(theme.extended_palette().background.base.text),
-                }),
-            button(text("×").size(13))
-                .on_press(Message::TagFilterRemove(field))
-                .padding([2, 4])
-                .style(tag_chip_close_style),
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center),
-    )
-    .padding([5, 8])
-    .style(move |theme| {
-        let palette = theme.extended_palette();
-        container::Style {
-            background: Some(palette.background.base.color.scale_alpha(0.55).into()),
-            border: Border {
-                radius: TAG_CHIP_RADIUS.into(),
-                width: 1.0,
-                color: accent.scale_alpha(0.35),
-            },
-            shadow: Shadow {
-                color: palette.background.base.color.scale_alpha(0.35),
-                offset: iced::Vector::new(0.0, 2.0),
-                blur_radius: 6.0,
-            },
-            ..Default::default()
-        }
-    })
-    .into()
-}
-
-fn accent_badge(label: impl Into<String>, size: u32) -> Element<'static, Message> {
-    container(
-        text(label.into())
-            .size(size)
-            .font(iced::Font {
-                weight: iced::font::Weight::Semibold,
-                ..iced::Font::default()
-            })
-            .style(|_theme: &theme::Theme| iced::widget::text::Style {
-                color: Some(TUNDRA_ACCENT.scale_alpha(0.95)),
-            }),
-    )
-    .padding([2, 6])
-    .style(|_theme| container::Style {
-        background: Some(TUNDRA_ACCENT.scale_alpha(0.18).into()),
-        border: Border {
-            radius: 8.0.into(),
-            width: 1.0,
-            color: TUNDRA_ACCENT.scale_alpha(0.28),
-        },
-        ..Default::default()
-    })
-    .into()
-}
-
-fn filter_dock_accent_bar() -> Element<'static, Message> {
-    container(
-        Space::new()
-            .width(Length::Fill)
-            .height(Length::Fixed(2.0)),
+        .padding([8, 10])
+        .style(|theme, status| file_tree_button_style(theme, status, false)),
     )
     .width(Length::Fill)
-    .style(|_theme| container::Style {
-        background: Some(TUNDRA_ACCENT.scale_alpha(0.42).into()),
-        ..Default::default()
-    })
+    .style(sidebar_section_style)
     .into()
-}
-
-fn filter_dock_style(theme: &theme::Theme) -> container::Style {
-    let palette = theme.extended_palette();
-    container::Style {
-        background: Some(sidebar_panel(theme).scale_alpha(0.98).into()),
-        border: Border {
-            width: 1.0,
-            color: palette.background.strong.color.scale_alpha(0.30),
-            radius: 0.0.into(),
-        },
-        shadow: Shadow {
-            color: palette.background.base.color.scale_alpha(0.55),
-            offset: iced::Vector::new(0.0, -4.0),
-            blur_radius: 14.0,
-        },
-        ..Default::default()
-    }
-}
-
-fn filter_section_divider() -> Element<'static, Message> {
-    container(
-        Space::new()
-            .width(Length::Fill)
-            .height(Length::Fixed(1.0)),
-    )
-    .width(Length::Fill)
-    .style(|theme: &theme::Theme| {
-        let palette = theme.extended_palette();
-        container::Style {
-            background: Some(palette.background.strong.color.scale_alpha(0.22).into()),
-            ..Default::default()
-        }
-    })
-    .into()
-}
-
-fn file_list_select_message(index: usize, modifiers: Modifiers) -> Message {
-    Message::FileListSelect {
-        index,
-        shift: modifiers.shift(),
-        control: modifiers.control() || modifiers.logo(),
-    }
-}
-
-fn selection_status_label(count: usize) -> Element<'static, Message> {
-    container(
-        text(format!("{count} selected · Shift/Ctrl+click to extend"))
-            .size(10)
-            .style(|theme: &theme::Theme| iced::widget::text::Style {
-                color: Some(
-                    theme
-                        .extended_palette()
-                        .background
-                        .base
-                        .text
-                        .scale_alpha(0.58),
-                ),
-            }),
-    )
-    .padding([4, 10])
-    .width(Length::Fill)
-    .into()
-}
-
-fn filter_section_header(icon: &'static str, title: &'static str) -> Row<'static, Message> {
-    Row::new()
-        .spacing(8)
-        .align_y(Alignment::Center)
-        .push(
-            resource_svg(icon)
-                .width(Length::Fixed(12.0))
-                .height(Length::Fixed(12.0))
-                .style(|_theme, _status| iced::widget::svg::Style {
-                    color: Some(TUNDRA_ACCENT.scale_alpha(0.85)),
-                }),
-        )
-        .push(
-            text(title)
-                .size(11)
-                .font(iced::Font {
-                    weight: iced::font::Weight::Semibold,
-                    ..iced::Font::default()
-                })
-                .style(|theme: &theme::Theme| iced::widget::text::Style {
-                    color: Some(ui_muted_text(theme)),
-                }),
-        )
-}
-
-fn file_search_header(
-    active: bool,
-    case_sensitive: bool,
-    show_directories: bool,
-    favorites_only: bool,
-) -> Element<'static, Message> {
-    let mut header = filter_section_header("search-solid.svg", "File search");
-
-    if active {
-        header = header.push(accent_badge("active", 9));
-    }
-
-    header
-        .push(Space::new().width(Length::Fill))
-        .push(file_search_favorites_button(favorites_only))
-        .push(file_search_directories_button(show_directories))
-        .push(file_search_case_button(case_sensitive))
-        .into()
-}
-
-fn toggle_chip_style(theme: &theme::Theme, status: ButtonStatus, active: bool) -> ButtonStyle {
-    let palette = theme.extended_palette();
-    let mut style = ButtonStyle {
-        text_color: palette.background.base.text,
-        border: Border {
-            radius: 6.0.into(),
-            width: 1.0,
-            color: if active {
-                TUNDRA_ACCENT.scale_alpha(0.35)
-            } else {
-                palette.background.strong.color.scale_alpha(0.24)
-            },
-        },
-        ..ButtonStyle::default()
-    };
-    match status {
-        ButtonStatus::Active | ButtonStatus::Disabled => {
-            style.background = Some(
-                if active {
-                    TUNDRA_ACCENT.scale_alpha(0.14)
-                } else {
-                    Color::TRANSPARENT
-                }
-                .into(),
-            );
-        }
-        ButtonStatus::Hovered => {
-            style.background = Some(TUNDRA_ACCENT.scale_alpha(0.18).into());
-        }
-        ButtonStatus::Pressed => {
-            style.background = Some(TUNDRA_ACCENT.scale_alpha(0.26).into());
-        }
-    }
-    style
-}
-
-fn toggle_chip<'a>(
-    content: impl Into<Element<'a, Message>>,
-    active: bool,
-    message: Message,
-) -> Element<'a, Message> {
-    button(content)
-        .padding([2, 6])
-        .on_press(message)
-        .style(move |theme, status| toggle_chip_style(theme, status, active))
-        .into()
-}
-
-fn file_search_favorites_button(favorites_only: bool) -> Element<'static, Message> {
-    toggle_chip(
-        text(if favorites_only { "★" } else { "☆" })
-            .size(13)
-            .style(move |_theme: &theme::Theme| iced::widget::text::Style {
-                color: Some(if favorites_only {
-                    TUNDRA_ACCENT.scale_alpha(0.95)
-                } else {
-                    TUNDRA_MUTED_ICON
-                }),
-            }),
-        favorites_only,
-        Message::ToggleFavoritesOnly,
-    )
 }
 
 fn favorites_list_header() -> Element<'static, Message> {
     container(
         row![
-            text("★")
-                .size(12)
-                .style(|_theme: &theme::Theme| iced::widget::text::Style {
-                    color: Some(TUNDRA_ACCENT.scale_alpha(0.95)),
-                }),
-            text("Favorites")
-                .size(11)
-                .font(iced::Font {
-                    weight: iced::font::Weight::Semibold,
-                    ..iced::Font::default()
-                })
-                .style(|theme: &theme::Theme| iced::widget::text::Style {
-                    color: Some(ui_muted_text(theme)),
-                }),
+            text("★").size(12).color(ACCENT.scale_alpha(0.95)),
+            text("Favorites").size(11).font(style::SEMIBOLD).style(style::muted_text),
         ]
         .spacing(8)
         .align_y(Alignment::Center),
@@ -750,183 +613,290 @@ fn favorites_list_header() -> Element<'static, Message> {
     .into()
 }
 
-fn favorite_star_button(path: PathBuf, favorite: bool) -> Element<'static, Message> {
-    const STAR_ICON: f32 = 11.0;
-    const STAR_BTN: f32 = 15.0;
-    let star = resource_svg("star-solid.svg")
-        .width(Length::Fixed(STAR_ICON))
-        .height(Length::Fixed(STAR_ICON))
-        .style(move |_theme, _status| iced::widget::svg::Style {
-            color: Some(if favorite {
-                TUNDRA_ACCENT.scale_alpha(0.95)
-            } else {
-                TUNDRA_MUTED_ICON.scale_alpha(0.42)
-            }),
-        });
-    button(
-        container(star)
+fn file_row(
+    entry: &FileButton,
+    index: usize,
+    selected: bool,
+    hovered: bool,
+    search_enabled: bool,
+    is_favorite: bool,
+    modifiers: Modifiers,
+) -> Element<'_, Message> {
+    let audio = !entry.is_dir && is_audio(&entry.file_path);
+    let highlight = selected || hovered;
+    let label = container(
+        text(&entry.label)
+            .size(13)
+            .wrapping(Wrapping::None)
             .width(Length::Fill)
-            .height(Length::Fill)
-            .center_x(Length::Fill)
-            .center_y(Length::Fill),
-    )
-    .padding(0)
-    .width(Length::Fixed(STAR_BTN))
-    .height(Length::Fixed(STAR_BTN))
-    .on_press(Message::ToggleFavorite(path))
-    .style(move |_theme: &theme::Theme, status| {
-        let show_border = favorite
-            || matches!(status, ButtonStatus::Hovered | ButtonStatus::Pressed);
-        let mut style = ButtonStyle {
-            text_color: TUNDRA_MUTED_ICON,
-            border: Border {
-                radius: 4.0.into(),
-                width: 1.0,
-                color: if show_border {
-                    TUNDRA_ACCENT.scale_alpha(if favorite { 0.28 } else { 0.16 })
+            .font(if entry.is_dir { style::MEDIUM } else { iced::Font::DEFAULT })
+            .style(move |theme: &Theme| text::Style {
+                color: Some(if highlight {
+                    theme.extended_palette().background.base.text
                 } else {
-                    Color::TRANSPARENT
-                },
-            },
-            ..ButtonStyle::default()
-        };
-        match status {
-            ButtonStatus::Active | ButtonStatus::Disabled => {
-                style.background = Some(
-                    if favorite {
-                        TUNDRA_ACCENT.scale_alpha(0.10)
-                    } else {
-                        Color::TRANSPARENT
-                    }
-                    .into(),
-                );
-            }
-            ButtonStatus::Hovered => {
-                style.background = Some(TUNDRA_ACCENT.scale_alpha(0.15).into());
-            }
-            ButtonStatus::Pressed => {
-                style.background = Some(TUNDRA_ACCENT.scale_alpha(0.22).into());
-            }
-        }
-        style
-    })
-    .into()
-}
-
-fn file_search_directories_button(show_directories: bool) -> Element<'static, Message> {
-    toggle_chip(
-        resource_svg("folder-solid.svg")
-            .width(Length::Fixed(12.0))
-            .height(Length::Fixed(12.0))
-            .style(move |_theme, _status| iced::widget::svg::Style {
-                color: Some(if show_directories {
-                    TUNDRA_ACCENT.scale_alpha(0.95)
-                } else {
-                    TUNDRA_MUTED_ICON
+                    style::muted(theme)
                 }),
             }),
-        show_directories,
-        Message::ToggleSearchShowDirectories,
     )
+    .width(Length::Fill)
+    .clip(true);
+
+    let content: Row<'_, Message> = if entry.is_dir {
+        row![icon("folder-solid.svg", 16.0, move |theme| tree_icon_color(theme, highlight)), label].spacing(10)
+    } else if audio {
+        row![
+            favorite_star_button(entry.file_path.clone(), is_favorite),
+            row![icon("music-solid.svg", 12.0, move |theme| tree_icon_color(theme, highlight)), label]
+                .spacing(8)
+                .align_y(Alignment::Center),
+        ]
+        .spacing(1)
+    } else {
+        row![label]
+    };
+    let content = content.align_y(Alignment::Center).width(Length::Fill);
+
+    let select = Message::FileListSelect {
+        index,
+        shift: modifiers.shift(),
+        control: modifiers.control() || modifiers.logo(),
+    };
+    let row_style = move |theme: &Theme, status| file_tree_button_style(theme, status, selected);
+    let multi_select = modifiers.shift() || modifiers.control() || modifiers.logo();
+
+    let clickable: Element<'_, Message> = if entry.is_dir {
+        button(content).on_press(select).width(Length::Fill).padding([7, 10]).style(row_style).into()
+    } else {
+        let status = if hovered { button::Status::Hovered } else { button::Status::Active };
+        let body = container(content)
+            .width(Length::Fill)
+            .padding([7, 10])
+            .style(move |theme| container::Style {
+                background: row_style(theme, status).background,
+                ..container::Style::default()
+            });
+        if audio && !multi_select {
+            // A press may become a drag out of the app; `app/input.rs` decides on release.
+            mouse_area(body)
+                .on_press(Message::FileDragPress {
+                    path: entry.file_path.clone(),
+                    from_file_list: true,
+                })
+                .on_enter(Message::FileRowHover(index))
+                .on_exit(Message::FileRowLeave)
+                .interaction(mouse::Interaction::Grab)
+                .into()
+        } else {
+            button(body).on_press(select).width(Length::Fill).padding(0).style(row_style).into()
+        }
+    };
+
+    let path = entry.file_path.clone();
+    let menu = iced_aw::ContextMenu::new(clickable, move || {
+        let extras = if audio {
+            FileMenuExtras {
+                auto_tag: search_enabled.then(|| AutoTagMsg::OpenFor(path.clone()).into()),
+                edit_tags: Some(TagEditorMsg::OpenFor(path.clone()).into()),
+                favorite: Some((
+                    if is_favorite { "Remove from favorites" } else { "Add to favorites" },
+                    Message::ToggleFavorite(path.clone()),
+                )),
+            }
+        } else {
+            FileMenuExtras::default()
+        };
+        file_context_menu(
+            Message::FileCopyName(path.clone()),
+            Message::FileCopyPath(path.clone()),
+            Message::FileRevealInFileManager(path.clone()),
+            extras,
+        )
+    })
+    .style(super::widgets::context_menu_style);
+
+    row![selection_stripe(selected, 3.0, Length::Fill), menu]
+        .width(Length::Fill)
+        .height(Length::Fixed(FILE_ROW_HEIGHT))
+        .into()
 }
 
-fn file_search_case_button(case_sensitive: bool) -> Element<'static, Message> {
-    toggle_chip(
-        row![
-            text("a")
-                .size(11)
-                .style(move |theme: &theme::Theme| iced::widget::text::Style {
-                    color: Some(if case_sensitive {
-                        ui_muted_text(theme).scale_alpha(0.72)
-                    } else {
-                        TUNDRA_ACCENT.scale_alpha(0.95)
-                    }),
-                }),
-            text("A")
-                .size(11)
-                .font(iced::Font {
-                    weight: iced::font::Weight::Semibold,
-                    ..iced::Font::default()
-                })
-                .style(move |theme: &theme::Theme| iced::widget::text::Style {
-                    color: Some(if case_sensitive {
-                        TUNDRA_ACCENT.scale_alpha(0.95)
-                    } else {
-                        ui_muted_text(theme).scale_alpha(0.72)
-                    }),
-                }),
-        ]
-        .spacing(0)
-        .align_y(Alignment::Center),
-        case_sensitive,
-        Message::ToggleSearchCaseSensitive,
-    )
+fn favorite_star_button(path: PathBuf, favorite: bool) -> Element<'static, Message> {
+    let star = icon("star-solid.svg", 11.0, move |_| {
+        if favorite { ACCENT.scale_alpha(0.95) } else { MUTED_ICON.scale_alpha(0.42) }
+    });
+    button(container(star).center(Length::Fill))
+        .padding(0)
+        .width(Length::Fixed(15.0))
+        .height(Length::Fixed(15.0))
+        .on_press(Message::ToggleFavorite(path))
+        .style(move |_theme, status| {
+            let border = if favorite || style::by_status(status, false, true, true) {
+                ACCENT.scale_alpha(if favorite { 0.28 } else { 0.16 })
+            } else {
+                Color::TRANSPARENT
+            };
+            let idle = if favorite { ACCENT.scale_alpha(0.10) } else { Color::TRANSPARENT };
+            button::Style {
+                text_color: MUTED_ICON,
+                border: style::outline(border, 4.0),
+                ..button::Style::default()
+            }
+            .with_background(style::by_status(status, idle, ACCENT.scale_alpha(0.15), ACCENT.scale_alpha(0.22)))
+        })
+        .into()
+}
+
+fn filter_label_row<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+    container(content).width(Length::Fill).padding([8, 10]).into()
+}
+
+fn filter_section_header(icon_name: &'static str, title: &'static str) -> Row<'static, Message> {
+    row![
+        icon(icon_name, 12.0, |_| ACCENT.scale_alpha(0.85)),
+        text(title).size(11).font(style::SEMIBOLD).style(style::muted_text),
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center)
+}
+
+fn accent_badge(label: impl text::IntoFragment<'static>, size: u32) -> Element<'static, Message> {
+    container(text(label).size(size).font(style::SEMIBOLD).color(ACCENT.scale_alpha(0.95)))
+        .padding([2, 6])
+        .style(style::tinted(ACCENT, 0.18, 0.28, 8.0))
+        .into()
+}
+
+fn file_search_header(selector: &FileSelector) -> Element<'static, Message> {
+    let mut header = filter_section_header("search-solid.svg", "File search");
+    if selector.search_active() {
+        header = header.push(accent_badge("active", 9));
+    }
+    let on_off = move |on: bool| if on { ACCENT.scale_alpha(0.95) } else { MUTED_ICON };
+    let (favorites, directories, case) = (
+        selector.favorites_only,
+        selector.search_show_directories,
+        selector.search_case_sensitive,
+    );
+    // "a" lights up when matching ignores case, "A" when it respects it.
+    let case_letter = move |letter: &'static str, lit: bool| {
+        text(letter).size(11).style(move |theme: &Theme| text::Style {
+            color: Some(if lit { ACCENT.scale_alpha(0.95) } else { style::muted(theme).scale_alpha(0.72) }),
+        })
+    };
+    header
+        .push(spacer(Length::Fill, Length::Shrink))
+        .push(toggle_chip(
+            text(if favorites { "★" } else { "☆" }).size(13).color(on_off(favorites)),
+            favorites,
+            FilterMsg::ToggleFavoritesOnly,
+        ))
+        .push(toggle_chip(
+            icon("folder-solid.svg", 12.0, move |_| on_off(directories)),
+            directories,
+            FilterMsg::ToggleShowDirectories,
+        ))
+        .push(toggle_chip(
+            row![case_letter("a", !case), case_letter("A", case).font(style::SEMIBOLD)].align_y(Alignment::Center),
+            case,
+            FilterMsg::ToggleCaseSensitive,
+        ))
+        .into()
+}
+
+fn toggle_chip<'a>(content: impl Into<Element<'a, Message>>, active: bool, message: FilterMsg) -> Element<'a, Message> {
+    button(content)
+        .padding([2, 6])
+        .on_press(message.into())
+        .style(move |theme: &Theme, status| {
+            let palette = theme.extended_palette();
+            let border = if active { ACCENT.scale_alpha(0.35) } else { palette.background.strong.color.scale_alpha(0.24) };
+            let idle = if active { ACCENT.scale_alpha(0.14) } else { Color::TRANSPARENT };
+            button::Style {
+                text_color: palette.background.base.text,
+                border: style::outline(border, 6.0),
+                ..button::Style::default()
+            }
+            .with_background(style::by_status(status, idle, ACCENT.scale_alpha(0.18), ACCENT.scale_alpha(0.26)))
+        })
+        .into()
 }
 
 fn tag_section_header(filter_count: usize) -> Element<'static, Message> {
     let mut header = filter_section_header("music-solid.svg", "Tag filters");
-
     if filter_count > 0 {
-        header = header
-            .push(accent_badge(filter_count.to_string(), 10))
-            .push(accent_badge("active", 9));
+        header = header.push(accent_badge(filter_count.to_string(), 10)).push(accent_badge("active", 9));
     }
-
-    header.push(Space::new().width(Length::Fill)).into()
+    header.into()
 }
 
-fn filter_label_row(content: Element<'_, Message>) -> Element<'_, Message> {
-    container(content)
-        .width(Length::Fill)
-        .padding([8, 10])
-        .into()
-}
+fn tag_chip(filter: &TagFilter) -> Element<'static, Message> {
+    let field = filter.field;
+    let accent = style::tag_field_color(field);
+    let close = button(text("×").size(13))
+        .on_press(FilterMsg::TagFilterRemove(field).into())
+        .padding([2, 4])
+        .style(|theme: &Theme, status| {
+            let text_color = if style::by_status(status, true, false, false) {
+                style::text_alpha(theme, 0.55)
+            } else {
+                theme.extended_palette().background.base.text
+            };
+            button::Style {
+                text_color,
+                border: iced::border::rounded(8.0),
+                ..button::Style::default()
+            }
+            .with_background(style::by_status(
+                status,
+                Color::TRANSPARENT,
+                style::DANGER.scale_alpha(0.22),
+                style::DANGER.scale_alpha(0.38),
+            ))
+        });
 
-fn filter_helper_text(label: &str) -> Element<'_, Message> {
-    filter_label_row(
-        text(label)
-            .size(10)
-            .style(|theme: &theme::Theme| iced::widget::text::Style {
-                color: Some(ui_muted_text(theme).scale_alpha(0.85)),
-            })
-            .into(),
+    container(
+        row![
+            container(text(field.as_str()).size(10).font(style::SEMIBOLD).style(style::faded_text(0.95)))
+                .padding([3, 7])
+                .style(move |_theme| {
+                    container::background(accent.scale_alpha(0.55)).border(iced::border::rounded(6.0))
+                }),
+            text(filter.value.clone()).size(12).font(style::MEDIUM),
+            close,
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center),
     )
+    .padding([5, 8])
+    .style(move |theme| {
+        let palette = theme.extended_palette();
+        container::Style::default()
+            .background(palette.background.base.color.scale_alpha(0.55))
+            .border(style::outline(accent.scale_alpha(0.35), 16.0))
+            .shadow(style::drop_shadow(palette.background.base.color.scale_alpha(0.35), 2.0, 6.0))
+    })
+    .into()
 }
 
 fn tag_suggestion_row(field: TagField, highlighted: bool) -> Element<'static, Message> {
-    let name = field.as_str().to_owned();
-    let hint = field.label().to_owned();
     button(
         row![
             container(
-                text(name)
+                text(field.as_str())
                     .size(11)
-                    .font(iced::Font {
-                        weight: iced::font::Weight::Semibold,
-                        ..iced::Font::default()
-                    })
-                    .style(move |_theme: &theme::Theme| iced::widget::text::Style {
-                        color: Some(tag_field_color(field).scale_alpha(0.95)),
-                    }),
+                    .font(style::SEMIBOLD)
+                    .color(style::tag_field_color(field).scale_alpha(0.95)),
             )
             .padding([2, 0]),
-            text(":")
-                .size(11)
-                .style(|theme: &theme::Theme| iced::widget::text::Style {
-                    color: Some(ui_muted_text(theme)),
-                }),
-            Space::new().width(Length::Fill),
-            text(hint)
-                .size(10)
-                .style(|theme: &theme::Theme| iced::widget::text::Style {
-                    color: Some(ui_muted_text(theme)),
-                }),
+            text(":").size(11).style(style::muted_text),
+            spacer(Length::Fill, Length::Shrink),
+            text(field.label()).size(10).style(style::muted_text),
         ]
         .spacing(4)
         .align_y(Alignment::Center)
         .width(Length::Fill),
     )
-    .on_press(Message::TagSuggestionSelect(field))
+    .on_press(FilterMsg::TagSuggestionSelect(field).into())
     .width(Length::Fill)
     .padding([6, 10])
     .style(move |theme, status| file_tree_button_style(theme, status, highlighted))
@@ -934,95 +904,50 @@ fn tag_suggestion_row(field: TagField, highlighted: bool) -> Element<'static, Me
 }
 
 fn tag_suggestions_panel(suggestions: Vec<Element<'static, Message>>) -> Element<'static, Message> {
-    container(
-        Column::with_children(suggestions)
-            .spacing(0)
-            .padding([4, 0]),
-    )
-    .width(Length::Fill)
-    .style(|theme| {
-        let palette = theme.extended_palette();
-        container::Style {
-            background: Some(palette.background.base.color.scale_alpha(0.94).into()),
-            border: Border {
-                radius: FILTER_INPUT_RADIUS.into(),
-                width: 1.0,
-                color: palette.background.strong.color.scale_alpha(0.40),
-            },
-            shadow: Shadow {
-                color: palette.background.base.color.scale_alpha(0.65),
-                offset: iced::Vector::new(0.0, 4.0),
-                blur_radius: 10.0,
-            },
-            ..Default::default()
-        }
-    })
-    .into()
-}
-
-fn tag_suggestions_slot(suggestions: Vec<Element<'static, Message>>) -> Element<'static, Message> {
-    if suggestions.is_empty() {
-        container(Space::new())
-            .height(Length::Fixed(0.0))
-            .width(Length::Fill)
-            .into()
-    } else {
-        tag_suggestions_panel(suggestions)
-    }
-}
-
-const FILTER_CLEAR_TEXT_SIZE: f32 = 13.0;
-const FILTER_CLEAR_PAD_X: f32 = 8.0;
-const FILTER_CLEAR_PAD_Y: f32 = 4.0;
-const FILTER_CLEAR_MIN_HIT_WIDTH: f32 = 24.0;
-
-fn filter_clear_inset() -> f32 {
-    (FILTER_CLEAR_TEXT_SIZE + FILTER_CLEAR_PAD_X * 2.0).max(FILTER_CLEAR_MIN_HIT_WIDTH)
-}
-
-fn filter_clear_button_style(theme: &theme::Theme, status: ButtonStatus) -> ButtonStyle {
-    let palette = theme.extended_palette();
-    let mut style = ButtonStyle {
-        text_color: palette.background.base.text.scale_alpha(0.45),
-        background: Some(Color::TRANSPARENT.into()),
-        border: Border {
-            radius: 4.0.into(),
-            ..Default::default()
-        },
-        shadow: Shadow::default(),
-        ..ButtonStyle::default()
-    };
-    match status {
-        ButtonStatus::Hovered | ButtonStatus::Pressed => {
-            style.text_color = palette.background.base.text.scale_alpha(0.85);
-        }
-        ButtonStatus::Active | ButtonStatus::Disabled => {}
-    }
-    style
-}
-
-fn filter_clear_button(on_press: Message) -> Element<'static, Message> {
-    button(text("×").size(FILTER_CLEAR_TEXT_SIZE))
-        .on_press(on_press)
-        .padding([FILTER_CLEAR_PAD_Y, FILTER_CLEAR_PAD_X])
-        .style(filter_clear_button_style)
+    container(Column::with_children(suggestions).padding([4, 0]))
+        .width(Length::Fill)
+        .style(|theme| {
+            let palette = theme.extended_palette();
+            container::Style::default()
+                .background(palette.background.base.color.scale_alpha(0.94))
+                .border(style::outline(palette.background.strong.color.scale_alpha(0.40), 0.0))
+                .shadow(style::drop_shadow(palette.background.base.color.scale_alpha(0.65), 4.0, 10.0))
+        })
         .into()
 }
 
-fn filter_input_with_clear(
-    input: Element<'_, Message>,
+/// A filter text input with a × clear button inside its right edge.
+///
+/// While inactive, a click-catcher covers the input so focus moves through
+/// `on_activate` instead of letting two inputs hold focus at once.
+fn filter_input<'a>(
+    input: TextInput<'a, Message>,
     show_clear: bool,
-    on_clear: Message,
-    on_activate: Message,
+    on_clear: FilterMsg,
+    on_activate: FilterMsg,
     active: bool,
-) -> Element<'_, Message> {
-    let clear_slot: Element<'_, Message> = if show_clear {
-        filter_clear_button(on_clear)
-    } else {
-        Space::new()
-            .width(Length::Fixed(filter_clear_inset()))
-            .height(Length::Fixed(0.0))
+) -> Element<'a, Message> {
+    let on_activate: Message = on_activate.into();
+    let input = mouse_area(
+        input
+            .padding(Padding::from([8.0, 10.0]).right(FILTER_CLEAR_INSET))
+            .width(Length::Fill),
+    )
+    .on_press(on_activate.clone());
+
+    let clear_slot: Element<'a, Message> = if show_clear {
+        button(text("×").size(FILTER_CLEAR_TEXT_SIZE))
+            .on_press(on_clear.into())
+            .padding(FILTER_CLEAR_PAD)
+            .style(|theme: &Theme, status| button::Style {
+                text_color: style::text_alpha(theme, style::by_status(status, 0.45, 0.85, 0.85)),
+                background: Some(Color::TRANSPARENT.into()),
+                border: iced::border::rounded(4.0),
+                ..button::Style::default()
+            })
             .into()
+    } else {
+        spacer(Length::Fixed(FILTER_CLEAR_INSET), Length::Fixed(0.0)).into()
     };
 
     // The overlay spans the whole input so the button can sit inside its right padding.
@@ -1037,723 +962,34 @@ fn filter_input_with_clear(
         .align_x(iced::alignment::Horizontal::Right)
         .align_y(iced::alignment::Vertical::Center);
 
-    if active {
-        container(stack![input, clear_overlay].width(Length::Fill))
-            .width(Length::Fill)
-            .into()
+    let layers = if active {
+        stack![input, clear_overlay]
     } else {
-        container(
-            stack![
-                input,
-                mouse_area(
-                    Space::new()
-                        .width(Length::Fill)
-                        .height(Length::Fill),
-                )
-                .on_press(on_activate),
-                clear_overlay,
-            ]
-            .width(Length::Fill),
-        )
-        .width(Length::Fill)
-        .into()
-    }
+        let click_catcher = mouse_area(spacer(Length::Fill, Length::Fill)).on_press(on_activate);
+        stack![input, click_catcher, clear_overlay]
+    };
+    container(layers.width(Length::Fill)).width(Length::Fill).into()
 }
 
-fn filter_input_padding() -> iced::Padding {
-    iced::Padding::from([8.0, 10.0]).right(filter_clear_inset())
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-fn file_search_input(search_value: &str, active: bool) -> Element<'_, Message> {
-    let show_clear = !search_value.is_empty();
-
-    let input = mouse_area(
-        TextInput::new("Search files…", search_value)
-            .id(Id::new(FILE_SEARCH_INPUT_ID))
-            .on_input(Message::Search)
-            .size(13)
-            .padding(filter_input_padding())
-            .width(Length::Fill),
-    )
-    .on_press(Message::SearchFocused(true))
-    .into();
-
-    filter_input_with_clear(
-        input,
-        show_clear,
-        Message::Search(String::new()),
-        Message::SearchFocused(true),
-        active,
-    )
-}
-
-fn tag_search_input(tag_search_value: &str, active: bool) -> Element<'_, Message> {
-    let show_clear = !tag_search_value.is_empty();
-
-    let input = mouse_area(
-        TextInput::new("title:value — Enter or Tab", tag_search_value)
-            .id(Id::new(TAG_SEARCH_INPUT_ID))
-            .on_input(Message::TagSearchInput)
-            .on_submit(Message::TagSearchSubmit)
-            .size(12)
-            .padding(filter_input_padding())
-            .width(Length::Fill),
-    )
-    .on_press(Message::TagSearchFocused(true))
-    .into();
-
-    filter_input_with_clear(
-        input,
-        show_clear,
-        Message::TagSearchInput(String::new()),
-        Message::TagSearchFocused(true),
-        active,
-    )
-}
-
-fn section_divider(theme: &theme::Theme) -> container::Style {
-    container::Style {
-        border: Border {
-            width: 1.0,
-            color: theme
-                .extended_palette()
-                .background
-                .strong
-                .color
-                .scale_alpha(0.35),
-            radius: 0.0.into(),
-        },
-        ..Default::default()
-    }
-}
-
-fn sidebar_section_style(theme: &theme::Theme) -> container::Style {
-    let mut style = section_divider(theme);
-    style.background = Some(sidebar_panel(theme).into());
-    style
-}
-
-impl DirUp {
-    pub fn view(&self, cwd: PathBuf) -> Element<'_, Message> {
-        let path_label = truncate_path(&cwd, 32);
-        let content = Button::new(
-            row![
-                resource_svg("up_chevron.svg")
-                    .height(Length::Fixed(14.0))
-                    .width(Length::Fixed(14.0))
-                    .style(|theme, _status| iced::widget::svg::Style {
-                        color: Some(tree_icon_color(theme, false)),
-                    }),
-                text(path_label)
-                    .size(11)
-                    .style(|theme: &theme::Theme| iced::widget::text::Style {
-                        color: Some(ui_muted_text(theme)),
-                    }),
-            ]
-            .spacing(10)
-            .align_y(Alignment::Center),
-        )
-        .on_press(Message::ChangeDirectory(match cwd.parent() {
-            Some(x) => x.to_path_buf(),
-            None => cwd,
-        }))
-        .width(Length::Fill)
-        .padding([8, 10])
-        .style(|theme, status| file_tree_button_style(theme, status, false));
-
-        container(content)
-            .width(Length::Fill)
-            .style(sidebar_section_style)
-            .into()
-    }
-}
-
-impl FileList {
-    /// Folders that are not hidden, and audio files. `is_dir` comes from the
-    /// directory listing so files cost no extra `stat`.
-    pub fn keeps_entry(path: &Path, is_dir: bool) -> bool {
-        if is_dir {
-            !is_hidden(path)
-        } else {
-            is_audio(path)
-        }
+    #[test]
+    fn scrollbar_round_trips_offsets_through_the_track() {
+        let metrics = ScrollMetrics::new(1_000, 0.0, 600.0);
+        assert!(metrics.max_scroll > 0.0);
+        let grab = metrics.grab_offset(metrics.thumb_height / 2.0);
+        let middle = metrics.offset_for_track_y(metrics.scroll_range / 2.0 + grab, grab);
+        assert!((middle - metrics.max_scroll / 2.0).abs() < 1.0);
+        assert_eq!(metrics.offset_for_track_y(-50.0, grab), 0.0);
+        assert_eq!(metrics.offset_for_track_y(10_000.0, grab), metrics.max_scroll);
     }
 
-    pub fn list_buttons(dir: &Path) -> (Vec<FileButton>, Option<String>) {
-        let entries = match fs::read_dir(dir) {
-            Ok(entries) => entries,
-            Err(err) => {
-                return (
-                    Vec::new(),
-                    Some(format!("Cannot read {}: {err}", dir.display())),
-                );
-            }
-        };
-
-        let mut sweep = crate::path_util::SidecarSweep::default();
-        let mut buttons: Vec<FileButton> = entries
-            .filter_map(|entry| {
-                let entry = entry.ok()?;
-                let file_type = entry.file_type().ok()?;
-                let path = entry.path();
-                sweep.note(&path);
-                let is_dir = if file_type.is_symlink() {
-                    path.is_dir()
-                } else {
-                    file_type.is_dir()
-                };
-                Self::keeps_entry(&path, is_dir).then(|| FileButton::with_kind(path, dir, is_dir))
-            })
-            .collect();
-        buttons.extend(
-            sweep
-                .finish()
-                .into_iter()
-                .filter(|path| is_audio(path))
-                .map(|path| FileButton::with_kind(path, dir, false)),
-        );
-        buttons.sort_by_cached_key(|button| (!button.is_dir, button.label.to_lowercase()));
-        (buttons, None)
-    }
-}
-
-impl FileSelector {
-    pub fn new(dir: &Path) -> Self {
-        let (file_list, list_error) = FileList::list_buttons(dir);
-        FileSelector {
-            current_dir: dir.to_owned(),
-            file_list,
-            selected: HashSet::new(),
-            selection_anchor: None,
-            hovered_file: None,
-            search_value: String::new(),
-            search_case_sensitive: false,
-            search_show_directories: true,
-            favorites_only: false,
-            tag_search_value: String::new(),
-            tag_filters: Vec::new(),
-            tag_search_error: None,
-            list_error,
-            list_scroll_offset: 0.0,
-            list_viewport_height: 0.0,
-        }
-    }
-
-    pub fn reload_directory(&mut self, dir: &Path) {
-        let search_value = self.search_value.clone();
-        let search_case_sensitive = self.search_case_sensitive;
-        let search_show_directories = self.search_show_directories;
-        let favorites_only = self.favorites_only;
-        let tag_search_value = self.tag_search_value.clone();
-        let tag_filters = self.tag_filters.clone();
-        let tag_search_error = self.tag_search_error.clone();
-        let search_active = self.search_active();
-        self.current_dir = dir.to_owned();
-        if !search_active {
-            let (file_list, list_error) = FileList::list_buttons(dir);
-            self.file_list = file_list;
-            self.list_error = list_error;
-        }
-        self.selected.clear();
-        self.selection_anchor = None;
-        self.hovered_file = None;
-        self.search_value = search_value;
-        self.search_case_sensitive = search_case_sensitive;
-        self.search_show_directories = search_show_directories;
-        self.favorites_only = favorites_only;
-        self.tag_search_value = tag_search_value;
-        self.tag_filters = tag_filters;
-        self.tag_search_error = tag_search_error;
-    }
-
-    pub fn search_active(&self) -> bool {
-        crate::metadata::file_search_active(&self.search_value, &self.tag_filters)
-    }
-
-    pub fn tag_only_search(&self) -> bool {
-        !self.tag_filters.is_empty() && self.search_value.trim().is_empty()
-    }
-
-    pub fn selected_count(&self) -> usize {
-        self.selected.len()
-    }
-
-    pub fn is_selected(&self, index: usize) -> bool {
-        self.selected.contains(&index)
-    }
-
-    pub fn select_row(&mut self, index: usize, shift: bool, control: bool) {
-        if index >= self.file_list.len() {
-            return;
-        }
-
-        if control {
-            if self.selected.contains(&index) {
-                self.selected.remove(&index);
-            } else {
-                self.selected.insert(index);
-            }
-            self.selection_anchor = Some(index);
-            return;
-        }
-
-        if shift {
-            if let Some(anchor) = self.selection_anchor {
-                let lo = anchor.min(index);
-                let hi = anchor.max(index);
-                self.selected.clear();
-                for i in lo..=hi {
-                    self.selected.insert(i);
-                }
-                return;
-            }
-        }
-
-        self.selected.clear();
-        self.selected.insert(index);
-        self.selection_anchor = Some(index);
-    }
-
-    /// Swap in a new listing. Selection is carried over by path: row indices
-    /// from the old listing would otherwise point at different files, and
-    /// actions on "the selected file" (auto-tag, tag editor) would hit them.
-    pub fn set_file_list(&mut self, file_list: Vec<FileButton>, list_error: Option<String>) {
-        let key_at = |list: &[FileButton], index: usize| {
-            list.get(index)
-                .map(|entry| crate::path_util::cache_key(entry.file_path.clone()))
-        };
-        let selected: HashSet<PathBuf> = self
-            .selected
-            .iter()
-            .filter_map(|&index| key_at(&self.file_list, index))
-            .collect();
-        let anchor = self
-            .selection_anchor
-            .and_then(|index| key_at(&self.file_list, index));
-
-        self.file_list = file_list;
-        self.list_error = list_error;
-        self.selected.clear();
-        self.selection_anchor = None;
-        self.hovered_file = None;
-        if selected.is_empty() {
-            return;
-        }
-        for (index, entry) in self.file_list.iter().enumerate() {
-            let key = crate::path_util::cache_key(entry.file_path.clone());
-            if selected.contains(&key) {
-                self.selected.insert(index);
-                if anchor.as_ref() == Some(&key) {
-                    self.selection_anchor = Some(index);
-                }
-            }
-        }
-    }
-
-    pub fn clear_selection(&mut self) {
-        self.selected.clear();
-        self.selection_anchor = None;
-    }
-
-    pub fn sync_selection_for_path(&mut self, path: &Path) {
-        let key = crate::path_util::cache_key(path.to_path_buf());
-        let Some(index) = self.file_list.iter().position(|entry| {
-            crate::path_util::cache_key(entry.file_path.clone()) == key
-        }) else {
-            return;
-        };
-        self.selected.clear();
-        self.selected.insert(index);
-        self.selection_anchor = Some(index);
-    }
-
-    fn primary_index(&self) -> Option<usize> {
-        self.selection_anchor
-            .or_else(|| self.selected.iter().copied().min())
-    }
-
-    pub fn selected_audio_path(&self) -> Option<PathBuf> {
-        self.primary_index()
-            .and_then(|index| self.file_list.get(index))
-            .filter(|entry| !entry.is_dir && is_audio(&entry.file_path))
-            .map(|entry| entry.file_path.clone())
-    }
-
-    pub fn add_tag_filter(&mut self, filter: TagFilter) {
-        if let Some(existing) = self
-            .tag_filters
-            .iter()
-            .position(|entry| entry.field == filter.field)
-        {
-            self.tag_filters[existing] = filter;
-        } else {
-            self.tag_filters.push(filter);
-        }
-    }
-
-    fn tag_suggestions(&self) -> Vec<Element<'static, Message>> {
-        let best_match = tag_field_best_match(&self.tag_search_value);
-        tag_field_suggestions(&self.tag_search_value)
-            .into_iter()
-            .map(|field| {
-                tag_suggestion_row(field, best_match == Some(field))
-            })
-            .collect()
-    }
-
-    pub fn view(
-        &self,
-        search_enabled: bool,
-        favorites: &FavoritesStore,
-        modifiers: Modifiers,
-        filter_focus: FilterFocus,
-    ) -> Column<'_, Message> {
-        let mut column = Column::new().spacing(0).height(Length::Fill);
-
-        if self.favorites_only {
-            column = column.push(favorites_list_header());
-        } else {
-            column = column.push(DirUp.view(self.current_dir.to_owned()));
-        }
-
-        if self.selected_count() > 1 {
-            column = column.push(selection_status_label(self.selected_count()));
-        }
-
-        if let Some(error) = &self.list_error {
-            column = column.push(
-                container(
-                    text(error)
-                        .size(12)
-                        .color(Color::from_rgb(0.92, 0.55, 0.55)),
-                )
-                .padding([8, 12])
-                .width(Length::Fill),
-            );
-        }
-
-        // Windowed rendering: only build widgets for rows near the viewport;
-        // spacers stand in for the rest so scrollbar geometry stays correct.
-        let total = self.file_list.len();
-        let viewport_height = file_list_render_viewport_height(self.list_viewport_height);
-        let rows_in_view = (viewport_height / FILE_ROW_HEIGHT).ceil() as usize + 1;
-        let first_in_view = ((self.list_scroll_offset / FILE_ROW_HEIGHT).floor() as usize)
-            .min(total.saturating_sub(rows_in_view));
-        let start = first_in_view.saturating_sub(FILE_ROW_OVERDRAW);
-        let end = (first_in_view + rows_in_view + FILE_ROW_OVERDRAW).min(total);
-
-        let mut new_col: Vec<Element<Message>> = Vec::with_capacity(end - start + 2);
-        if start > 0 {
-            new_col.push(
-                Space::new()
-                    .width(Length::Fill)
-                    .height(Length::Fixed(start as f32 * FILE_ROW_HEIGHT))
-                    .into(),
-            );
-        }
-        for (index, button) in self.file_list[start..end].iter().enumerate() {
-            let index = start + index;
-            new_col.push(button.view(
-                index,
-                self.is_selected(index),
-                self.hovered_file == Some(index),
-                search_enabled,
-                favorites.contains_listed(&button.file_path),
-                modifiers,
-            ));
-        }
-        if end < total {
-            new_col.push(
-                Space::new()
-                    .width(Length::Fill)
-                    .height(Length::Fixed((total - end) as f32 * FILE_ROW_HEIGHT))
-                    .into(),
-            );
-        }
-        let fs = scrollable_widget(Column::with_children(new_col).spacing(0))
-            .id(Id::new(FILE_LIST_SCROLL_ID))
-            .direction(scrollable::Direction::Vertical(Scrollbar::hidden()))
-            .style(file_list_scrollable_style)
-            .on_scroll(Message::FileListScrolled)
-            .height(Length::Fill);
-
-        let list_with_scrollbar = mouse_area(
-            row![
-                fs.width(Length::Fill),
-                file_list_scrollbar(total, self.list_scroll_offset, self.list_viewport_height),
-            ]
-            .spacing(0)
-            .height(Length::Fill),
-        )
-        .on_enter(Message::FileListHoverChanged(true))
-        .on_exit(Message::FileListHoverChanged(false));
-
-        let file_search_active = self.search_active();
-
-        let mut filter_body = Column::new()
-            .spacing(0)
-            .push(filter_label_row(file_search_header(
-                file_search_active,
-                self.search_case_sensitive,
-                self.search_show_directories,
-                self.favorites_only,
-            )))
-            .push(file_search_input(
-                &self.search_value,
-                filter_focus == FilterFocus::FileSearch,
-            ))
-            .push(filter_section_divider())
-            .push(filter_label_row(tag_section_header(self.tag_filters.len())));
-
-        if !self.tag_filters.is_empty() {
-            let chips: Vec<Element<Message>> = self
-                .tag_filters
-                .iter()
-                .map(tag_chip)
-                .collect();
-            filter_body = filter_body.push(
-                container(
-                    Row::with_children(chips)
-                        .spacing(8)
-                        .align_y(Alignment::Center)
-                        .width(Length::Fill)
-                        .wrap()
-                        .vertical_spacing(8),
-                )
-                .width(Length::Fill)
-                .padding([4, 10]),
-            );
-        }
-
-        filter_body = filter_body.push(filter_helper_text(
-            "Add filters like bpm:120, key:Am, or instrument:Kick",
-        ));
-
-        if let Some(error) = &self.tag_search_error {
-            filter_body = filter_body.push(
-                container(
-                    text(error)
-                        .size(11)
-                        .style(modal_error_style),
-                )
-                .padding([6, 10])
-                .width(Length::Fill)
-                .style(|_theme| container::Style {
-                    background: Some(UI_DANGER.scale_alpha(0.12).into()),
-                    border: Border {
-                        radius: 0.0.into(),
-                        width: 1.0,
-                        color: UI_DANGER.scale_alpha(0.28),
-                    },
-                    ..Default::default()
-                }),
-            );
-        }
-
-        let suggestions = if !self.tag_search_value.is_empty() && !self.tag_search_value.contains(':') {
-            self.tag_suggestions()
-        } else {
-            Vec::new()
-        };
-        filter_body = filter_body.push(tag_suggestions_slot(suggestions));
-        filter_body = filter_body.push(tag_search_input(
-            &self.tag_search_value,
-            filter_focus == FilterFocus::TagSearch,
-        ));
-
-        let filter_dock = container(
-            Column::new()
-                .push(filter_dock_accent_bar())
-                .push(filter_body),
-        )
-        .width(Length::Fill)
-        .style(filter_dock_style);
-
-        if !search_enabled {
-            return column.push(list_with_scrollbar);
-        }
-
-        column.push(list_with_scrollbar).push(filter_dock)
-    }
-}
-
-fn file_tree_label(
-    label: &str,
-    selected: bool,
-    hovered: bool,
-    is_dir: bool,
-) -> Element<'_, Message> {
-    let selected_copy = selected;
-    let hovered_copy = hovered;
-    container(
-        text(label)
-            .size(13)
-            .wrapping(Wrapping::None)
-            .width(Length::Fill)
-            .style(move |theme: &theme::Theme| iced::widget::text::Style {
-                color: Some(if selected_copy || hovered_copy {
-                    theme.extended_palette().background.base.text
-                } else {
-                    ui_muted_text(theme)
-                }),
-            })
-            .font(iced::Font {
-                weight: if is_dir {
-                    iced::font::Weight::Medium
-                } else {
-                    iced::font::Weight::Normal
-                },
-                ..iced::Font::default()
-            }),
-    )
-    .width(Length::Fill)
-    .clip(true)
-    .into()
-}
-
-impl FileButton {
-    pub fn with_kind(path: PathBuf, base_path: &Path, is_dir: bool) -> Self {
-        let label = path
-            .strip_prefix(base_path)
-            .ok()
-            .and_then(crate::path_util::file_name_lossy)
-            .unwrap_or_else(|| crate::path_util::file_label(&path));
-        FileButton {
-            file_path: path,
-            label,
-            is_dir,
-        }
-    }
-
-    pub fn view(
-        &self,
-        index: usize,
-        selected: bool,
-        hovered: bool,
-        search_enabled: bool,
-        is_favorite: bool,
-        modifiers: Modifiers,
-    ) -> Element<'_, Message> {
-        let multi_select = modifiers.shift() || modifiers.control() || modifiers.logo();
-        let select_message = file_list_select_message(index, modifiers);
-        let selected_copy = selected;
-        let hovered_copy = hovered;
-        let label = file_tree_label(&self.label, selected, hovered, self.is_dir);
-
-        let label = if self.is_dir {
-            row![
-                resource_svg("folder-solid.svg")
-                    .width(Length::Fixed(16.0))
-                    .height(Length::Fixed(16.0))
-                    .style(move |theme, _status| iced::widget::svg::Style {
-                        color: Some(tree_icon_color(theme, selected_copy || hovered_copy)),
-                    }),
-                label,
-            ]
-            .spacing(10)
-            .align_y(Alignment::Center)
-            .width(Length::Fill)
-        } else if is_audio(&self.file_path) {
-            row![
-                favorite_star_button(self.file_path.clone(), is_favorite),
-                row![
-                    resource_svg("music-solid.svg")
-                        .width(Length::Fixed(12.0))
-                        .height(Length::Fixed(12.0))
-                        .style(move |theme, _status| iced::widget::svg::Style {
-                            color: Some(tree_icon_color(theme, selected_copy || hovered_copy)),
-                        }),
-                    label,
-                ]
-                .spacing(8)
-                .align_y(Alignment::Center),
-            ]
-            .spacing(1)
-            .align_y(Alignment::Center)
-            .width(Length::Fill)
-        } else {
-            row![label].align_y(Alignment::Center).width(Length::Fill)
-        };
-
-        let row_status = if hovered {
-            ButtonStatus::Hovered
-        } else {
-            ButtonStatus::Active
-        };
-
-        if self.is_dir {
-            let path = self.file_path.clone();
-            let button = Button::new(label)
-                .on_press(select_message)
-                .width(Length::Fill)
-                .padding([7, 10])
-                .style(move |theme, button_status| {
-                    file_tree_button_style(theme, button_status, selected)
-                });
-
-            return file_row_menu(button, path, false, search_enabled, None, selected);
-        }
-
-        let row_content = container(label)
-            .width(Length::Fill)
-            .padding([7, 10])
-            .style(move |theme| file_tree_row_container_style(theme, row_status, selected));
-
-        let path = self.file_path.clone();
-        let favorite_label = if is_favorite {
-            "Remove from favorites"
-        } else {
-            "Add to favorites"
-        }
-        .to_string();
-
-        if !is_audio(&self.file_path) {
-            let button = Button::new(row_content)
-                .on_press(select_message)
-                .width(Length::Fill)
-                .padding(0)
-                .style(move |theme, button_status| {
-                    file_tree_button_style(theme, button_status, selected)
-                });
-
-            return file_row_menu(button, path, false, search_enabled, None, selected);
-        }
-
-        if multi_select {
-            let button = Button::new(row_content)
-                .on_press(select_message)
-                .width(Length::Fill)
-                .padding(0)
-                .style(move |theme, button_status| {
-                    file_tree_button_style(theme, button_status, selected)
-                });
-
-            return file_row_menu(
-                button,
-                path,
-                true,
-                search_enabled,
-                Some(favorite_label),
-                selected,
-            );
-        }
-
-        let draggable = mouse_area(row_content)
-            .on_press(Message::FileDragPress {
-                path: self.file_path.to_owned(),
-                from_file_list: true,
-            })
-            .on_enter(Message::FileRowHover(index))
-            .on_exit(Message::FileRowLeave)
-            .interaction(iced::mouse::Interaction::Grab);
-
-        file_row_menu(
-            draggable,
-            path,
-            true,
-            search_enabled,
-            Some(favorite_label),
-            selected,
-        )
+    #[test]
+    fn short_lists_do_not_scroll() {
+        let metrics = ScrollMetrics::new(3, 0.0, 600.0);
+        assert_eq!(metrics.max_scroll, 0.0);
+        assert_eq!(metrics.offset_for_track_y(300.0, 0.0), 0.0);
     }
 }

@@ -7,7 +7,7 @@ use std::time::Duration;
 use rodio::source::UniformSourceIterator;
 use rodio::{Decoder, Source};
 
-use super::arc_samples::PlaybackPosition;
+use super::position::PlaybackPosition;
 
 fn open_decoder(path: &Path) -> Result<Decoder<BufReader<File>>, String> {
     let file = File::open(path)

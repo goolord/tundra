@@ -32,7 +32,7 @@ fn normalize_launch_path(path: PathBuf) -> Option<PathBuf> {
 pub fn primary_open_target(paths: &[PathBuf]) -> Option<PathBuf> {
     paths
         .iter()
-        .find(|path| crate::ui::is_audio(path))
+        .find(|path| crate::metadata::is_audio(path))
         .or_else(|| paths.iter().find(|path| path.is_dir()))
         .cloned()
         .or_else(|| paths.first().cloned())
