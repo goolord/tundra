@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Tundra</title>
+  <meta name="description" content="A fast sample browser and auto-tagger for your audio library.">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+  <style>
+    /* Pico widens .container up to 1450px on large screens; cap it for a narrower page. */
+    .container { max-width: 960px; }
+    .hero { text-align: center; padding-block: 3rem 1rem; }
+    .hero h1 { font-size: 3rem; margin-bottom: 0.25rem; }
+    .hero p { font-size: 1.25rem; }
+    #download { font-size: 1.15rem; padding-inline: 2rem; }
+    #release-info { display: block; margin-top: 0.75rem; }
+    video { display: block; width: 100%; border-radius: var(--pico-border-radius); }
+  </style>
+</head>
+<body>
+  <header class="container">
+    <nav>
+      <ul><li><strong>Tundra</strong></li></ul>
+      <ul><li><a href="https://github.com/goolord/tundra">GitHub</a></li></ul>
+    </nav>
+  </header>
+
+  <main class="container">
+    <section class="hero">
+      <h1>Tundra</h1>
+      <p>A fast sample browser for your audio library.</p>
+      <a id="download" role="button" href="https://github.com/goolord/tundra/releases">Download</a>
+      <small id="release-info"></small>
+    </section>
+
+    <section>
+      <video controls muted playsinline preload="metadata"
+             src="https://github.com/user-attachments/assets/eee147c7-0ccd-4125-9657-f97054487d6c#t=0.1">
+        <a href="https://github.com/user-attachments/assets/eee147c7-0ccd-4125-9657-f97054487d6c">Watch the demo</a>
+      </video>
+    </section>
+
+    <section>
+      <h2>Features</h2>
+      <div class="grid">
+        <article>
+          <header><strong>Browse</strong></header>
+          Browse folders of FLAC, WAV, MP3, OGG, and AIFF samples, with fuzzy file search and directory caching.
+        </article>
+        <article>
+          <header><strong>Search by tag</strong></header>
+          Filter with <code>title:value</code>, <code>artist:value</code>, and more, with autocomplete.
+        </article>
+        <article>
+          <header><strong>Auto-tag</strong></header>
+          Tag untagged files by instrument type, or scan a whole folder, review suggestions, and apply in batch.
+        </article>
+      </div>
+      <div class="grid">
+        <article>
+          <header><strong>Preview</strong></header>
+          See waveforms and play samples back; zoom in to individual sample points.
+        </article>
+        <article>
+          <header><strong>Safe writes</strong></header>
+          Tags are written to a copy that is verified and swapped in atomically, so your audio is never left half-written.
+        </article>
+        <article>
+          <header><strong>Cross-platform</strong></header>
+          Builds for Windows, macOS (Apple silicon and Intel), and Linux.
+        </article>
+      </div>
+    </section>
+
+    <section id="all-downloads" hidden>
+      <h2>All downloads</h2>
+      <ul id="asset-list"></ul>
+    </section>
+  </main>
+
+  <footer class="container">
+    <small>
+      <a href="https://github.com/goolord/tundra">Source</a> ·
+      <a href="https://github.com/goolord/tundra/releases">Releases</a> ·
+      Icon from <a href="https://fontawesome.com/license">Font Awesome</a>
+    </small>
+  </footer>
+
+  <script>
+    (async () => {
+      const button = document.getElementById("download");
+      const info = document.getElementById("release-info");
+      try {
+        // /releases/latest skips pre-releases, so take the newest published release instead.
+        const res = await fetch("https://api.github.com/repos/goolord/tundra/releases?per_page=1");
+        if (!res.ok) return;
+        const [release] = await res.json();
+        if (!release) return;
+
+        const ua = navigator.userAgent;
+        const target =
+          /Windows/.test(ua) ? "pc-windows" :
+          /Mac/.test(ua) ? "aarch64-apple-darwin" :
+          /Linux/.test(ua) && !/Android/.test(ua) ? "linux" : null;
+        const label = { "pc-windows": "Windows", "aarch64-apple-darwin": "macOS", "linux": "Linux" }[target];
+        const asset = target && release.assets.find(a => a.name.includes(target));
+
+        if (asset) {
+          button.href = asset.browser_download_url;
+          button.textContent = `Download for ${label}`;
+        } else {
+          button.href = release.html_url;
+        }
+        info.textContent = `${release.tag_name}${release.prerelease ? " (pre-release)" : ""}`;
+
+        const list = document.getElementById("asset-list");
+        for (const a of release.assets) {
+          const li = document.createElement("li");
+          const link = document.createElement("a");
+          link.href = a.browser_download_url;
+          link.textContent = a.name;
+          li.append(link, ` (${(a.size / 1048576).toFixed(1)} MB)`);
+          list.append(li);
+        }
+        if (release.assets.length) document.getElementById("all-downloads").hidden = false;
+      } catch {
+        // Leave the button pointing at the releases page.
+      }
+    })();
+  </script>
+</body>
+</html>
