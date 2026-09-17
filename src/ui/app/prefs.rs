@@ -1,6 +1,6 @@
 use crate::path_util::{cache_file, read_bincode, write_bincode};
-use crate::types::player::clamp_volume;
-use crate::types::Message;
+use crate::ui::player::clamp_volume;
+use crate::ui::Message;
 use iced::{Task, window};
 
 pub(crate) const DEFAULT_SIDEBAR_WIDTH: f32 = 280.0;

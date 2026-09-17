@@ -3,7 +3,7 @@ use lofty::ogg::tag::VorbisComments;
 use lofty::tag::{Accessor, ItemKey, ItemValue, Tag};
 use std::path::Path;
 
-use crate::types::is_audio;
+use crate::ui::is_audio;
 
 use super::fields::TagFields;
 use super::hints::artist_hint_from_path;

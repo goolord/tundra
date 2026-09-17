@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::is_audio;
+use crate::ui::is_audio;
 
 use super::fields::TagFields;
 use super::read::{file_mtime_secs, read_tag_fields};

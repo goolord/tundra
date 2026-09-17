@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::types::is_audio;
+use crate::ui::is_audio;
 
 use super::fields::TagFields;
 use super::hints::artist_hint_from_path;

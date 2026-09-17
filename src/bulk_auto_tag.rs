@@ -3,7 +3,7 @@ use crate::metadata::{
     auto_tag_field_status, auto_tag_field_status_from_fields, index_paths, instrument_tag,
     write_auto_tags, AutoTagFieldStatus, CachedMetadata,
 };
-use crate::types::is_audio;
+use crate::ui::is_audio;
 use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};

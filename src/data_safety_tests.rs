@@ -139,13 +139,13 @@ fn dir_cache_persist_recovers_from_crash_aside() {
     let mut map = HashMap::new();
     map.insert(root.clone(), vec![root.join("kick.wav")]);
 
-    crate::types::DirCache::persist_map_to(&path, &map);
+    crate::ui::DirCache::persist_map_to(&path, &map);
     let bytes = fs::read(&path).expect("persisted");
 
     crate::test_fixtures::restore_dest_from_crash_aside(dir.path(), &path, &bytes);
     assert_eq!(fs::read(&path).expect("restored"), bytes);
 
-    crate::types::DirCache::persist_map_to(&path, &map);
+    crate::ui::DirCache::persist_map_to(&path, &map);
     assert_eq!(dir.sidecar_count(), 0);
 }
 
@@ -166,13 +166,13 @@ fn metadata_cache_persist_recovers_from_crash_aside() {
         },
     );
 
-    crate::types::MetadataCache::persist_map_to(&path, &map);
+    crate::ui::MetadataCache::persist_map_to(&path, &map);
     let bytes = fs::read(&path).expect("persisted");
 
     crate::test_fixtures::restore_dest_from_crash_aside(dir.path(), &path, &bytes);
     assert_eq!(fs::read(&path).expect("restored"), bytes);
 
-    crate::types::MetadataCache::persist_map_to(&path, &map);
+    crate::ui::MetadataCache::persist_map_to(&path, &map);
     assert_eq!(dir.sidecar_count(), 0);
 }
 

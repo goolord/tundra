@@ -11,8 +11,8 @@ use iced::keyboard::Modifiers;
 use iced::Point;
 use walkdir::WalkDir;
 
-use crate::types::file_selector::FileList;
-use crate::types::{is_audio, AUDIO_EXTENSIONS};
+use crate::ui::file_selector::FileList;
+use crate::ui::{is_audio, AUDIO_EXTENSIONS};
 
 pub(crate) enum FileDragKind {
     File(PathBuf),

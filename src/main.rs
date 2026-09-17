@@ -1,4 +1,4 @@
-//! Binary entry. UI lives in `types/`; other modules are shared services.
+//! Binary entry. UI lives in `ui/`; other modules are shared services.
 
 #![cfg_attr(
     all(windows, not(debug_assertions)),
@@ -13,7 +13,7 @@ mod metadata;
 mod path_util;
 mod source;
 mod tag_store;
-mod types;
+mod ui;
 mod waveform_peaks;
 
 #[cfg(test)]
@@ -21,7 +21,7 @@ mod data_safety_tests;
 #[cfg(test)]
 mod test_fixtures;
 
-use types::*;
+use ui::*;
 
 pub fn main() {
     app()
