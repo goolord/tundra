@@ -144,9 +144,7 @@ pub struct TagFields {
 impl TagFields {
     pub fn field_value(&self, field: TagField) -> &str {
         match field {
-            TagField::Instrument if !self.explicit_instrument.is_empty() => {
-                &self.explicit_instrument
-            }
+            TagField::Instrument if !self.explicit_instrument.is_empty() => &self.explicit_instrument,
             TagField::Title => &self.title,
             TagField::Artist => &self.artist,
             TagField::Album => &self.album,
@@ -236,11 +234,9 @@ pub fn tag_field_best_match(input: &str) -> Option<TagField> {
     TagField::ALL
         .iter()
         .filter(|field| field.matches_query(&needle))
-        .max_by(|a, b| {
-            match a.match_score(&needle).cmp(&b.match_score(&needle)) {
-                std::cmp::Ordering::Equal => b.label().cmp(a.label()),
-                other => other,
-            }
+        .max_by(|a, b| match a.match_score(&needle).cmp(&b.match_score(&needle)) {
+            std::cmp::Ordering::Equal => b.label().cmp(a.label()),
+            other => other,
         })
         .copied()
 }
@@ -301,9 +297,7 @@ impl ManualTagEdits {
             TagField::Key => &mut self.key,
             TagField::Genre => &mut self.genre,
             TagField::Comment => &mut self.comment,
-            TagField::Album | TagField::AlbumArtist | TagField::Composer | TagField::Label => {
-                return
-            }
+            TagField::Album | TagField::AlbumArtist | TagField::Composer | TagField::Label => return,
         };
         *slot = value;
     }

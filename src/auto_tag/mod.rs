@@ -117,7 +117,9 @@ pub fn confidence_percent(confidence: Option<f64>) -> String {
 }
 
 fn format_confidence(confidence: Option<f64>) -> String {
-    confidence.map(|_| format!(" ({})", confidence_percent(confidence))).unwrap_or_default()
+    confidence
+        .map(|_| format!(" ({})", confidence_percent(confidence)))
+        .unwrap_or_default()
 }
 
 /// Replaces the classifier's label with an instrument the file's name or

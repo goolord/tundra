@@ -11,10 +11,10 @@ use crate::metadata::{CachedMetadata, SavedTo, TagField};
 use crate::playback::{PlayerEvent, PlayerWorker};
 use futures::channel::mpsc::UnboundedReceiver;
 use futures::future::Aborted;
+use iced::Point;
 use iced::keyboard::{Key, Modifiers};
 use iced::widget::scrollable::Viewport;
 use iced::window::Direction;
-use iced::Point;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -31,9 +31,17 @@ pub enum Message {
     FilesHoverLeft,
 
     // File list and navigation (`app/library.rs`).
-    FileListSelect { index: usize, shift: bool, control: bool },
+    FileListSelect {
+        index: usize,
+        shift: bool,
+        control: bool,
+    },
     FileListScrolled(Viewport),
-    FileListScrollbarPress { track_y: f32, track_top: f32, track_height: f32 },
+    FileListScrollbarPress {
+        track_y: f32,
+        track_top: f32,
+        track_height: f32,
+    },
     FileListHoverChanged(bool),
     FileRowHover(usize),
     FileRowLeave,
@@ -52,7 +60,10 @@ pub enum Message {
     Filter(FilterMsg),
 
     // Dragging files out to other apps (`app/input.rs`).
-    FileDragPress { path: PathBuf, from_file_list: bool },
+    FileDragPress {
+        path: PathBuf,
+        from_file_list: bool,
+    },
     FileDragTick,
     #[cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
     FileDragCompleted(Result<(), String>),
@@ -106,7 +117,10 @@ pub enum FilterMsg {
     ToggleCaseSensitive,
     ToggleShowDirectories,
     ToggleFavoritesOnly,
-    SearchCompleted { generation: u64, result: Result<SearchOutput, Aborted> },
+    SearchCompleted {
+        generation: u64,
+        result: Result<SearchOutput, Aborted>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -182,10 +196,24 @@ pub enum BulkAutoTagMsg {
     DirectoryPicked(Option<PathBuf>),
     RunScan,
     ProgressTick,
-    ScanCompleted { generation: u64, result: Result<BulkScanSummary, ScanError> },
-    SetFileAccepted { key: BulkFileKey, accepted: bool },
-    SelectFile { key: BulkFileKey, shift: bool, control: bool },
-    SelectDirectory { dir_idx: usize, shift: bool, control: bool },
+    ScanCompleted {
+        generation: u64,
+        result: Result<BulkScanSummary, ScanError>,
+    },
+    SetFileAccepted {
+        key: BulkFileKey,
+        accepted: bool,
+    },
+    SelectFile {
+        key: BulkFileKey,
+        shift: bool,
+        control: bool,
+    },
+    SelectDirectory {
+        dir_idx: usize,
+        shift: bool,
+        control: bool,
+    },
     SelectAll,
     ClearSelection,
     CheckSelected,
@@ -196,7 +224,10 @@ pub enum BulkAutoTagMsg {
     ExpandAllDirectories,
     CollapseAllDirectories,
     Apply,
-    ApplyCompleted { generation: u64, summary: BulkApplySummary },
+    ApplyCompleted {
+        generation: u64,
+        summary: BulkApplySummary,
+    },
 }
 
 macro_rules! nested {

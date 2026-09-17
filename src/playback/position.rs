@@ -1,7 +1,7 @@
 //! The playhead, shared lock-free between the audio thread and the UI.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub struct PlaybackPosition {
     frame: AtomicU64,
@@ -29,8 +29,7 @@ impl PlaybackPosition {
     }
 
     pub fn set_total_frames(&self, total_frames: u64) {
-        self.total_frames
-            .store(total_frames, Ordering::Release);
+        self.total_frames.store(total_frames, Ordering::Release);
         let frame = self.frame.load(Ordering::Acquire);
         if total_frames > 0 && frame > total_frames {
             self.frame.store(total_frames, Ordering::Release);
@@ -39,11 +38,7 @@ impl PlaybackPosition {
 
     pub fn set_frame(&self, frame: u64) {
         let total = self.total_frames.load(Ordering::Acquire);
-        let capped = if total == 0 {
-            frame
-        } else {
-            frame.min(total)
-        };
+        let capped = if total == 0 { frame } else { frame.min(total) };
         self.frame.store(capped, Ordering::Release);
     }
 

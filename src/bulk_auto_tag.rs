@@ -4,14 +4,14 @@
 
 use crate::auto_tag::{self, ClassificationResult, ClassifyError};
 use crate::metadata::{
-    auto_tag_field_status, auto_tag_field_status_from_fields, index_paths, instrument_tag, is_audio,
-    write_auto_tags, AutoTagFieldStatus, CachedMetadata,
+    AutoTagFieldStatus, CachedMetadata, auto_tag_field_status, auto_tag_field_status_from_fields, index_paths,
+    instrument_tag, is_audio, write_auto_tags,
 };
 use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use walkdir::WalkDir;
 
 const SCAN_YIELD_INTERVAL: usize = 64;
@@ -53,9 +53,17 @@ impl BulkProgressSnapshot {
     pub fn fraction(&self) -> f32 {
         if self.phase == BulkPhase::Scanning {
             // Unknown total during the walk: creep toward 90%.
-            return if self.done == 0 { 0.0 } else { (1.0 - 1.0 / (self.done as f32 * 0.08 + 1.0)).min(0.90) };
+            return if self.done == 0 {
+                0.0
+            } else {
+                (1.0 - 1.0 / (self.done as f32 * 0.08 + 1.0)).min(0.90)
+            };
         }
-        if self.total == 0 { 0.0 } else { (self.done as f32 / self.total as f32).clamp(0.0, 1.0) }
+        if self.total == 0 {
+            0.0
+        } else {
+            (self.done as f32 / self.total as f32).clamp(0.0, 1.0)
+        }
     }
 
     pub fn detail(&self) -> String {
@@ -141,7 +149,10 @@ impl BulkDirGroup {
     }
 
     pub fn accepted_count(&self) -> usize {
-        self.files.iter().filter(|file| file.accepted && file.is_actionable()).count()
+        self.files
+            .iter()
+            .filter(|file| file.accepted && file.is_actionable())
+            .count()
     }
 }
 
@@ -184,17 +195,23 @@ fn auto_tag_status(path: &Path, metadata: &HashMap<PathBuf, CachedMetadata>) -> 
         .or_else(|| auto_tag_field_status(path))
 }
 
-fn existing_instrument_label(path: &Path, metadata: &HashMap<PathBuf, CachedMetadata>) -> Result<String, ClassifyError> {
+fn existing_instrument_label(
+    path: &Path,
+    metadata: &HashMap<PathBuf, CachedMetadata>,
+) -> Result<String, ClassifyError> {
     let cached = metadata
         .get(path)
         .map(|cached| cached.fields.explicit_instrument.trim())
         .filter(|label| !label.is_empty());
-    cached.map(str::to_string).or_else(|| instrument_tag(path)).ok_or_else(|| {
-        ClassifyError::new(
-            "Could not read existing instrument tag.",
-            "Metadata-only auto tag requires an instrument label in the file.",
-        )
-    })
+    cached
+        .map(str::to_string)
+        .or_else(|| instrument_tag(path))
+        .ok_or_else(|| {
+            ClassifyError::new(
+                "Could not read existing instrument tag.",
+                "Metadata-only auto tag requires an instrument label in the file.",
+            )
+        })
 }
 
 /// Files that need classifying, files whose instrument is set but that miss
@@ -221,7 +238,11 @@ fn enrich_metadata(
     paths: &[PathBuf],
     snapshot: Arc<HashMap<PathBuf, CachedMetadata>>,
 ) -> Arc<HashMap<PathBuf, CachedMetadata>> {
-    let missing: Vec<PathBuf> = paths.iter().filter(|path| !snapshot.contains_key(*path)).cloned().collect();
+    let missing: Vec<PathBuf> = paths
+        .iter()
+        .filter(|path| !snapshot.contains_key(*path))
+        .cloned()
+        .collect();
     if missing.is_empty() {
         return snapshot;
     }
@@ -231,7 +252,11 @@ fn enrich_metadata(
 }
 
 fn check_cancel(cancel: &AtomicBool) -> Result<(), ScanError> {
-    if cancel.load(Ordering::Relaxed) { Err(ScanError::Cancelled) } else { Ok(()) }
+    if cancel.load(Ordering::Relaxed) {
+        Err(ScanError::Cancelled)
+    } else {
+        Ok(())
+    }
 }
 
 fn is_link_or_reparse(path: &Path) -> bool {
@@ -251,7 +276,11 @@ fn is_link_or_reparse(path: &Path) -> bool {
 
 /// Every audio file under `root`, sorted. Never follows links or junctions,
 /// so a bulk write cannot escape the folder the user picked.
-fn collect_audio_paths(root: &Path, progress: &BulkScanProgress, cancel: &AtomicBool) -> Result<Vec<PathBuf>, ScanError> {
+fn collect_audio_paths(
+    root: &Path,
+    progress: &BulkScanProgress,
+    cancel: &AtomicBool,
+) -> Result<Vec<PathBuf>, ScanError> {
     let mut paths = Vec::new();
     let mut sweep = crate::safe_write::SidecarSweep::default();
     let walk = WalkDir::new(root)
@@ -282,7 +311,11 @@ fn collect_audio_paths(root: &Path, progress: &BulkScanProgress, cancel: &Atomic
 
 type Classified = Vec<(PathBuf, Result<ClassificationResult, ClassifyError>)>;
 
-fn classify_files(paths: Vec<PathBuf>, progress: &BulkScanProgress, cancel: &AtomicBool) -> Result<Classified, ScanError> {
+fn classify_files(
+    paths: Vec<PathBuf>,
+    progress: &BulkScanProgress,
+    cancel: &AtomicBool,
+) -> Result<Classified, ScanError> {
     progress.begin(BulkPhase::Classifying, paths.len());
     // Tier 1 runs in Rust on every core; tier-2 requests queue for the few
     // Python workers inside the classifier pool.
@@ -399,7 +432,11 @@ pub fn collect_accepted(groups: &[BulkDirGroup]) -> Vec<BulkApplyItem> {
 }
 
 /// Writes each item's tags, stopping early once `cancel` is set.
-pub fn apply_items(items: &[BulkApplyItem], progress: Option<&BulkScanProgress>, cancel: &AtomicBool) -> BulkApplySummary {
+pub fn apply_items(
+    items: &[BulkApplyItem],
+    progress: Option<&BulkScanProgress>,
+    cancel: &AtomicBool,
+) -> BulkApplySummary {
     let mut summary = BulkApplySummary::default();
     if let Some(progress) = progress {
         progress.begin(BulkPhase::Applying, items.len());
@@ -430,15 +467,18 @@ pub fn apply_items(items: &[BulkApplyItem], progress: Option<&BulkScanProgress>,
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metadata::{search, MetadataLookup, SearchQuery, TagField, TagFilter};
-    use crate::test_fixtures::{copy_asset, write_riff_info, ScratchDir, ASSET_FORMATS};
+    use crate::metadata::{MetadataLookup, SearchQuery, TagField, TagFilter, search};
+    use crate::test_fixtures::{ASSET_FORMATS, ScratchDir, copy_asset, write_riff_info};
 
     /// A `Kicks` folder holding one untagged file per format.
     fn kick_folder(label: &str) -> (ScratchDir, Vec<PathBuf>) {
         let root = ScratchDir::new(label);
         let kicks = root.path().join("Kicks");
         std::fs::create_dir_all(&kicks).expect("create scratch dirs");
-        let paths = ASSET_FORMATS.iter().map(|ext| copy_asset(&kicks, "sample", ext)).collect();
+        let paths = ASSET_FORMATS
+            .iter()
+            .map(|ext| copy_asset(&kicks, "sample", ext))
+            .collect();
         (root, paths)
     }
 
@@ -465,10 +505,18 @@ mod tests {
         let metadata = HashMap::new();
 
         let (to_classify, metadata_only, skipped_complete) = partition_auto_tag_candidates(&paths, &metadata);
-        assert_eq!(to_classify.len(), ASSET_FORMATS.len(), "every untagged file should be queued for classification");
+        assert_eq!(
+            to_classify.len(),
+            ASSET_FORMATS.len(),
+            "every untagged file should be queued for classification"
+        );
         assert!(metadata_only.is_empty(), "nothing is already tagged yet");
         assert_eq!(skipped_complete, 0);
-        assert_eq!(instrument_hits(&paths, "Kick"), 0, "nothing should match before tagging");
+        assert_eq!(
+            instrument_hits(&paths, "Kick"),
+            0,
+            "nothing should match before tagging"
+        );
 
         let items: Vec<_> = paths
             .iter()
@@ -485,11 +533,18 @@ mod tests {
         assert_eq!(summary.unchanged, 0);
         assert!(!summary.cancelled);
         assert_eq!(progress.snapshot().detail(), format!("{0} / {0}", ASSET_FORMATS.len()));
-        assert_eq!(instrument_hits(&paths, "Kick"), ASSET_FORMATS.len(), "instrument:Kick must return every tagged file");
+        assert_eq!(
+            instrument_hits(&paths, "Kick"),
+            ASSET_FORMATS.len(),
+            "instrument:Kick must return every tagged file"
+        );
 
         // Same tag version: bulk scan should skip already-tagged files.
         let (to_classify, metadata_only, skipped_complete) = partition_auto_tag_candidates(&paths, &metadata);
-        assert!(to_classify.is_empty(), "current-version tags should not be re-classified");
+        assert!(
+            to_classify.is_empty(),
+            "current-version tags should not be re-classified"
+        );
         assert!(metadata_only.is_empty());
         assert_eq!(skipped_complete, ASSET_FORMATS.len());
         assert_eq!(apply_items(&items, None, &AtomicBool::new(false)).written, 0);
@@ -528,7 +583,10 @@ mod tests {
                 (root.join("b/broken.wav"), Err(ClassifyError::new("Nope", ""))),
             ],
         );
-        assert_eq!((summary.groups.len(), summary.failed, summary.skipped_complete), (2, 1, 3));
+        assert_eq!(
+            (summary.groups.len(), summary.failed, summary.skipped_complete),
+            (2, 1, 3)
+        );
         let accepted: Vec<bool> = summary.groups[0].files.iter().map(|file| file.accepted).collect();
         assert_eq!(accepted, [true, false]);
         assert_eq!(summary.groups[0].actionable_count(), 2);
@@ -539,13 +597,20 @@ mod tests {
     #[test]
     fn legacy_tundra_comment_is_queued_for_reclassify() {
         let (_root, paths) = kick_folder("bulk-legacy");
-        let audio = paths.iter().find(|path| path.extension().is_some_and(|ext| ext == "wav")).cloned().expect("wav fixture");
+        let audio = paths
+            .iter()
+            .find(|path| path.extension().is_some_and(|ext| ext == "wav"))
+            .cloned()
+            .expect("wav fixture");
         write_riff_info(&audio, &[("IKEY", "Snare"), ("ICMT", "Tundra")]);
 
         let (to_classify, metadata_only, skipped_complete) =
             partition_auto_tag_candidates(std::slice::from_ref(&audio), &HashMap::new());
         assert_eq!(to_classify, vec![audio.clone()]);
-        assert!(metadata_only.is_empty(), "legacy Tundra v0 must reclassify, not stamp v1 over the old instrument");
+        assert!(
+            metadata_only.is_empty(),
+            "legacy Tundra v0 must reclassify, not stamp v1 over the old instrument"
+        );
         assert_eq!(skipped_complete, 0);
     }
 }

@@ -2,8 +2,8 @@
 //! how it reads and saves them.
 
 use crate::safe_write::{sidecar, write_atomic};
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -66,7 +66,10 @@ pub fn load_user_data<T: Default + DeserializeOwned>(path: &Path, label: &str) -
         Ok(bytes) => bytes,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return (T::default(), true),
         Err(err) => {
-            eprintln!("Failed to read {label} ({}): {err}; changes will not be saved this session", path.display());
+            eprintln!(
+                "Failed to read {label} ({}): {err}; changes will not be saved this session",
+                path.display()
+            );
             return (T::default(), false);
         }
     };
@@ -81,7 +84,11 @@ pub fn load_user_data<T: Default + DeserializeOwned>(path: &Path, label: &str) -
     let backup = sidecar(path, &format!(".unreadable-{stamp}"));
     match std::fs::rename(path, &backup) {
         Ok(()) => {
-            eprintln!("Failed to load {label} ({}): {err}. Kept the file as {}", path.display(), backup.display());
+            eprintln!(
+                "Failed to load {label} ({}): {err}. Kept the file as {}",
+                path.display(),
+                backup.display()
+            );
             (T::default(), true)
         }
         Err(move_err) => {

@@ -3,9 +3,9 @@
 use crate::app_data::{cache_file, read_bincode, write_bincode};
 use crate::playback::clamp_volume;
 use crate::ui::message::Message;
-use iced::{window, Task};
-use serde::de::DeserializeOwned;
+use iced::{Task, window};
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 const DEFAULT_SIDEBAR_WIDTH: f32 = 280.0;
 pub const MIN_SIDEBAR_WIDTH: f32 = 160.0;
@@ -24,15 +24,23 @@ fn save<T: Serialize>(name: &str, value: &T, label: &str) {
 pub fn load_sidebar_width() -> f32 {
     load::<f32>("sidebar_width.bin")
         .filter(|width| width.is_finite())
-        .map_or(DEFAULT_SIDEBAR_WIDTH, |width| width.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH))
+        .map_or(DEFAULT_SIDEBAR_WIDTH, |width| {
+            width.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH)
+        })
 }
 
 pub fn persist_sidebar_width(width: f32) {
-    save("sidebar_width.bin", &width.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH), "sidebar width");
+    save(
+        "sidebar_width.bin",
+        &width.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH),
+        "sidebar width",
+    );
 }
 
 pub fn load_volume() -> f32 {
-    load::<f32>("volume.bin").filter(|volume| volume.is_finite()).map_or(1.0, clamp_volume)
+    load::<f32>("volume.bin")
+        .filter(|volume| volume.is_finite())
+        .map_or(1.0, clamp_volume)
 }
 
 pub fn persist_volume(volume: f32) {
@@ -56,7 +64,11 @@ pub fn persist_always_on_top(always_on_top: bool) {
 }
 
 pub fn window_level(always_on_top: bool) -> window::Level {
-    if always_on_top { window::Level::AlwaysOnTop } else { window::Level::Normal }
+    if always_on_top {
+        window::Level::AlwaysOnTop
+    } else {
+        window::Level::Normal
+    }
 }
 
 /// Run `task` against the app window, or do nothing if there is none yet.

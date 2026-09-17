@@ -163,7 +163,9 @@ impl WaveForm {
     }
 
     fn is_playing(&self) -> bool {
-        self.is_playing.as_ref().is_some_and(|playing| playing.load(Ordering::Relaxed))
+        self.is_playing
+            .as_ref()
+            .is_some_and(|playing| playing.load(Ordering::Relaxed))
     }
 
     /// Draws the playhead at `progress` instead of the playback position while scrubbing.
@@ -260,7 +262,13 @@ impl WaveForm {
     }
 
     /// Scroll-wheel zoom, or pan with Shift. Returns the new view if it changed.
-    fn wheel(&self, state: &mut WaveFormState, delta: mouse::ScrollDelta, bounds: Rectangle, cursor: Cursor) -> Option<WaveFormView> {
+    fn wheel(
+        &self,
+        state: &mut WaveFormState,
+        delta: mouse::ScrollDelta,
+        bounds: Rectangle,
+        cursor: Cursor,
+    ) -> Option<WaveFormView> {
         let mut view = self.view;
         if self.modifiers.shift() {
             let (x, y) = view::scroll_lines(delta);
@@ -446,9 +454,9 @@ impl Program<Message> for WaveForm {
                 state.last_pan_view = Some(view);
                 Some(Action::request_redraw().and_capture())
             }
-            mouse::Event::WheelScrolled { delta } if cursor.is_over(bounds) => {
-                self.wheel(state, delta, bounds, cursor).and_then(|view| publish(WaveformMsg::ViewChanged(view)))
-            }
+            mouse::Event::WheelScrolled { delta } if cursor.is_over(bounds) => self
+                .wheel(state, delta, bounds, cursor)
+                .and_then(|view| publish(WaveformMsg::ViewChanged(view))),
             _ => None,
         }
     }
@@ -474,7 +482,11 @@ mod tests {
 
     fn waveform(sample_count: usize, zoom: f32, offset: f64, overscroll: f32) -> WaveForm {
         let mut waveform = WaveForm::new_pending(sample_count, Arc::new(Mutex::new(WaveformPeaks::empty())));
-        waveform.view = WaveFormView { zoom, offset, overscroll };
+        waveform.view = WaveFormView {
+            zoom,
+            offset,
+            overscroll,
+        };
         waveform
     }
 
@@ -557,6 +569,9 @@ mod tests {
         let x = wf
             .playhead_content_x(wf.view, plot.width, progress)
             .expect("playhead x should be computable");
-        assert!(x < 0.0, "playhead for a sample before the window should be left of the plot, got {x}");
+        assert!(
+            x < 0.0,
+            "playhead for a sample before the window should be left of the plot, got {x}"
+        );
     }
 }

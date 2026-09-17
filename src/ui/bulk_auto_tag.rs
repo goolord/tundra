@@ -8,13 +8,11 @@ use super::widgets::{icon, modal_button, modal_shell, selection_stripe, spacer};
 use crate::bulk_auto_tag::{BulkApplySummary, BulkDirGroup, BulkFileProposal, BulkScanProgress, BulkScanSummary};
 use crate::path_util::truncate_path;
 use iced::keyboard::Modifiers;
-use iced::widget::{
-    button, checkbox, column, container, progress_bar, row, scrollable, text, Column, Row, Text,
-};
+use iced::widget::{Column, Row, Text, button, checkbox, column, container, progress_bar, row, scrollable, text};
 use iced::{Alignment, Color, Element, Length, Theme};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const CONF_HIGH: Color = Color::from_rgb8(0x5c, 0xb8, 0x85);
 const CONF_MED: Color = Color::from_rgb8(0xd4, 0xa5, 0x4a);
@@ -176,14 +174,19 @@ impl BulkAutoTagState {
             match keys.iter().position(|key| *key == anchor) {
                 Some(start) => {
                     let end = keys.iter().rposition(|key| key.dir_idx == dir_idx).unwrap_or(start);
-                    self.selection.set(keys[start.min(end)..=start.max(end)].iter().copied(), Some(anchor));
+                    self.selection
+                        .set(keys[start.min(end)..=start.max(end)].iter().copied(), Some(anchor));
                 }
                 None => self.selection.set(dir_keys, Some(first)),
             }
             return;
         }
         // Shift with no anchor adds the folder to the selection.
-        let mut selected: Vec<BulkFileKey> = if shift { self.selection.iter().copied().collect() } else { Vec::new() };
+        let mut selected: Vec<BulkFileKey> = if shift {
+            self.selection.iter().copied().collect()
+        } else {
+            Vec::new()
+        };
         selected.extend(dir_keys);
         self.selection.set(selected, Some(first));
     }
@@ -213,7 +216,9 @@ impl BulkAutoTagState {
     }
 
     pub fn set_all_accepted(&mut self, accepted: bool) {
-        self.files_mut().filter(|file| file.is_actionable()).for_each(|file| file.accepted = accepted);
+        self.files_mut()
+            .filter(|file| file.is_actionable())
+            .for_each(|file| file.accepted = accepted);
     }
 
     pub fn set_all_expanded(&mut self, expanded: bool) {
@@ -334,19 +339,40 @@ fn folder_line(root: &Path, label: String) -> Element<'static, Message> {
 }
 
 /// A rounded, tinted label: counts, suggestions, confidence.
-fn chip(content: impl Into<Element<'static, Message>>, tone: Color, padding: [u16; 2], radius: f32) -> Element<'static, Message> {
-    container(content).padding(padding).style(style::tinted(tone, 0.14, 0.32, radius)).into()
+fn chip(
+    content: impl Into<Element<'static, Message>>,
+    tone: Color,
+    padding: [u16; 2],
+    radius: f32,
+) -> Element<'static, Message> {
+    container(content)
+        .padding(padding)
+        .style(style::tinted(tone, 0.14, 0.32, radius))
+        .into()
 }
 
 fn stat_chip(label: &'static str, value: usize, accent: bool) -> Element<'static, Message> {
-    let value = text(value.to_string()).size(11).font(style::SEMIBOLD).style(move |theme: &Theme| text::Style {
-        color: Some(if accent { ACCENT.scale_alpha(0.95) } else { theme.extended_palette().background.base.text }),
-    });
+    let value = text(value.to_string())
+        .size(11)
+        .font(style::SEMIBOLD)
+        .style(move |theme: &Theme| text::Style {
+            color: Some(if accent {
+                ACCENT.scale_alpha(0.95)
+            } else {
+                theme.extended_palette().background.base.text
+            }),
+        });
     let content = row![muted(label, 10), value].spacing(4).align_y(Alignment::Center);
     if accent {
-        container(content).padding([4, 8]).style(style::tinted(ACCENT, 0.12, 0.28, 10.0)).into()
+        container(content)
+            .padding([4, 8])
+            .style(style::tinted(ACCENT, 0.12, 0.28, 10.0))
+            .into()
     } else {
-        container(content).padding([4, 8]).style(style::panel(0.42, 0.18, 10.0)).into()
+        container(content)
+            .padding([4, 8])
+            .style(style::panel(0.42, 0.18, 10.0))
+            .into()
     }
 }
 
@@ -357,10 +383,17 @@ fn dir_count_badge(accepted: usize, total: usize) -> Element<'static, Message> {
         (false, true) => ACCENT,
         (false, false) => CONF_LOW,
     };
-    let (tone, fill, border) = if all_checked { (CONF_HIGH, 0.12, 0.30) } else { (ACCENT, 0.10, 0.22) };
+    let (tone, fill, border) = if all_checked {
+        (CONF_HIGH, 0.12, 0.30)
+    } else {
+        (ACCENT, 0.10, 0.22)
+    };
     container(
         row![
-            text(accepted.to_string()).size(10).font(style::SEMIBOLD).color(count_color.scale_alpha(0.95)),
+            text(accepted.to_string())
+                .size(10)
+                .font(style::SEMIBOLD)
+                .color(count_color.scale_alpha(0.95)),
             muted(format!("/ {total}"), 10),
         ]
         .spacing(2)
@@ -381,10 +414,19 @@ fn confidence_badge(confidence: Option<f64>) -> Element<'static, Message> {
         .size(10)
         .font(style::MEDIUM)
         .color(tone.scale_alpha(0.95));
-    container(label).padding([2, 7]).style(style::tinted(tone, 0.14, 0.35, 8.0)).into()
+    container(label)
+        .padding([2, 7])
+        .style(style::tinted(tone, 0.14, 0.35, 8.0))
+        .into()
 }
 
-fn list_row_button_style(theme: &Theme, status: button::Status, selected: bool, accepted: bool, zebra: bool) -> button::Style {
+fn list_row_button_style(
+    theme: &Theme,
+    status: button::Status,
+    selected: bool,
+    accepted: bool,
+    zebra: bool,
+) -> button::Style {
     let idle = if selected {
         ACCENT.scale_alpha(0.22)
     } else if accepted {
@@ -423,7 +465,13 @@ fn list_row(cells: Vec<Element<'static, Message>>) -> Element<'static, Message> 
         .into()
 }
 
-fn file_row(state: &BulkAutoTagState, modifiers: Modifiers, key: BulkFileKey, file: &BulkFileProposal, zebra: bool) -> Element<'static, Message> {
+fn file_row(
+    state: &BulkAutoTagState,
+    modifiers: Modifiers,
+    key: BulkFileKey,
+    file: &BulkFileProposal,
+    zebra: bool,
+) -> Element<'static, Message> {
     let name = crate::path_util::file_label(&file.path);
     let indent = || -> Element<'static, Message> { spacer(Length::Fixed(FILE_INDENT), Length::Shrink).into() };
 
@@ -454,13 +502,27 @@ fn file_row(state: &BulkAutoTagState, modifiers: Modifiers, key: BulkFileKey, fi
     let accepted = file.accepted;
     let label = row![
         icon("music-solid.svg", 13.0, move |theme| {
-            if selected || accepted { ACCENT.scale_alpha(0.9) } else { style::muted(theme) }
+            if selected || accepted {
+                ACCENT.scale_alpha(0.9)
+            } else {
+                style::muted(theme)
+            }
         }),
-        text(name).size(12).width(Length::FillPortion(2)).style(move |theme: &Theme| text::Style {
-            color: Some(if selected { theme.extended_palette().background.base.text } else { style::muted(theme) }),
-        }),
+        text(name)
+            .size(12)
+            .width(Length::FillPortion(2))
+            .style(move |theme: &Theme| text::Style {
+                color: Some(if selected {
+                    theme.extended_palette().background.base.text
+                } else {
+                    style::muted(theme)
+                }),
+            }),
         chip(
-            text(file.suggested.clone().unwrap_or_default()).size(11).font(style::SEMIBOLD).color(ACCENT.scale_alpha(0.95)),
+            text(file.suggested.clone().unwrap_or_default())
+                .size(11)
+                .font(style::SEMIBOLD)
+                .color(ACCENT.scale_alpha(0.95)),
             ACCENT,
             [3, 10],
             12.0,
@@ -493,7 +555,13 @@ fn file_row(state: &BulkAutoTagState, modifiers: Modifiers, key: BulkFileKey, fi
     ])
 }
 
-fn directory_group(state: &BulkAutoTagState, modifiers: Modifiers, root: &Path, dir_idx: usize, group: &BulkDirGroup) -> Element<'static, Message> {
+fn directory_group(
+    state: &BulkAutoTagState,
+    modifiers: Modifiers,
+    root: &Path,
+    dir_idx: usize,
+    group: &BulkDirGroup,
+) -> Element<'static, Message> {
     let label = group.path.strip_prefix(root).map_or_else(
         |_| truncate_path(&group.path, 48),
         |relative| match relative.to_string_lossy() {
@@ -522,14 +590,26 @@ fn directory_group(state: &BulkAutoTagState, modifiers: Modifiers, root: &Path, 
             let (idle_text, idle_bg, idle_border) = if expanded {
                 (Color::WHITE, ACCENT.scale_alpha(0.72), ACCENT.scale_alpha(0.55))
             } else {
-                (ACCENT.scale_alpha(0.92), palette.background.weak.color.scale_alpha(0.50), palette.background.strong.color.scale_alpha(0.28))
+                (
+                    ACCENT.scale_alpha(0.92),
+                    palette.background.weak.color.scale_alpha(0.50),
+                    palette.background.strong.color.scale_alpha(0.28),
+                )
             };
             button::Style {
                 text_color: style::by_status(status, idle_text, Color::WHITE, Color::WHITE),
-                border: style::outline(style::by_status(status, idle_border, ACCENT.scale_alpha(0.70), ACCENT), 0.0),
+                border: style::outline(
+                    style::by_status(status, idle_border, ACCENT.scale_alpha(0.70), ACCENT),
+                    0.0,
+                ),
                 ..button::Style::default()
             }
-            .with_background(style::by_status(status, idle_bg, ACCENT.scale_alpha(0.88), ACCENT.scale_alpha(0.95)))
+            .with_background(style::by_status(
+                status,
+                idle_bg,
+                ACCENT.scale_alpha(0.88),
+                ACCENT.scale_alpha(0.95),
+            ))
         });
 
     let select = BulkAutoTagMsg::SelectDirectory {
@@ -540,7 +620,11 @@ fn directory_group(state: &BulkAutoTagState, modifiers: Modifiers, root: &Path, 
     let header_button = button(
         row![
             icon("folder-solid.svg", 14.0, move |theme| {
-                if dir_selected || accepted > 0 { ACCENT.scale_alpha(0.95) } else { style::muted(theme) }
+                if dir_selected || accepted > 0 {
+                    ACCENT.scale_alpha(0.95)
+                } else {
+                    style::muted(theme)
+                }
             }),
             text(label).size(12).font(style::SEMIBOLD).width(Length::Fill),
             dir_count_badge(accepted, count),
@@ -576,14 +660,22 @@ fn directory_group(state: &BulkAutoTagState, modifiers: Modifiers, root: &Path, 
         return header.into();
     }
     let files = group.files.iter().enumerate().map(|(file_idx, file)| {
-        file_row(state, modifiers, BulkFileKey { dir_idx, file_idx }, file, file_idx % 2 == 1)
+        file_row(
+            state,
+            modifiers,
+            BulkFileKey { dir_idx, file_idx },
+            file,
+            file_idx % 2 == 1,
+        )
     });
     column![
         header,
-        container(Column::with_children(files)).width(Length::Fill).style(|theme: &Theme| {
-            container::background(theme.extended_palette().background.base.color.scale_alpha(0.35))
-                .border(style::outline(ACCENT.scale_alpha(0.12), 0.0))
-        }),
+        container(Column::with_children(files))
+            .width(Length::Fill)
+            .style(|theme: &Theme| {
+                container::background(theme.extended_palette().background.base.color.scale_alpha(0.35))
+                    .border(style::outline(ACCENT.scale_alpha(0.12), 0.0))
+            }),
     ]
     .width(Length::Fill)
     .into()
@@ -627,7 +719,10 @@ fn review_body(state: &BulkAutoTagState, modifiers: Modifiers) -> Element<'stati
     let table_header = container(
         row![
             // Lines "File" up with the names, past each row's icon.
-            spacer(Length::Fixed(FILE_INDENT + SELECTION_STRIPE_WIDTH + CHECKBOX_COLUMN_WIDTH + 16.0), Length::Shrink),
+            spacer(
+                Length::Fixed(FILE_INDENT + SELECTION_STRIPE_WIDTH + CHECKBOX_COLUMN_WIDTH + 16.0),
+                Length::Shrink
+            ),
             header_cell("File").width(Length::FillPortion(2)),
             header_cell("Suggested tag").width(Length::FillPortion(1)),
             header_cell("Confidence").width(Length::Fixed(72.0)),
@@ -657,7 +752,13 @@ fn review_body(state: &BulkAutoTagState, modifiers: Modifiers) -> Element<'stati
 
     let mut body = column![
         stats,
-        folder_line(&root, format!("{}  ·  {dir_count} folders · {file_count} files", truncate_path(&root, 64))),
+        folder_line(
+            &root,
+            format!(
+                "{}  ·  {dir_count} folders · {file_count} files",
+                truncate_path(&root, 64)
+            )
+        ),
     ]
     .spacing(10);
     if dir_count > 0 && state.groups.iter().all(|group| !group.expanded) {
@@ -724,12 +825,22 @@ pub fn bulk_auto_tag_view(state: &BulkAutoTagState, modifiers: Modifiers) -> Ele
         row![
             text("Bulk Auto Tag").size(20),
             spacer(Length::Fill, Length::Shrink),
-            muted(if is_review { "Shift/Ctrl+click to multi-select" } else { "" }, 10),
+            muted(
+                if is_review {
+                    "Shift/Ctrl+click to multi-select"
+                } else {
+                    ""
+                },
+                10
+            ),
         ]
         .align_y(Alignment::Center)
         .width(Length::Fill),
-        muted("Pick a folder, analyze audio, then review and apply missing instrument, artist, and comment tags.", 13)
-            .width(Length::Fill),
+        muted(
+            "Pick a folder, analyze audio, then review and apply missing instrument, artist, and comment tags.",
+            13
+        )
+        .width(Length::Fill),
     ]
     .spacing(12);
     if is_review {
@@ -781,17 +892,37 @@ pub fn bulk_auto_tag_view(state: &BulkAutoTagState, modifiers: Modifiers) -> Ele
         .width(Length::Fill)
         .style(style::tinted(ACCENT, 0.10, 0.22, 6.0))
         .into(),
-        BulkAutoTagPhase::Review => container(review_body(state, modifiers)).width(Length::Fill).height(Length::Fill).into(),
+        BulkAutoTagPhase::Review => container(review_body(state, modifiers))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into(),
         BulkAutoTagPhase::Done => done_body(state),
     };
 
     let can_scan = phase == BulkAutoTagPhase::PickDirectory;
     let footer = row![
-        modal_button("Choose folder…", can_scan.then(|| BulkAutoTagMsg::PickDirectory.into()), false),
-        modal_button("Scan folder", (can_scan && state.root.is_some()).then(|| BulkAutoTagMsg::RunScan.into()), false),
-        modal_button("Apply checked", (is_review && state.accepted_count() > 0).then(|| BulkAutoTagMsg::Apply.into()), true),
+        modal_button(
+            "Choose folder…",
+            can_scan.then(|| BulkAutoTagMsg::PickDirectory.into()),
+            false
+        ),
+        modal_button(
+            "Scan folder",
+            (can_scan && state.root.is_some()).then(|| BulkAutoTagMsg::RunScan.into()),
+            false
+        ),
+        modal_button(
+            "Apply checked",
+            (is_review && state.accepted_count() > 0).then(|| BulkAutoTagMsg::Apply.into()),
+            true
+        ),
         spacer(Length::Fill, Length::Shrink),
-        modal_button(if busy { "Cancel" } else { "Close" }, Some(BulkAutoTagMsg::Close.into()), false).padding([6, 14]),
+        modal_button(
+            if busy { "Cancel" } else { "Close" },
+            Some(BulkAutoTagMsg::Close.into()),
+            false
+        )
+        .padding([6, 14]),
     ]
     .spacing(8)
     .align_y(Alignment::Center)
@@ -828,7 +959,10 @@ mod tests {
         };
         BulkAutoTagState {
             groups: vec![
-                group("a", vec![proposal("a1", true), proposal("a2", false), proposal("a3", true)]),
+                group(
+                    "a",
+                    vec![proposal("a1", true), proposal("a2", false), proposal("a3", true)],
+                ),
                 group("b", vec![proposal("b1", true), proposal("b2", true)]),
             ],
             ..BulkAutoTagState::default()
@@ -864,11 +998,19 @@ mod tests {
         state.select_directory(1, false, false);
         assert_eq!(state.selection.len(), 2);
         state.select_directory(1, false, true);
-        assert_eq!(state.selection.len(), 0, "ctrl+click on a fully selected folder clears it");
+        assert_eq!(
+            state.selection.len(),
+            0,
+            "ctrl+click on a fully selected folder clears it"
+        );
 
         state.select_file(key(0, 2), false, false);
         state.select_directory(1, true, false);
-        assert_eq!(state.selection.len(), 3, "shift extends from the anchor through the folder's last file");
+        assert_eq!(
+            state.selection.len(),
+            3,
+            "shift extends from the anchor through the folder's last file"
+        );
     }
 
     #[test]
@@ -876,7 +1018,10 @@ mod tests {
         let mut state = state();
         let first = state.start_job();
         let second = state.start_job();
-        assert!(first.cancel.load(Ordering::Relaxed), "starting a job cancels the previous one");
+        assert!(
+            first.cancel.load(Ordering::Relaxed),
+            "starting a job cancels the previous one"
+        );
         assert!(!state.finish_job(first.generation));
         assert!(state.finish_job(second.generation));
 

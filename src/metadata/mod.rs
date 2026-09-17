@@ -19,19 +19,19 @@ mod search;
 mod verify;
 mod write;
 
-pub use auto_tag::{auto_tag_field_status, auto_tag_field_status_from_fields, AutoTagFieldStatus};
-pub use cache::{index_paths, refresh_cached_metadata, CachedMetadata, MetadataLookup};
+pub use auto_tag::{AutoTagFieldStatus, auto_tag_field_status, auto_tag_field_status_from_fields};
+pub use cache::{CachedMetadata, MetadataLookup, index_paths, refresh_cached_metadata};
 pub use fields::{
-    parse_tag_filter, tag_field_best_match, tag_field_suggestions, ManualTagEdits, TagField, TagFields, TagFilter,
-    TagParseError,
+    ManualTagEdits, TagField, TagFields, TagFilter, TagParseError, parse_tag_filter, tag_field_best_match,
+    tag_field_suggestions,
 };
 pub use hints::{instrument_hint_from_path, instruments_related};
-pub use read::{instrument_tag, is_audio, AUDIO_EXTENSIONS};
-pub use search::{file_search_active, search, SearchQuery, SearchResult, FILE_SEARCH_MIN_QUERY_LEN};
-pub use write::{write_auto_tags, write_manual_tags, SavedTo};
+pub use read::{AUDIO_EXTENSIONS, instrument_tag, is_audio};
+pub use search::{FILE_SEARCH_MIN_QUERY_LEN, SearchQuery, SearchResult, file_search_active, search};
+pub use write::{SavedTo, write_auto_tags, write_manual_tags};
 
 #[cfg(test)]
-pub(crate) use read::{read_tag_fields, TUNDRA_TAG_VERSION};
+pub(crate) use read::{TUNDRA_TAG_VERSION, read_tag_fields};
 #[cfg(test)]
 pub(crate) use riff::parse_riff_wave_chunks;
 #[cfg(test)]

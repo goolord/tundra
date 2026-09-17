@@ -21,9 +21,7 @@ fn normalize_launch_path(path: PathBuf) -> Option<PathBuf> {
         return None;
     }
     Some(if path.exists() {
-        crate::path_util::canonical_path(&path).unwrap_or_else(|_| {
-            crate::path_util::normalize_path(path)
-        })
+        crate::path_util::canonical_path(&path).unwrap_or_else(|_| crate::path_util::normalize_path(path))
     } else {
         crate::path_util::normalize_path(path)
     })
@@ -56,9 +54,6 @@ mod tests {
             PathBuf::from("2 kick.wav"),
             PathBuf::from("3 kick.wav"),
         ];
-        assert_eq!(
-            primary_open_target(&paths),
-            Some(PathBuf::from("2 kick.wav"))
-        );
+        assert_eq!(primary_open_target(&paths), Some(PathBuf::from("2 kick.wav")));
     }
 }

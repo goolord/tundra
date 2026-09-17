@@ -8,4 +8,4 @@ mod worker;
 
 pub use position::PlaybackPosition;
 pub use stream::probe_decoder;
-pub use worker::{clamp_volume, PlayerCommand, PlayerEvent, PlayerWorker};
+pub use worker::{PlayerCommand, PlayerEvent, PlayerWorker, clamp_volume};

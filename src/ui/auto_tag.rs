@@ -6,7 +6,7 @@ use super::style;
 use super::widgets::{modal_button, modal_info_row, modal_shell, spacer};
 use crate::auto_tag::{ClassificationResult, ClassifyError};
 use crate::metadata::AutoTagFieldStatus;
-use iced::widget::{button, column, container, row, text, Column};
+use iced::widget::{Column, button, column, container, row, text};
 use iced::{Alignment, Color, Element, Length, Theme};
 use std::path::PathBuf;
 
@@ -74,11 +74,19 @@ impl AutoTagState {
 }
 
 fn muted(content: &str) -> Element<'_, Message> {
-    text(content).size(11).width(Length::Fill).style(style::muted_text).into()
+    text(content)
+        .size(11)
+        .width(Length::Fill)
+        .style(style::muted_text)
+        .into()
 }
 
 fn details_disclosure(state: &AutoTagState) -> Element<'_, Message> {
-    let label = if state.details_open { "Technical details ▼" } else { "Technical details ▶" };
+    let label = if state.details_open {
+        "Technical details ▼"
+    } else {
+        "Technical details ▶"
+    };
     let toggle = button(text(label).size(12))
         .padding(0)
         .on_press(AutoTagMsg::ToggleDetails.into())
@@ -136,10 +144,10 @@ pub fn auto_tag_view(state: &AutoTagState) -> Element<'_, Message> {
             .width(Length::Fill),
         modal_info_row(
             "File",
-            state
-                .target
-                .as_deref()
-                .map_or_else(|| NO_AUDIO_SELECTED.to_string(), |path| crate::path_util::truncate_path(path, 56)),
+            state.target.as_deref().map_or_else(
+                || NO_AUDIO_SELECTED.to_string(),
+                |path| crate::path_util::truncate_path(path, 56)
+            ),
         ),
         modal_info_row(
             "Current tag",
@@ -177,7 +185,10 @@ pub fn auto_tag_view(state: &AutoTagState) -> Element<'_, Message> {
     } else if let Some(result) = &state.result {
         body = body.push(modal_info_row("Suggested", &result.instrument));
         if let Some(confidence) = result.confidence {
-            body = body.push(modal_info_row("Confidence", crate::auto_tag::confidence_percent(Some(confidence))));
+            body = body.push(modal_info_row(
+                "Confidence",
+                crate::auto_tag::confidence_percent(Some(confidence)),
+            ));
         }
     } else if !state.status.is_empty() {
         body = body.push(text(&state.status).size(12));
@@ -206,7 +217,11 @@ pub fn auto_tag_view(state: &AutoTagState) -> Element<'_, Message> {
 
     body = body.push(
         row![
-            modal_button("Choose file…", (!state.running).then(|| AutoTagMsg::PickFile.into()), false),
+            modal_button(
+                "Choose file…",
+                (!state.running).then(|| AutoTagMsg::PickFile.into()),
+                false
+            ),
             modal_button("Detect instrument", can_run.then(|| AutoTagMsg::Run.into()), false),
             modal_button("Apply tag", can_apply.then(|| AutoTagMsg::Apply.into()), true),
             spacer(Length::Fill, Length::Shrink),

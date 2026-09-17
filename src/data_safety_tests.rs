@@ -2,12 +2,11 @@
 
 use std::fs;
 
-use crate::metadata::{write_auto_tags, TUNDRA_TAG_VERSION};
+use crate::metadata::{TUNDRA_TAG_VERSION, write_auto_tags};
 use crate::safe_write::{
-    reclaim_write_sidecars, sidecar, write_atomic, REPLACE_OLD_SUFFIX, TAG_BAK_SUFFIX,
-    TAG_TMP_SUFFIX,
+    REPLACE_OLD_SUFFIX, TAG_BAK_SUFFIX, TAG_TMP_SUFFIX, reclaim_write_sidecars, sidecar, write_atomic,
 };
-use crate::test_fixtures::{dead_pid_tag_tmp, write_minimal_wav, ScratchDir};
+use crate::test_fixtures::{ScratchDir, dead_pid_tag_tmp, write_minimal_wav};
 
 #[test]
 fn write_atomic_leaves_dest_unchanged_when_replace_fails() {
@@ -71,14 +70,8 @@ fn write_auto_tags_failed_container_preserves_bytes_and_uses_sidecar() {
             "unwritable container should record sidecar"
         );
         assert_eq!(fs::read(&dest).expect("bytes unchanged"), junk);
-        assert_eq!(
-            crate::tag_store::instrument(&dest).as_deref(),
-            Some("Kick")
-        );
-        assert_eq!(
-            crate::tag_store::tag_version(&dest),
-            Some(TUNDRA_TAG_VERSION)
-        );
+        assert_eq!(crate::tag_store::instrument(&dest).as_deref(), Some("Kick"));
+        assert_eq!(crate::tag_store::tag_version(&dest), Some(TUNDRA_TAG_VERSION));
     });
 }
 
@@ -180,7 +173,7 @@ fn metadata_cache_persist_recovers_from_crash_aside() {
 // Tag writes: every container keeps its audio and reads back what was written.
 // ---------------------------------------------------------------------------
 
-use crate::metadata::{read_tag_fields, write_manual_tags, ManualTagEdits};
+use crate::metadata::{ManualTagEdits, read_tag_fields, write_manual_tags};
 
 fn fixture_copy(dir: &ScratchDir, ext: &str) -> std::path::PathBuf {
     let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

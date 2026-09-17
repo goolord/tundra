@@ -53,8 +53,12 @@ cargo xtask run --release -- ~/Desktop/hat.ogg
 
 Dev builds find `scripts/` and `resources/models/` in the source tree; nothing is copied into `target/`.
 
+Before sending a change, run the tests, the formatter (settings in `rustfmt.toml`), and clippy, which should report no warnings:
+
 ```bash
 cargo test --workspace
+cargo fmt --all
+cargo clippy --workspace --all-targets
 ```
 
 ### xtask commands

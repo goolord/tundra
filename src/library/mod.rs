@@ -55,7 +55,11 @@ pub fn list_directory(dir: &Path) -> Result<Vec<ListedEntry>, String> {
             let file_type = entry.file_type().ok()?;
             let path = entry.path();
             sweep.note(&path);
-            let is_dir = if file_type.is_symlink() { path.is_dir() } else { file_type.is_dir() };
+            let is_dir = if file_type.is_symlink() {
+                path.is_dir()
+            } else {
+                file_type.is_dir()
+            };
             keeps_entry(&path, is_dir).then_some(ListedEntry { path, is_dir })
         })
         .collect();
@@ -72,8 +76,8 @@ pub fn list_directory(dir: &Path) -> Result<Vec<ListedEntry>, String> {
 #[cfg(test)]
 mod tests {
     use super::walk_directory;
-    use crate::safe_write::{sidecar, REPLACE_OLD_SUFFIX};
-    use crate::test_fixtures::{dead_pid_tag_tmp, ScratchDir};
+    use crate::safe_write::{REPLACE_OLD_SUFFIX, sidecar};
+    use crate::test_fixtures::{ScratchDir, dead_pid_tag_tmp};
     use std::collections::HashSet;
     use std::path::PathBuf;
 

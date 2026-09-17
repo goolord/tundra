@@ -9,12 +9,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::path_util::file_mtime_secs;
-use crate::test_fixtures::{copy_asset, write_minimal_wav, write_riff_info, ScratchDir, ASSET_FORMATS};
+use crate::test_fixtures::{ASSET_FORMATS, ScratchDir, copy_asset, write_minimal_wav, write_riff_info};
 
 use super::hints::artist_hint_from_path;
 use super::read::{
-    tundra_comment, tundra_tag_is_current, VORBIS_COMMENT_KEY, VORBIS_INSTRUMENT_KEY, WAV_ARTIST_KEY,
-    WAV_COMMENT_KEY, WAV_GENRE_KEY, WAV_INSTRUMENT_KEY, WAV_TITLE_KEY,
+    VORBIS_COMMENT_KEY, VORBIS_INSTRUMENT_KEY, WAV_ARTIST_KEY, WAV_COMMENT_KEY, WAV_GENRE_KEY, WAV_INSTRUMENT_KEY,
+    WAV_TITLE_KEY, tundra_comment, tundra_tag_is_current,
 };
 use super::riff::encode_riff_wave;
 
@@ -193,7 +193,12 @@ fn metadata_lookup_matches_cache_key_variants() {
     let mut lookup = MetadataLookup::new(Arc::clone(&metadata));
     assert_eq!(lookup.tag_fields(&audio).explicit_instrument, "Snare");
 
-    let hits = search_paths(std::slice::from_ref(&audio), "", &[instrument_filter("snare")], metadata);
+    let hits = search_paths(
+        std::slice::from_ref(&audio),
+        "",
+        &[instrument_filter("snare")],
+        metadata,
+    );
     assert_eq!(hits, vec![audio.clone()]);
 }
 
@@ -226,7 +231,10 @@ fn tag_field_best_match_breaks_score_ties_by_label() {
 fn instrument_hint_reads_folder_and_prefers_filename() {
     let hint = |path: &str| instrument_hint_from_path(Path::new(path));
 
-    assert_eq!(hint("/Samples/ADM Samples - Copy/snares/tight_01.wav").as_deref(), Some("Snare"));
+    assert_eq!(
+        hint("/Samples/ADM Samples - Copy/snares/tight_01.wav").as_deref(),
+        Some("Snare")
+    );
     assert_eq!(hint("/Samples/snares/cymbal_roll.wav").as_deref(), Some("Cymbal"));
     assert_eq!(hint("/Drums/Kicks/808_kick_01.wav").as_deref(), Some("Kick"));
     assert_eq!(hint("/Drums/808_hat.wav").as_deref(), Some("Hi-Hat"));
@@ -389,7 +397,10 @@ fn tundra_tagged_status_allows_retag_but_preserves_user_tags() {
     let status = auto_tag_field_status(&audio).expect("status");
     assert!(!status.needs_instrument);
     assert!(!status.can_retag_instrument);
-    assert!(tundra_tag_is_current(&audio, riff_info(&audio).get(WAV_COMMENT_KEY).unwrap_or("")));
+    assert!(tundra_tag_is_current(
+        &audio,
+        riff_info(&audio).get(WAV_COMMENT_KEY).unwrap_or("")
+    ));
 
     let user_dir = ScratchDir::new("user-tag");
     let user_audio = user_dir.path().join("snare.wav");
@@ -445,7 +456,10 @@ fn sidecar_row_does_not_own_user_native_instrument() {
     let dir = ScratchDir::new("sidecar-user-native");
     let audio = dir.path().join("snare.wav");
     write_minimal_wav(&audio);
-    write_riff_info(&audio, &[(WAV_INSTRUMENT_KEY, "Snare"), (WAV_COMMENT_KEY, "Recorded live")]);
+    write_riff_info(
+        &audio,
+        &[(WAV_INSTRUMENT_KEY, "Snare"), (WAV_COMMENT_KEY, "Recorded live")],
+    );
 
     crate::tag_store::with_test_db(dir.path().join("tags.db"), || {
         crate::tag_store::set_instrument(&audio, "Kick", 0).expect("stale sidecar");
@@ -470,9 +484,9 @@ fn wav_chunk<'a>(chunks: &'a [([u8; 4], Vec<u8>)], id: &[u8; 4]) -> Option<&'a [
 }
 
 fn wav_list_chunk<'a>(chunks: &'a [([u8; 4], Vec<u8>)], form: &[u8; 4]) -> Option<&'a [u8]> {
-    chunks.iter().find_map(|(id, data)| {
-        (id == b"LIST" && data.len() >= 4 && &data[..4] == form).then_some(data.as_slice())
-    })
+    chunks
+        .iter()
+        .find_map(|(id, data)| (id == b"LIST" && data.len() >= 4 && &data[..4] == form).then_some(data.as_slice()))
 }
 
 #[test]
@@ -491,8 +505,7 @@ fn write_auto_tags_preserves_wav_non_info_chunks() {
         data.extend_from_slice(b"cue\0");
         data
     };
-    let mut chunks = parse_riff_wave_chunks(&crate::test_fixtures::minimal_wav_bytes())
-        .expect("parse minimal wav");
+    let mut chunks = parse_riff_wave_chunks(&crate::test_fixtures::minimal_wav_bytes()).expect("parse minimal wav");
     chunks.extend([
         (*b"smpl", smpl.clone()),
         (*b"cue ", cue.clone()),
@@ -531,7 +544,9 @@ fn write_instrument_tag_sets_wav_riff_info_for_explorer() {
 
     let bytes = std::fs::read(&audio).expect("read tagged wav bytes");
     assert!(
-        bytes.windows(4).any(|chunk| chunk == b"LIST" || chunk == b"id3 " || chunk == b"ID3"),
+        bytes
+            .windows(4)
+            .any(|chunk| chunk == b"LIST" || chunk == b"id3 " || chunk == b"ID3"),
         "no tag chunks written, len={}, head={:02x?}",
         bytes.len(),
         &bytes[..bytes.len().min(80)]
@@ -588,10 +603,7 @@ fn write_instrument_tag_replaces_existing_wav_comment() {
     let audio = dir.path().join("kick.wav");
     write_minimal_wav(&audio);
 
-    let mut tagged = Probe::open(&audio)
-        .expect("open wav")
-        .read()
-        .expect("read wav");
+    let mut tagged = Probe::open(&audio).expect("open wav").read().expect("read wav");
     tagged.insert_tag(Tag::new(TagType::RiffInfo));
     tagged
         .tag_mut(TagType::RiffInfo)
@@ -656,10 +668,7 @@ fn write_auto_tags_extends_file_with_existing_non_auto_tags() {
     let audio = kicks.join("kick.wav");
     write_minimal_wav(&audio);
 
-    let mut tagged = Probe::open(&audio)
-        .expect("open wav")
-        .read()
-        .expect("read wav");
+    let mut tagged = Probe::open(&audio).expect("open wav").read().expect("read wav");
     tagged.insert_tag(Tag::new(TagType::RiffInfo));
     tagged
         .tag_mut(TagType::RiffInfo)
@@ -720,10 +729,7 @@ fn write_manual_tags_round_trips_wav_fields_after_native_write() {
         riff.get(WAV_TITLE_KEY).map(str::to_string),
         Some("Punchy Kick".to_string())
     );
-    assert_eq!(
-        riff.get(WAV_GENRE_KEY).map(str::to_string),
-        Some("Drums".to_string())
-    );
+    assert_eq!(riff.get(WAV_GENRE_KEY).map(str::to_string), Some("Drums".to_string()));
 }
 
 // --- FLAC, MP3, and OGG writes ---------------------------------------------
@@ -784,16 +790,13 @@ fn tagging_preserves_embedded_cover_art() {
     use lofty::file::AudioFile;
     use lofty::picture::{MimeType, Picture, PictureType};
 
-    let art: Vec<u8> = vec![
-        0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0xde, 0xad, 0xbe, 0xef,
-    ];
+    let art: Vec<u8> = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0xde, 0xad, 0xbe, 0xef];
 
     let (_dir, audio) = staged_fixture("mp3", "cover-art");
     {
         let mut mp3 = {
             let mut file = std::fs::File::open(&audio).expect("open mp3");
-            lofty::mpeg::MpegFile::read_from(&mut file, lofty::config::ParseOptions::new())
-                .expect("parse mp3")
+            lofty::mpeg::MpegFile::read_from(&mut file, lofty::config::ParseOptions::new()).expect("parse mp3")
         };
         let mut id3 = mp3.remove_id3v2().unwrap_or_default();
         id3.insert_picture(
@@ -803,16 +806,13 @@ fn tagging_preserves_embedded_cover_art() {
                 .build(),
         );
         mp3.set_id3v2(id3);
-        mp3.save_to_path(&audio, WriteOptions::default())
-            .expect("save art");
+        mp3.save_to_path(&audio, WriteOptions::default()).expect("save art");
     }
 
     assert!(write_auto_tags(&audio, "Kick").expect("tag"));
 
     let mut file = std::fs::File::open(&audio).expect("reopen mp3");
-    let mut mp3 =
-        lofty::mpeg::MpegFile::read_from(&mut file, lofty::config::ParseOptions::new())
-            .expect("reparse mp3");
+    let mut mp3 = lofty::mpeg::MpegFile::read_from(&mut file, lofty::config::ParseOptions::new()).expect("reparse mp3");
     let tag = mp3
         .remove_id3v2()
         .map(Tag::from)
@@ -838,8 +838,7 @@ fn legacy_grouping_reads_as_instrument_and_is_rewritten_canonically() {
     {
         let mut ogg = {
             let mut file = std::fs::File::open(&audio).expect("open ogg");
-            lofty::ogg::VorbisFile::read_from(&mut file, lofty::config::ParseOptions::new())
-                .expect("parse ogg")
+            lofty::ogg::VorbisFile::read_from(&mut file, lofty::config::ParseOptions::new()).expect("parse ogg")
         };
         ogg.vorbis_comments_mut()
             .insert("GROUPING".to_string(), "Kick".to_string());
@@ -853,9 +852,7 @@ fn legacy_grouping_reads_as_instrument_and_is_rewritten_canonically() {
         "a legacy grouping should still read back as the instrument"
     );
     assert!(
-        auto_tag_field_status(&audio)
-            .expect("status")
-            .needs_instrument,
+        auto_tag_field_status(&audio).expect("status").needs_instrument,
         "a grouping is not the canonical key, so the file still needs tagging"
     );
 
@@ -943,27 +940,19 @@ fn unwritable_container_falls_back_to_sidecar_store_and_stays_searchable() {
             finds_by_instrument(&audio, "Kick"),
             "instrument:Kick must match a sidecar-tagged file"
         );
-        assert_eq!(
-            crate::tag_store::tag_version(&audio),
-            Some(TUNDRA_TAG_VERSION)
-        );
+        assert_eq!(crate::tag_store::tag_version(&audio), Some(TUNDRA_TAG_VERSION));
         assert!(
             !write_auto_tags(&audio, "Snare").expect("same-version sidecar retag"),
             "current-version sidecar tags must not be replaced"
         );
-        assert_eq!(
-            crate::tag_store::instrument(&audio).as_deref(),
-            Some("Kick")
-        );
+        assert_eq!(crate::tag_store::instrument(&audio).as_deref(), Some("Kick"));
         assert_eq!(
             write_auto_tags(&audio, "Kick"),
             Ok(false),
             "unchanged sidecar label should no-op"
         );
         assert!(
-            !auto_tag_field_status(&audio)
-                .expect("status")
-                .can_retag_instrument,
+            !auto_tag_field_status(&audio).expect("status").can_retag_instrument,
             "current sidecar version should skip auto tag"
         );
     });
@@ -1004,7 +993,11 @@ fn stage_and_replace_preserves_original_when_edit_fails() {
     assert!(err.is_err());
 
     assert_eq!(std::fs::read(&audio).expect("dest"), original);
-    assert_eq!(dir_entries(dir.path()), vec![audio], "failed edit must delete staged tmp");
+    assert_eq!(
+        dir_entries(dir.path()),
+        vec![audio],
+        "failed edit must delete staged tmp"
+    );
 }
 
 #[test]
@@ -1019,8 +1012,7 @@ fn stage_and_replace_removes_tmp_when_sync_fails() {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(tmp, std::fs::Permissions::from_mode(0o000))
-                .expect("lock tmp");
+            std::fs::set_permissions(tmp, std::fs::Permissions::from_mode(0o000)).expect("lock tmp");
         }
         #[cfg(windows)]
         {
@@ -1032,7 +1024,11 @@ fn stage_and_replace_removes_tmp_when_sync_fails() {
     });
     assert!(err.is_err());
     assert_eq!(std::fs::read(&audio).expect("dest"), original);
-    assert_eq!(dir_entries(dir.path()), vec![audio], "sync failure must delete staged tmp");
+    assert_eq!(
+        dir_entries(dir.path()),
+        vec![audio],
+        "sync failure must delete staged tmp"
+    );
 }
 
 #[test]
@@ -1089,10 +1085,7 @@ fn stage_and_replace_restores_readonly_permissions_on_success() {
     .expect("replace readonly");
 
     let restored = std::fs::metadata(&audio).expect("meta").permissions();
-    assert!(
-        restored.readonly(),
-        "original read-only attribute must be restored"
-    );
+    assert!(restored.readonly(), "original read-only attribute must be restored");
 }
 
 #[test]

@@ -1,7 +1,7 @@
 //! Ranking paths against a filename query and tag filters.
 
-use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
+use fuzzy_matcher::skim::SkimMatcherV2;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -186,7 +186,11 @@ impl<'a> FileQuery<'a> {
 
     fn sort_score(&self, path: &Path, name_score: i64, path_score: i64) -> i64 {
         if !is_audio(path) {
-            return if name_score > 0 { name_score + DIRECT_FOLDER_BONUS } else { path_score };
+            return if name_score > 0 {
+                name_score + DIRECT_FOLDER_BONUS
+            } else {
+                path_score
+            };
         }
         let base = if name_score > 0 { name_score } else { path_score };
         let mut score = base + FILE_SEARCH_BONUS;
@@ -471,7 +475,11 @@ mod tests {
         assert!(name_score("/Samples/Snare Drum 01.wav", "snare") > 0);
         assert!(name_score("/Samples/Snare Drum 01.wav", "snare drum") > 0);
         assert_eq!(name_score("/Samples/Snare Drum 01.wav", "snare kick"), 0);
-        assert_eq!(name_score("/Samples/Synth Pad 01.wav", "snare"), 0, "unrelated fuzzy matches should be rejected");
+        assert_eq!(
+            name_score("/Samples/Synth Pad 01.wav", "snare"),
+            0,
+            "unrelated fuzzy matches should be rejected"
+        );
     }
 
     #[test]
@@ -483,7 +491,10 @@ mod tests {
         paths.push(PathBuf::from("/Samples/Synth Pad 01.wav"));
 
         let found = file_search(&paths, "snare");
-        assert!(found.iter().any(|path| path.ends_with("01 Snare.wav")), "substring matches should remain");
+        assert!(
+            found.iter().any(|path| path.ends_with("01 Snare.wav")),
+            "substring matches should remain"
+        );
         assert!(
             !found.iter().any(|path| path.ends_with("Synth Pad 01.wav")),
             "fuzzy-only matches should be dropped once the confident cap is full"
@@ -507,9 +518,15 @@ mod tests {
             comment: "dark snare loop".into(),
             ..TagFields::default()
         };
-        assert!(tag_score(&fields, TagField::Bpm, "120").is_some(), "partial values match");
+        assert!(
+            tag_score(&fields, TagField::Bpm, "120").is_some(),
+            "partial values match"
+        );
         assert!(tag_score(&fields, TagField::Comment, "snare loop").is_some());
-        assert!(tag_score(&fields, TagField::Comment, "snare kick").is_none(), "every term must match");
+        assert!(
+            tag_score(&fields, TagField::Comment, "snare kick").is_none(),
+            "every term must match"
+        );
     }
 
     #[test]

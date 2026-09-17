@@ -138,11 +138,7 @@ impl Worker {
 
     /// The outer `Err` means the worker can no longer be trusted and must be
     /// replaced; an inner `Err` is an ordinary per-file failure.
-    fn classify(
-        &mut self,
-        path: &Path,
-        tier1_zcr: f64,
-    ) -> Result<Result<Tier2Response, ClassifyError>, ClassifyError> {
+    fn classify(&mut self, path: &Path, tier1_zcr: f64) -> Result<Result<Tier2Response, ClassifyError>, ClassifyError> {
         static NEXT_ID: AtomicU64 = AtomicU64::new(1);
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         self.last_used = Instant::now();
@@ -215,20 +211,21 @@ struct BundledPython {
 }
 
 fn bundled_python() -> Option<BundledPython> {
-    let packaged = crate::platform::find_beside(&["python"], |dir| dir.join("site-packages").is_dir()).and_then(|python| {
-        let exe = std::fs::read_dir(&python)
-            .ok()?
-            .flatten()
-            .flat_map(|entry| {
-                let dir = entry.path();
-                [dir.join("python.exe"), dir.join("bin").join("python3")]
+    let packaged =
+        crate::platform::find_beside(&["python"], |dir| dir.join("site-packages").is_dir()).and_then(|python| {
+            let exe = std::fs::read_dir(&python)
+                .ok()?
+                .flatten()
+                .flat_map(|entry| {
+                    let dir = entry.path();
+                    [dir.join("python.exe"), dir.join("bin").join("python3")]
+                })
+                .find(|candidate| candidate.is_file())?;
+            Some(BundledPython {
+                exe,
+                site_packages: Some(python.join("site-packages")),
             })
-            .find(|candidate| candidate.is_file())?;
-        Some(BundledPython {
-            exe,
-            site_packages: Some(python.join("site-packages")),
-        })
-    });
+        });
     #[cfg(windows)]
     const VENV_PYTHON: &str = "scripts/.venv/Scripts/python.exe";
     #[cfg(not(windows))]
@@ -336,9 +333,9 @@ fn reap_idle_workers() {
                 && worker
                     .as_ref()
                     .is_some_and(|worker| worker.last_used.elapsed() >= IDLE_TIMEOUT)
-                {
-                    *worker = None;
-                }
+            {
+                *worker = None;
+            }
         }
     }
 }

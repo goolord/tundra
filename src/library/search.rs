@@ -6,8 +6,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::cache::{lock_read, Shared};
-use crate::metadata::{index_paths, is_audio, search, CachedMetadata, MetadataLookup, SearchQuery, SearchResult, TagFilter};
+use super::cache::{Shared, lock_read};
+use crate::metadata::{
+    CachedMetadata, MetadataLookup, SearchQuery, SearchResult, TagFilter, index_paths, is_audio, search,
+};
 use crate::path_util::{cache_key, is_under, resolve_open_path};
 
 /// Everything one search needs, captured on the UI thread.
@@ -42,7 +44,10 @@ pub fn cached_paths_for_root(cache: &HashMap<PathBuf, Vec<PathBuf>>, root: &Path
             continue;
         }
         root_walked |= listing_key == root_key;
-        if listings.get(&listing_key).is_some_and(|existing| existing.len() >= cached.len()) {
+        if listings
+            .get(&listing_key)
+            .is_some_and(|existing| existing.len() >= cached.len())
+        {
             continue;
         }
         listings.insert(listing_key, cached);
@@ -51,7 +56,10 @@ pub fn cached_paths_for_root(cache: &HashMap<PathBuf, Vec<PathBuf>>, root: &Path
     // under different spellings, and whichever copy survives dedup decides how it sorts.
     let mut listings: Vec<_> = listings.into_iter().collect();
     listings.sort_by(|(a, _), (b, _)| a.cmp(b));
-    let paths = listings.into_iter().flat_map(|(_, cached)| cached.iter().cloned()).collect();
+    let paths = listings
+        .into_iter()
+        .flat_map(|(_, cached)| cached.iter().cloned())
+        .collect();
     (paths, root_walked)
 }
 
@@ -100,8 +108,8 @@ pub async fn execute_file_search(request: SearchRequest) -> SearchOutput {
     for root in missing_roots {
         // Skip only this root when its own index or subtree cache can answer.
         // A new allowed root with neither must still be walked.
-        let answerable = metadata_map.keys().any(|path| is_under(path, &root))
-            || paths.iter().any(|path| is_under(path, &root));
+        let answerable =
+            metadata_map.keys().any(|path| is_under(path, &root)) || paths.iter().any(|path| is_under(path, &root));
         if tag_only && answerable {
             continue;
         }

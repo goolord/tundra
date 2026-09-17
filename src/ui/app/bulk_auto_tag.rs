@@ -1,7 +1,7 @@
 //! The Bulk Auto Tag modal's handlers. The scan and the writes run on
 //! background threads; see `crate::bulk_auto_tag`.
 
-use super::{pick_folder, run_blocking, App, Modal};
+use super::{App, Modal, pick_folder, run_blocking};
 use crate::bulk_auto_tag::{self, BulkApplySummary, BulkPhase, ScanError};
 use crate::ui::bulk_auto_tag::BulkAutoTagPhase;
 use crate::ui::message::{BulkAutoTagMsg, Message};
@@ -30,8 +30,13 @@ impl App {
                 }
             }
             BulkAutoTagMsg::PickDirectory => {
-                let start_dir = state.root.clone().unwrap_or_else(|| self.file_selector.current_dir.clone());
-                return Task::perform(pick_folder(start_dir), |picked| BulkAutoTagMsg::DirectoryPicked(picked).into());
+                let start_dir = state
+                    .root
+                    .clone()
+                    .unwrap_or_else(|| self.file_selector.current_dir.clone());
+                return Task::perform(pick_folder(start_dir), |picked| {
+                    BulkAutoTagMsg::DirectoryPicked(picked).into()
+                });
             }
             BulkAutoTagMsg::DirectoryPicked(Some(dir)) => {
                 if self.allowed_directories.contains_path(&dir) {
@@ -55,7 +60,11 @@ impl App {
             }
             BulkAutoTagMsg::SetFileAccepted { key, accepted } => state.set_file_accepted(key, accepted),
             BulkAutoTagMsg::SelectFile { key, shift, control } => state.select_file(key, shift, control),
-            BulkAutoTagMsg::SelectDirectory { dir_idx, shift, control } => state.select_directory(dir_idx, shift, control),
+            BulkAutoTagMsg::SelectDirectory {
+                dir_idx,
+                shift,
+                control,
+            } => state.select_directory(dir_idx, shift, control),
             BulkAutoTagMsg::SelectAll => state.select_all_files(),
             BulkAutoTagMsg::ClearSelection => state.selection.clear(),
             BulkAutoTagMsg::CheckSelected => state.set_selected_accepted(true),
@@ -70,7 +79,10 @@ impl App {
             BulkAutoTagMsg::ExpandAllDirectories => state.set_all_expanded(true),
             BulkAutoTagMsg::CollapseAllDirectories => state.set_all_expanded(false),
             BulkAutoTagMsg::Apply => return self.start_bulk_apply(),
-            BulkAutoTagMsg::ApplyCompleted { generation, mut summary } => {
+            BulkAutoTagMsg::ApplyCompleted {
+                generation,
+                mut summary,
+            } => {
                 // The files were written whether or not anyone is still watching.
                 self.metadata_cache.merge(std::mem::take(&mut summary.refreshed));
                 if !self.bulk_auto_tag.finish_job(generation) {
@@ -127,7 +139,10 @@ impl App {
             run_blocking(move || bulk_auto_tag::apply_items(&items, Some(&job.progress), &job.cancel)),
             move |summary| {
                 let summary = summary.unwrap_or_else(|()| BulkApplySummary {
-                    failed: vec![(PathBuf::new(), "Apply stopped unexpectedly; some files may not have been tagged.".into())],
+                    failed: vec![(
+                        PathBuf::new(),
+                        "Apply stopped unexpectedly; some files may not have been tagged.".into(),
+                    )],
                     ..BulkApplySummary::default()
                 });
                 BulkAutoTagMsg::ApplyCompleted { generation, summary }.into()

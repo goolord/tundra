@@ -4,14 +4,18 @@
 use super::callback::Callback;
 use super::position::PlaybackPosition;
 use super::stream::append_stream;
-use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
+use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use rodio::buffer::SamplesBuffer;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub fn clamp_volume(volume: f32) -> f32 {
-    if volume.is_finite() { volume.clamp(0.0, 1.0) } else { 1.0 }
+    if volume.is_finite() {
+        volume.clamp(0.0, 1.0)
+    } else {
+        1.0
+    }
 }
 
 /// Track ids tie asynchronous events to the file that caused them, so a late
@@ -26,7 +30,10 @@ pub enum PlayerCommand {
     Seek(f64, bool),
     SetVolume(f32),
     /// Sent by the audio callback when `segment` of track `track` runs out.
-    Ended { track: u64, segment: u64 },
+    Ended {
+        track: u64,
+        segment: u64,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -57,7 +64,15 @@ impl PlayerWorker {
         let (events, event_receiver) = unbounded();
         let handle = Self { commands, events };
         let thread_handle = handle.clone();
-        std::thread::spawn(move || run(thread_handle, command_receiver, is_playing, looping, clamp_volume(volume)));
+        std::thread::spawn(move || {
+            run(
+                thread_handle,
+                command_receiver,
+                is_playing,
+                looping,
+                clamp_volume(volume),
+            )
+        });
         (handle, event_receiver)
     }
 

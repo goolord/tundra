@@ -1,22 +1,24 @@
 //! Browsing the library: opening files and folders, directory walks, search
 //! and tag filters, favorites, and keeping the caches in step.
 
-use super::{run_blocking, App, Modal};
-use crate::library::search::{execute_file_search, SearchRequest};
-use crate::library::walk_directory;
+use super::{App, Modal, run_blocking};
 use crate::library::cache::PersistedCaches;
 use crate::library::search::SearchOutput;
+use crate::library::search::{SearchRequest, execute_file_search};
+use crate::library::walk_directory;
 use crate::metadata::{
-    file_search_active, index_paths, is_audio, parse_tag_filter, refresh_cached_metadata, tag_field_best_match,
-    TagField, TagFields, TagParseError, FILE_SEARCH_MIN_QUERY_LEN,
+    FILE_SEARCH_MIN_QUERY_LEN, TagField, TagFields, TagParseError, file_search_active, index_paths, is_audio,
+    parse_tag_filter, refresh_cached_metadata, tag_field_best_match,
 };
-use crate::ui::file_selector::{list_buttons, FileButton, FilterFocus, FILE_LIST_SCROLL_ID, FILE_SEARCH_INPUT_ID, TAG_SEARCH_INPUT_ID};
+use crate::ui::file_selector::{
+    FILE_LIST_SCROLL_ID, FILE_SEARCH_INPUT_ID, FileButton, FilterFocus, TAG_SEARCH_INPUT_ID, list_buttons,
+};
 use crate::ui::message::{FilterMsg, Message};
 use crate::ui::settings::{FILE_OUTSIDE_ALLOWED, UNSUPPORTED_AUDIO};
 use futures::future::{AbortHandle, Abortable};
-use iced::widget::operation;
-use iced::widget::Id;
 use iced::Task;
+use iced::widget::Id;
+use iced::widget::operation;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -118,7 +120,11 @@ impl App {
         }
         // Playing a file only re-runs the search when its tags turned out to be
         // stale; otherwise the list (and selection) stay put.
-        let refresh = if self.merge_path_metadata(path) { self.refresh_search_if_active() } else { Task::none() };
+        let refresh = if self.merge_path_metadata(path) {
+            self.refresh_search_if_active()
+        } else {
+            Task::none()
+        };
         self.file_selector.sync_selection_for_path(path);
         refresh
     }
@@ -155,7 +161,11 @@ impl App {
     }
 
     pub(super) fn refresh_search_if_active(&mut self) -> Task<Message> {
-        if self.file_selector.search_active() { self.start_file_search() } else { Task::none() }
+        if self.file_selector.search_active() {
+            self.start_file_search()
+        } else {
+            Task::none()
+        }
     }
 
     fn reset_file_list(&mut self) {
@@ -255,7 +265,11 @@ impl App {
         self.dir_cache.finish_loading(caches.dirs);
         self.metadata_cache.finish_loading(caches.metadata);
         self.caches_ready = true;
-        Task::batch([self.warm_allowed_caches(), self.refresh_search_if_active(), self.open_pending_launch()])
+        Task::batch([
+            self.warm_allowed_caches(),
+            self.refresh_search_if_active(),
+            self.open_pending_launch(),
+        ])
     }
 
     pub(super) fn insert_walked_directory(&mut self, dir: PathBuf, children: Vec<PathBuf>) -> Task<Message> {
@@ -265,7 +279,10 @@ impl App {
         }
         self.dir_cache.insert(dir, children.clone());
         let metadata = self.metadata_cache.snapshot();
-        Task::perform(async move { index_paths(&children, metadata) }, Message::MetadataIndexed)
+        Task::perform(
+            async move { index_paths(&children, metadata) },
+            Message::MetadataIndexed,
+        )
     }
 
     /// Runs the current file query and tag filters, replacing any search in flight.
@@ -278,9 +295,13 @@ impl App {
             self.reset_file_list();
             return Task::none();
         }
-        let favorites = selector
-            .favorites_only
-            .then(|| self.favorites.paths().iter().cloned().collect::<std::collections::HashSet<_>>());
+        let favorites = selector.favorites_only.then(|| {
+            self.favorites
+                .paths()
+                .iter()
+                .cloned()
+                .collect::<std::collections::HashSet<_>>()
+        });
         if favorites.as_ref().is_some_and(|favorites| favorites.is_empty()) {
             self.file_selector.set_file_list(Vec::new(), None);
             return Task::none();
@@ -293,7 +314,11 @@ impl App {
 
         let tag_only = selector.tag_only_search();
         // Wait for typing to pause; a one- or two-letter query matches so much that it waits longer.
-        let debounce_ms = if !tag_only && selector.search_value.len() <= FILE_SEARCH_MIN_QUERY_LEN { 450 } else { 200 };
+        let debounce_ms = if !tag_only && selector.search_value.len() <= FILE_SEARCH_MIN_QUERY_LEN {
+            450
+        } else {
+            200
+        };
         let request = SearchRequest {
             debounce: Duration::from_millis(debounce_ms),
             allowed_roots: self.allowed_directories.roots().to_vec(),
@@ -309,9 +334,10 @@ impl App {
         let generation = self.search_generation;
         let (abort, registration) = AbortHandle::new_pair();
         self.search_abort = abort;
-        Task::perform(Abortable::new(execute_file_search(request), registration), move |result| {
-            FilterMsg::SearchCompleted { generation, result }.into()
-        })
+        Task::perform(
+            Abortable::new(execute_file_search(request), registration),
+            move |result| FilterMsg::SearchCompleted { generation, result }.into(),
+        )
     }
 
     pub(super) fn update_filter(&mut self, message: FilterMsg) -> Task<Message> {
@@ -405,12 +431,20 @@ impl App {
         self.focus_filter(FilterFocus::TagSearch);
         let input = self.file_selector.tag_search_value.clone();
         if input.trim().is_empty() {
-            return if self.file_selector.tag_filters.is_empty() { focus(TAG_SEARCH_INPUT_ID) } else { self.start_file_search() };
+            return if self.file_selector.tag_filters.is_empty() {
+                focus(TAG_SEARCH_INPUT_ID)
+            } else {
+                self.start_file_search()
+            };
         }
         if !input.contains(':') && tag_field_best_match(&input).is_some() {
             return self.autocomplete_tag_field();
         }
-        let parsed = if input.contains(':') { parse_tag_filter(&input) } else { Err(TagParseError::UnknownField) };
+        let parsed = if input.contains(':') {
+            parse_tag_filter(&input)
+        } else {
+            Err(TagParseError::UnknownField)
+        };
         match parsed {
             Ok(filter) => {
                 self.file_selector.tag_search_error = None;

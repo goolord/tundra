@@ -12,7 +12,7 @@ use crate::ui::tag_editor::tag_editor_view;
 use crate::ui::widgets::{bar, spacer};
 use iced::widget::{column, container, mouse_area, row, stack, text};
 use iced::window::Direction;
-use iced::{mouse, Color, Element, Length, Theme};
+use iced::{Color, Element, Length, Theme, mouse};
 
 const SIDEBAR_RESIZER_HIT_WIDTH: f32 = 10.0;
 const SIDEBAR_RESIZER_LINE_WIDTH: f32 = 2.0;
@@ -21,15 +21,18 @@ const WINDOW_RESIZE_BORDER: f32 = 8.0;
 
 impl App {
     pub fn view(&self) -> Element<'_, Message> {
-        let sidebar = container(self.file_selector.view(self.search_enabled(), &self.favorites, self.modifiers))
-            .width(Length::Fixed(self.sidebar_width))
-            .height(Length::Fill)
-            .style(|theme: &Theme| {
-                let palette = theme.extended_palette();
-                let base = palette.background.base.color;
-                container::background(Color::from_rgb(base.r * 0.56, base.g * 0.56, base.b * 0.58))
-                    .border(style::outline(palette.background.strong.color.scale_alpha(0.42), 0.0))
-            });
+        let sidebar = container(
+            self.file_selector
+                .view(self.search_enabled(), &self.favorites, self.modifiers),
+        )
+        .width(Length::Fixed(self.sidebar_width))
+        .height(Length::Fill)
+        .style(|theme: &Theme| {
+            let palette = theme.extended_palette();
+            let base = palette.background.base.color;
+            container::background(Color::from_rgb(base.r * 0.56, base.g * 0.56, base.b * 0.58))
+                .border(style::outline(palette.background.strong.color.scale_alpha(0.42), 0.0))
+        });
 
         let mut player = stack![self.player.view(self.current_file_tags())];
         if self.drag_over {
@@ -42,7 +45,12 @@ impl App {
 
         let resizing = self.sidebar_resize.is_some();
         let mut workspace = stack![
-            row![sidebar, sidebar_resizer(resizing), player.width(Length::Fill).height(Length::Fill)].height(Length::Fill)
+            row![
+                sidebar,
+                sidebar_resizer(resizing),
+                player.width(Length::Fill).height(Length::Fill)
+            ]
+            .height(Length::Fill)
         ]
         .width(Length::Fill)
         .height(Length::Fill);
@@ -54,9 +62,15 @@ impl App {
 
         let workspace: Element<'_, Message> = if self.modal == Modal::Settings {
             let roots = self.allowed_directories.roots();
-            with_dim_overlay(workspace.into(), settings_view(roots, self.settings_first_run, self.settings_error.as_deref()))
+            with_dim_overlay(
+                workspace.into(),
+                settings_view(roots, self.settings_first_run, self.settings_error.as_deref()),
+            )
         } else if self.bulk_auto_tag.is_open() {
-            with_dim_overlay(workspace.into(), bulk_auto_tag_view(&self.bulk_auto_tag, self.modifiers))
+            with_dim_overlay(
+                workspace.into(),
+                bulk_auto_tag_view(&self.bulk_auto_tag, self.modifiers),
+            )
         } else if self.modal == Modal::TagEditor {
             with_dim_overlay(workspace.into(), tag_editor_view(&self.tag_editor))
         } else if self.modal == Modal::AutoTag {
@@ -67,9 +81,12 @@ impl App {
             workspace.into()
         };
 
-        let layout = column![title_bar(self.always_on_top, self.current_file_name().as_deref()), workspace]
-            .width(Length::Fill)
-            .height(Length::Fill);
+        let layout = column![
+            title_bar(self.always_on_top, self.current_file_name().as_deref()),
+            workspace
+        ]
+        .width(Length::Fill)
+        .height(Length::Fill);
         if self.window_maximized {
             layout.into()
         } else {
@@ -80,9 +97,19 @@ impl App {
 
 /// The draggable line between the sidebar and the player.
 fn sidebar_resizer(resizing: bool) -> Element<'static, Message> {
-    let gutter = || spacer(Length::Fixed((SIDEBAR_RESIZER_HIT_WIDTH - SIDEBAR_RESIZER_LINE_WIDTH) / 2.0), Length::Fill);
+    let gutter = || {
+        spacer(
+            Length::Fixed((SIDEBAR_RESIZER_HIT_WIDTH - SIDEBAR_RESIZER_LINE_WIDTH) / 2.0),
+            Length::Fill,
+        )
+    };
     let line = bar(Length::Fixed(SIDEBAR_RESIZER_LINE_WIDTH), Length::Fill, move |theme| {
-        theme.extended_palette().background.strong.color.scale_alpha(if resizing { 0.85 } else { 0.45 })
+        theme
+            .extended_palette()
+            .background
+            .strong
+            .color
+            .scale_alpha(if resizing { 0.85 } else { 0.45 })
     });
     let hit_area = mouse_area(spacer(Length::Fixed(SIDEBAR_RESIZER_HIT_WIDTH), Length::Fill))
         .interaction(mouse::Interaction::ResizingColumn)
@@ -97,7 +124,11 @@ fn sidebar_resizer(resizing: bool) -> Element<'static, Message> {
 fn window_resize_frame(content: Element<'_, Message>) -> Element<'_, Message> {
     use mouse::Interaction::{ResizingDiagonallyDown, ResizingDiagonallyUp, ResizingHorizontally, ResizingVertically};
     let edge = Length::Fixed(WINDOW_RESIZE_BORDER);
-    let handle = |width: Length, height: Length, direction: Direction, cursor: mouse::Interaction| -> Element<'static, Message> {
+    let handle = |width: Length,
+                  height: Length,
+                  direction: Direction,
+                  cursor: mouse::Interaction|
+     -> Element<'static, Message> {
         mouse_area(spacer(width, height))
             .on_press(WindowMsg::Resize(direction).into())
             .interaction(cursor)
@@ -107,14 +138,30 @@ fn window_resize_frame(content: Element<'_, Message>) -> Element<'_, Message> {
 
     let edges = column![
         // No north edge handle: the title bar drags the window there instead.
-        row![handle(edge, edge, Direction::NorthWest, ResizingDiagonallyDown), spacer(fill, edge), handle(edge, edge, Direction::NorthEast, ResizingDiagonallyUp)]
-            .height(edge),
-        row![handle(edge, fill, Direction::West, ResizingHorizontally), spacer(fill, fill), handle(edge, fill, Direction::East, ResizingHorizontally)].height(fill),
-        row![handle(edge, edge, Direction::SouthWest, ResizingDiagonallyUp), handle(fill, edge, Direction::South, ResizingVertically), handle(edge, edge, Direction::SouthEast, ResizingDiagonallyDown)]
-            .height(edge),
+        row![
+            handle(edge, edge, Direction::NorthWest, ResizingDiagonallyDown),
+            spacer(fill, edge),
+            handle(edge, edge, Direction::NorthEast, ResizingDiagonallyUp)
+        ]
+        .height(edge),
+        row![
+            handle(edge, fill, Direction::West, ResizingHorizontally),
+            spacer(fill, fill),
+            handle(edge, fill, Direction::East, ResizingHorizontally)
+        ]
+        .height(fill),
+        row![
+            handle(edge, edge, Direction::SouthWest, ResizingDiagonallyUp),
+            handle(fill, edge, Direction::South, ResizingVertically),
+            handle(edge, edge, Direction::SouthEast, ResizingDiagonallyDown)
+        ]
+        .height(edge),
     ];
-    stack![container(content).width(fill).height(fill), edges.width(fill).height(fill)]
-        .width(fill)
-        .height(fill)
-        .into()
+    stack![
+        container(content).width(fill).height(fill),
+        edges.width(fill).height(fill)
+    ]
+    .width(fill)
+    .height(fill)
+    .into()
 }

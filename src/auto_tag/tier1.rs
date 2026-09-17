@@ -97,7 +97,10 @@ fn load_mono_audio(path: &Path) -> Result<Vec<f32>, ClassifyError> {
         mono.push(sum / channels as f32);
     }
     if mono.is_empty() {
-        return Err(ClassifyError::analysis_failed(format!("{} contains no audio samples", path.display())));
+        return Err(ClassifyError::analysis_failed(format!(
+            "{} contains no audio samples",
+            path.display()
+        )));
     }
     Ok(resample_linear(&mono, sample_rate, SAMPLE_RATE))
 }

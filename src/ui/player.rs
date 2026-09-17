@@ -4,15 +4,13 @@
 use super::message::{Message, WaveformMsg};
 use super::style;
 use super::waveform::WaveForm;
-use super::widgets::{context_menu_style, file_context_menu, icon, spacer, FileMenuExtras};
+use super::widgets::{FileMenuExtras, context_menu_style, file_context_menu, icon, spacer};
 use crate::metadata::TagField;
-use crate::playback::{
-    clamp_volume, probe_decoder, PlaybackPosition, PlayerCommand, PlayerWorker,
-};
-use crate::waveform_peaks::{spawn_peak_build, WaveformPeaks};
+use crate::playback::{PlaybackPosition, PlayerCommand, PlayerWorker, clamp_volume, probe_decoder};
+use crate::waveform_peaks::{WaveformPeaks, spawn_peak_build};
 use iced::widget::scrollable::{Direction, Scrollbar};
 use iced::widget::slider::{self, Handle, HandleShape, Rail};
-use iced::widget::{button, column, container, mouse_area, row, scrollable, text, Button, Canvas, Row, Slider};
+use iced::widget::{Button, Canvas, Row, Slider, button, column, container, mouse_area, row, scrollable, text};
 use iced::{Alignment, Color, Element, Length, Theme};
 use iced_aw::ContextMenu;
 use std::path::{Path, PathBuf};
@@ -219,7 +217,12 @@ impl Player {
         if self.controls.scrubbing {
             return;
         }
-        if let Some(progress) = self.controls.playback_position.as_ref().map(|position| position.progress()) {
+        if let Some(progress) = self
+            .controls
+            .playback_position
+            .as_ref()
+            .map(|position| position.progress())
+        {
             self.set_progress(progress);
         }
     }
@@ -259,17 +262,24 @@ impl Player {
                     )
                 })
                 .style(context_menu_style);
-                container(menu).width(Length::Fill).height(Length::Fill).padding(2).into()
+                container(menu)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .padding(2)
+                    .into()
             }
             None => spacer(Length::Fill, Length::Fill).into(),
         };
         let track_name = self.current_file.as_deref().and_then(crate::path_util::file_name_lossy);
 
-        container(column![waveform_area, self.controls.view(track_name, self.current_file.as_deref())])
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .center_x(Length::Fill)
-            .into()
+        container(column![
+            waveform_area,
+            self.controls.view(track_name, self.current_file.as_deref())
+        ])
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .center_x(Length::Fill)
+        .into()
     }
 }
 
@@ -283,8 +293,16 @@ fn waveform_toolbar(zoom: f32, tags: Vec<(TagField, String)>) -> Element<'static
                 let accent = palette.primary.base.color;
                 let idle_border = palette.background.strong.color.scale_alpha(0.35);
                 button::Style {
-                    text_color: style::by_status(status, style::text_alpha(theme, 0.82), palette.background.base.text, palette.background.base.text),
-                    border: style::outline(style::by_status(status, idle_border, accent.scale_alpha(0.35), idle_border), 6.0),
+                    text_color: style::by_status(
+                        status,
+                        style::text_alpha(theme, 0.82),
+                        palette.background.base.text,
+                        palette.background.base.text,
+                    ),
+                    border: style::outline(
+                        style::by_status(status, idle_border, accent.scale_alpha(0.35), idle_border),
+                        6.0,
+                    ),
                     ..button::Style::default()
                 }
                 .with_background(style::by_status(
@@ -295,14 +313,11 @@ fn waveform_toolbar(zoom: f32, tags: Vec<(TagField, String)>) -> Element<'static
                 ))
             })
     };
-    let zoom_label = container(
-        text(format!("Zoom {zoom:.1}×"))
-            .size(11)
-            .font(style::SEMIBOLD)
-            .style(|theme: &Theme| text::Style {
-                color: Some(theme.extended_palette().primary.base.color.scale_alpha(0.92)),
-            }),
-    )
+    let zoom_label = container(text(format!("Zoom {zoom:.1}×")).size(11).font(style::SEMIBOLD).style(
+        |theme: &Theme| text::Style {
+            color: Some(theme.extended_palette().primary.base.color.scale_alpha(0.92)),
+        },
+    ))
     .padding([4, 8])
     .style(|theme: &Theme| style::tinted(theme.extended_palette().primary.base.color, 0.14, 0.24, 6.0)(theme));
 
@@ -319,7 +334,10 @@ fn waveform_toolbar(zoom: f32, tags: Vec<(TagField, String)>) -> Element<'static
     if !tags.is_empty() {
         bar = bar.push(toolbar_tags(tags));
     }
-    container(bar).width(Length::Fill).style(style::panel(0.48, 0.28, 0.0)).into()
+    container(bar)
+        .width(Length::Fill)
+        .style(style::panel(0.48, 0.28, 0.0))
+        .into()
 }
 
 fn toolbar_tags(tags: Vec<(TagField, String)>) -> Element<'static, Message> {
@@ -327,7 +345,10 @@ fn toolbar_tags(tags: Vec<(TagField, String)>) -> Element<'static, Message> {
         let accent = style::tag_field_color(field);
         container(
             row![
-                text(field.label()).size(9).font(style::SEMIBOLD).color(accent.scale_alpha(0.88)),
+                text(field.label())
+                    .size(9)
+                    .font(style::SEMIBOLD)
+                    .color(accent.scale_alpha(0.88)),
                 text(value).size(11).font(style::MEDIUM).style(style::faded_text(0.92)),
             ]
             .spacing(4)
@@ -338,9 +359,14 @@ fn toolbar_tags(tags: Vec<(TagField, String)>) -> Element<'static, Message> {
         .into()
     });
     container(
-        scrollable(Row::with_children(chips).spacing(6).align_y(Alignment::Center).padding([0, 2]))
-            .direction(Direction::Horizontal(Scrollbar::new().width(3).scroller_width(3)))
-            .width(Length::Fill),
+        scrollable(
+            Row::with_children(chips)
+                .spacing(6)
+                .align_y(Alignment::Center)
+                .padding([0, 2]),
+        )
+        .direction(Direction::Horizontal(Scrollbar::new().width(3).scroller_width(3)))
+        .width(Length::Fill),
     )
     .width(Length::Fill)
     .max_width(TOOLBAR_TAG_STRIP_MAX)
@@ -352,7 +378,11 @@ impl Controls {
     fn time_labels(&self) -> (String, String) {
         let progress = self
             .playback_progress
-            .map(|shown| self.playback_position.as_ref().map_or(shown, |position| position.progress()))
+            .map(|shown| {
+                self.playback_position
+                    .as_ref()
+                    .map_or(shown, |position| position.progress())
+            })
             .unwrap_or(0.0);
         let label = |secs: Option<f64>| secs.map(format_duration).unwrap_or_else(|| "--:--".into());
         (
@@ -452,7 +482,11 @@ fn transport_button(
             let background = if primary {
                 style::by_status(
                     status,
-                    if lit { accent } else { palette.background.weak.color.scale_alpha(0.35) },
+                    if lit {
+                        accent
+                    } else {
+                        palette.background.weak.color.scale_alpha(0.35)
+                    },
                     accent.scale_alpha(if lit { 0.92 } else { 0.22 }),
                     accent.scale_alpha(0.78),
                 )
@@ -464,7 +498,11 @@ fn transport_button(
                     strong.scale_alpha(0.42),
                 )
             };
-            let border_color = if primary { accent.scale_alpha(0.55) } else { strong.scale_alpha(0.35) };
+            let border_color = if primary {
+                accent.scale_alpha(0.55)
+            } else {
+                strong.scale_alpha(0.35)
+            };
             button::Style {
                 text_color: palette.background.base.text,
                 border: style::outline(border_color, TRANSPORT_BUTTON / 2.0).width(if lit { 0.0 } else { 1.0 }),
@@ -477,12 +515,25 @@ fn transport_button(
 fn track_info_row(name: String, path: PathBuf, current: String, total: String) -> Element<'static, Message> {
     mouse_area(
         row![
-            icon("music-solid.svg", 14.0, |theme| theme.extended_palette().primary.base.color.scale_alpha(0.85)),
-            container(text(name).size(12).style(style::faded_text(0.72))).width(Length::Fill).clip(true),
+            icon("music-solid.svg", 14.0, |theme| theme
+                .extended_palette()
+                .primary
+                .base
+                .color
+                .scale_alpha(0.85)),
+            container(text(name).size(12).style(style::faded_text(0.72)))
+                .width(Length::Fill)
+                .clip(true),
             text("·").size(11).style(style::faded_text(0.42)),
-            text(current).size(12).font(iced::Font::MONOSPACE).style(style::faded_text(0.62)),
+            text(current)
+                .size(12)
+                .font(iced::Font::MONOSPACE)
+                .style(style::faded_text(0.62)),
             text("/").size(11).style(style::faded_text(0.42)),
-            text(total).size(12).font(iced::Font::MONOSPACE).style(style::faded_text(0.52)),
+            text(total)
+                .size(12)
+                .font(iced::Font::MONOSPACE)
+                .style(style::faded_text(0.52)),
         ]
         .spacing(6)
         .align_y(Alignment::Center),

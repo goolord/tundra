@@ -40,7 +40,11 @@ pub fn cache_key(path: &Path) -> PathBuf {
 /// appear under both forms.
 pub fn cache_lookup_keys(path: &Path) -> Vec<PathBuf> {
     let key = cache_key(path);
-    if key == path { vec![key] } else { vec![path.to_path_buf(), key] }
+    if key == path {
+        vec![key]
+    } else {
+        vec![path.to_path_buf(), key]
+    }
 }
 
 /// The key favorites are stored under: the canonical path's cache key when the file exists.
@@ -120,7 +124,10 @@ pub fn truncate_path(path: &Path, max_chars: usize) -> String {
 
 /// Dot-files, plus files the OS marks hidden.
 pub fn is_hidden(path: &Path) -> bool {
-    if path.file_name().is_some_and(|name| name.to_string_lossy().starts_with('.')) {
+    if path
+        .file_name()
+        .is_some_and(|name| name.to_string_lossy().starts_with('.'))
+    {
         return true;
     }
     #[cfg(windows)]
@@ -215,7 +222,10 @@ mod tests {
     #[cfg(windows)]
     fn repair_windows_drive_path_fixes_missing_separator_and_pipe() {
         for broken in [r"F:Samples\kick.wav", r"F:|Samples\kick.wav"] {
-            assert_eq!(repair_windows_drive_path(Path::new(broken)), PathBuf::from(r"F:\Samples\kick.wav"));
+            assert_eq!(
+                repair_windows_drive_path(Path::new(broken)),
+                PathBuf::from(r"F:\Samples\kick.wav")
+            );
         }
         for fine in [r"F:\Samples\kick.wav", "F:", "kick.wav"] {
             assert_eq!(repair_windows_drive_path(Path::new(fine)), PathBuf::from(fine));
@@ -246,7 +256,9 @@ mod tests {
 
         // The temp dir as the OS reports it can differ from its canonical form:
         // a symlink (`/var` -> `/private/var` on macOS) or an 8.3 short name on Windows.
-        let reported = std::env::temp_dir().join(dir.path().file_name().unwrap()).join("kick.wav");
+        let reported = std::env::temp_dir()
+            .join(dir.path().file_name().unwrap())
+            .join("kick.wav");
         assert_eq!(favorite_lookup_key(&reported), stored);
 
         #[cfg(windows)]

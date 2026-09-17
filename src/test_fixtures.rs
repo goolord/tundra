@@ -4,8 +4,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::safe_write::sidecar;
 use crate::safe_write::REPLACE_OLD_SUFFIX;
+use crate::safe_write::sidecar;
 
 /// PID guaranteed dead on all platforms (`u32::MAX - 1`).
 pub const DEAD_PID: u32 = 4294967294;
@@ -25,10 +25,7 @@ impl ScratchDir {
         let id = COUNTER.fetch_add(1, Ordering::Relaxed);
         // The 8-digit `_<id>` part marks the folder as throwaway to the path
         // hints, so tests that tag files never take it for an artist name.
-        let dir = std::env::temp_dir().join(format!(
-            "tundra-test-{label}_{}_{id:08}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("tundra-test-{label}_{}_{id:08}", std::process::id()));
         fs::create_dir_all(&dir).expect("scratch dir");
         Self(canonical_temp_path(dir))
     }
@@ -53,7 +50,9 @@ pub const ASSET_FORMATS: [&str; 5] = ["wav", "flac", "mp3", "ogg", "aiff"];
 
 /// `tests/assets/tone.<ext>`, a short real recording in each format.
 pub fn asset(ext: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/assets").join(format!("tone.{ext}"))
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/assets")
+        .join(format!("tone.{ext}"))
 }
 
 /// Copies `tone.<ext>` to `dir/<stem>.<ext>` so a test can modify it.
@@ -68,12 +67,7 @@ pub fn count_tundra_sidecars(dir: &Path) -> usize {
         .map(|entries| {
             entries
                 .flatten()
-                .filter(|entry| {
-                    entry
-                        .file_name()
-                        .to_string_lossy()
-                        .contains(".tundra-")
-                })
+                .filter(|entry| entry.file_name().to_string_lossy().contains(".tundra-"))
                 .count()
         })
         .unwrap_or(0)
@@ -134,11 +128,7 @@ pub fn dead_pid_tag_tmp(dest: &Path) -> PathBuf {
 
 /// Simulates a crash that left `.tundra-replace-old` and removed the dest file.
 pub fn restore_dest_from_crash_aside(dir: &Path, dest: &Path, aside_bytes: &[u8]) {
-    fs::write(
-        sidecar(dest, REPLACE_OLD_SUFFIX),
-        aside_bytes,
-    )
-    .expect("crash aside");
+    fs::write(sidecar(dest, REPLACE_OLD_SUFFIX), aside_bytes).expect("crash aside");
     let _ = fs::remove_file(dest);
     crate::safe_write::reclaim_write_sidecars(dir);
 }

@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -151,7 +151,11 @@ struct SetupBeforeBuild {
 
 impl SetupBeforeBuild {
     fn run(&self) -> Result<()> {
-        if self.no_setup { Ok(()) } else { setup(false, self.skip_dl) }
+        if self.no_setup {
+            Ok(())
+        } else {
+            setup(false, self.skip_dl)
+        }
     }
 }
 
@@ -176,7 +180,12 @@ fn main() -> Result<()> {
         Commands::Setup { skip_lfs, skip_dl } => setup(skip_lfs, skip_dl),
         Commands::Models => download_models(),
         Commands::Classifiers { skip_dl } => setup_classifiers(skip_dl),
-        Commands::Build { release, target, cross, setup } => {
+        Commands::Build {
+            release,
+            target,
+            cross,
+            setup,
+        } => {
             setup.run()?;
             cargo_build(release, target.as_deref(), cross)
         }
@@ -274,8 +283,7 @@ fn fetch_verified(url: &str, sha256: &str, dest: &Path) -> Result<()> {
         .call()
         .with_context(|| format!("GET {url}"))?;
     let mut file = std::fs::File::create(&part)?;
-    std::io::copy(&mut response.into_reader(), &mut file)
-        .with_context(|| format!("write {}", part.display()))?;
+    std::io::copy(&mut response.into_reader(), &mut file).with_context(|| format!("write {}", part.display()))?;
     drop(file);
     let actual = sha256_file(&part)?;
     if actual != sha256 {
@@ -504,8 +512,7 @@ fn output(command: &mut Command) -> Result<String> {
 }
 
 fn copy_file(src: &Path, dst: &Path) -> Result<()> {
-    std::fs::copy(src, dst)
-        .with_context(|| format!("copy {} -> {}", src.display(), dst.display()))?;
+    std::fs::copy(src, dst).with_context(|| format!("copy {} -> {}", src.display(), dst.display()))?;
     Ok(())
 }
 
@@ -564,7 +571,12 @@ fn bundle_python(staging: &Path) -> Result<()> {
 /// Builds `target/package/tundra-<version>-<target>/` and archives it with that
 /// folder at the top, plus a `.sha256` file. Returns the archive paths.
 fn package_release(version: &str, options: &PackageOptions) -> Result<Vec<PathBuf>> {
-    let PackageOptions { target, cross, skip_build, skip_python } = options;
+    let PackageOptions {
+        target,
+        cross,
+        skip_build,
+        skip_python,
+    } = options;
     let target = match target {
         Some(target) => target.clone(),
         None if *skip_build => bail!("--skip-build requires --target"),
@@ -587,8 +599,7 @@ fn package_release(version: &str, options: &PackageOptions) -> Result<Vec<PathBu
     let package_dir = root.join("target").join("package");
     let staging = package_dir.join(&name);
     if staging.exists() {
-        std::fs::remove_dir_all(&staging)
-            .with_context(|| format!("clean {}", staging.display()))?;
+        std::fs::remove_dir_all(&staging).with_context(|| format!("clean {}", staging.display()))?;
     }
     std::fs::create_dir_all(staging.join("models"))?;
     std::fs::create_dir_all(staging.join("scripts"))?;
@@ -598,7 +609,10 @@ fn package_release(version: &str, options: &PackageOptions) -> Result<Vec<PathBu
         copy_file(&models_dir().join(name), &staging.join("models").join(name))?;
     }
     for script in RUNTIME_SCRIPTS {
-        copy_file(&root.join("scripts").join(script), &staging.join("scripts").join(script))?;
+        copy_file(
+            &root.join("scripts").join(script),
+            &staging.join("scripts").join(script),
+        )?;
     }
     for doc in PACKAGE_DOCS {
         copy_file(&root.join(doc), &staging.join(doc))?;
@@ -628,12 +642,7 @@ fn package_release(version: &str, options: &PackageOptions) -> Result<Vec<PathBu
     } else {
         tar.arg("-z");
     }
-    run(tar
-        .arg("-cf")
-        .arg(&archive)
-        .arg("-C")
-        .arg(&package_dir)
-        .arg(&name))?;
+    run(tar.arg("-cf").arg(&archive).arg("-C").arg(&package_dir).arg(&name))?;
 
     let checksum = PathBuf::from(format!("{}.sha256", archive.display()));
     let file_name = archive.file_name().expect("archive name").to_string_lossy();
@@ -656,7 +665,9 @@ fn release(ci: bool, skip_build: bool) -> Result<()> {
         bail!("working tree has uncommitted changes");
     }
     let head = git(&["rev-parse", "HEAD"])?;
-    run(Command::new("git").args(["fetch", "--tags", "origin"]).current_dir(&root))?;
+    run(Command::new("git")
+        .args(["fetch", "--tags", "origin"])
+        .current_dir(&root))?;
     if git(&["branch", "-r", "--contains", &head])?.is_empty() {
         bail!("HEAD {head} is not on any remote branch; push it first");
     }
@@ -666,7 +677,9 @@ fn release(ci: bool, skip_build: bool) -> Result<()> {
         }
         Ok(_) => {}
         Err(_) => {
-            run(Command::new("git").args(["tag", "-a", &tag, "-m", &tag]).current_dir(&root))?;
+            run(Command::new("git")
+                .args(["tag", "-a", &tag, "-m", &tag])
+                .current_dir(&root))?;
         }
     }
     // Also covers a rerun after the push failed but the local tag was created.

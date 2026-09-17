@@ -59,8 +59,7 @@ impl WaveformPeaks {
         if self.sample_count == 0 {
             return 0.0;
         }
-        let bucket = (sample_index.min(self.sample_count.saturating_sub(1)) * PEAK_BUCKET_COUNT)
-            / self.sample_count;
+        let bucket = (sample_index.min(self.sample_count.saturating_sub(1)) * PEAK_BUCKET_COUNT) / self.sample_count;
         self.bucket_midpoint(bucket)
     }
 
@@ -74,11 +73,7 @@ impl WaveformPeaks {
 /// when available; when zero, or when the decode finds a different length
 /// (MP3 without an accurate header), frames are counted and peaks rebuilt so
 /// the envelope lines up with the playhead. Returns `None` once `cancelled`.
-pub fn build_peaks(
-    path: &Path,
-    sample_count_hint: usize,
-    cancelled: &dyn Fn() -> bool,
-) -> Option<WaveformPeaks> {
+pub fn build_peaks(path: &Path, sample_count_hint: usize, cancelled: &dyn Fn() -> bool) -> Option<WaveformPeaks> {
     if file_too_large_for_peaks(path) {
         return Some(skipped_peaks(sample_count_hint));
     }
@@ -99,11 +94,7 @@ pub fn build_peaks(
 }
 
 /// One decode pass. With `sample_count` of `None` it only counts frames.
-fn decode_peaks(
-    path: &Path,
-    sample_count: Option<usize>,
-    cancelled: &dyn Fn() -> bool,
-) -> Option<WaveformPeaks> {
+fn decode_peaks(path: &Path, sample_count: Option<usize>, cancelled: &dyn Fn() -> bool) -> Option<WaveformPeaks> {
     const CANCEL_CHECK_FRAMES: usize = 1 << 14;
 
     let Some(decoder) = open_decoder(path) else {
@@ -196,8 +187,7 @@ mod tests {
 
     #[test]
     fn build_peaks_uses_decoded_frame_count_when_hint_overstated() {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/assets/tone.wav");
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/assets/tone.wav");
         let peaks = build_peaks(&path, 999_999, &|| false).expect("not cancelled");
         assert!(peaks.complete);
         assert!(peaks.sample_count > 0);

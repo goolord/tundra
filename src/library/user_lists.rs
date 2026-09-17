@@ -18,7 +18,10 @@ struct SavedPaths {
 impl SavedPaths {
     fn load(file: Option<PathBuf>, label: &'static str) -> Self {
         let Some(path) = file else {
-            return Self { label, ..Self::default() };
+            return Self {
+                label,
+                ..Self::default()
+            };
         };
         let (paths, writable) = load_user_data(&path, label);
         Self {
@@ -159,7 +162,7 @@ fn migrate_settings_from_cache(config_path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::safe_write::{reclaim_write_sidecars, sidecar, REPLACE_OLD_SUFFIX};
+    use crate::safe_write::{REPLACE_OLD_SUFFIX, reclaim_write_sidecars, sidecar};
     use crate::test_fixtures::ScratchDir;
 
     #[test]
@@ -206,7 +209,10 @@ mod tests {
 
         let loaded = AllowedDirectories::load_from(Some(path.clone()));
         assert!(loaded.is_empty());
-        assert!(!path.exists(), "unreadable file must not stay where a save would replace it");
+        assert!(
+            !path.exists(),
+            "unreadable file must not stay where a save would replace it"
+        );
 
         loaded.persist();
         let kept: Vec<_> = std::fs::read_dir(dir.path())

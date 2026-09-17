@@ -57,10 +57,7 @@ fn marked_instrument_line(line: &str) -> Option<&str> {
 }
 
 pub(crate) fn instrument_from_marked_comment(comment: &str) -> Option<String> {
-    comment
-        .lines()
-        .find_map(marked_instrument_line)
-        .map(str::to_string)
+    comment.lines().find_map(marked_instrument_line).map(str::to_string)
 }
 
 fn tundra_comment_marker() -> String {
@@ -98,8 +95,7 @@ pub fn tundra_tag_is_current(path: &Path, comment: &str) -> bool {
 }
 
 fn tundra_owns_tags(comment: &str) -> bool {
-    parse_tundra_comment_version(comment).is_some()
-        || instrument_from_marked_comment(comment).is_some()
+    parse_tundra_comment_version(comment).is_some() || instrument_from_marked_comment(comment).is_some()
 }
 
 /// Tundra may replace tags it wrote; sidecar alone does not own native tags.
@@ -133,9 +129,10 @@ pub(crate) enum Container {
 impl Container {
     pub(crate) fn of(path: &Path) -> Option<Self> {
         if let Some(ext) = path.extension().and_then(|ext| ext.to_str())
-            && let Some(container) = Self::from_extension(ext) {
-                return Some(container);
-            }
+            && let Some(container) = Self::from_extension(ext)
+        {
+            return Some(container);
+        }
         Self::sniff(path)
     }
 
@@ -224,10 +221,7 @@ fn probe_tags(path: &Path) -> Option<lofty::file::TaggedFile> {
 }
 
 pub(crate) fn non_empty(value: Option<&str>) -> Option<String> {
-    value
-        .map(str::trim)
-        .filter(|text| !text.is_empty())
-        .map(str::to_owned)
+    value.map(str::trim).filter(|text| !text.is_empty()).map(str::to_owned)
 }
 
 /// `RiffInfoList::get` compares fourccs case-sensitively even though `insert`
@@ -315,9 +309,7 @@ pub(crate) fn read_container_tags_as(path: &Path, container: Container) -> Optio
                         .as_ref()
                         .and_then(|tag| non_empty(tag.get_user_text(ID3_INSTRUMENT_KEY))),
                     artist: id3v2.as_ref().and_then(|tag| non_empty(tag.artist().as_deref())),
-                    comment: id3v2
-                        .as_ref()
-                        .and_then(|tag| non_empty(tag.comment().as_deref())),
+                    comment: id3v2.as_ref().and_then(|tag| non_empty(tag.comment().as_deref())),
                 },
                 generic: collect([id3v2.map(Tag::from), other]),
             }
@@ -336,21 +328,18 @@ pub(crate) fn read_container_tags_as(path: &Path, container: Container) -> Optio
                         .as_ref()
                         .and_then(|tag| non_empty(tag.get_user_text(ID3_INSTRUMENT_KEY)))
                         .or_else(|| {
-                            text_ref.annotations.as_ref().and_then(|lines| {
-                                lines
-                                    .iter()
-                                    .find_map(|line| instrument_from_marked_comment(line))
-                            })
+                            text_ref
+                                .annotations
+                                .as_ref()
+                                .and_then(|lines| lines.iter().find_map(|line| instrument_from_marked_comment(line)))
                         })
                         .or_else(|| {
                             text_ref
                                 .comment()
                                 .and_then(|comment| instrument_from_marked_comment(&comment))
                         }),
-                    artist: non_empty(text_ref.author.as_deref()).or_else(|| {
-                        id3.as_ref()
-                            .and_then(|tag| non_empty(tag.artist().as_deref()))
-                    }),
+                    artist: non_empty(text_ref.author.as_deref())
+                        .or_else(|| id3.as_ref().and_then(|tag| non_empty(tag.artist().as_deref()))),
                     comment: text_ref
                         .comment()
                         .map(|comment| comment.to_string())
@@ -384,8 +373,7 @@ pub(crate) fn read_native_tags(path: &Path) -> Option<NativeTags> {
 /// it (Tundra does not claim files whose comment it does not own).
 pub(crate) fn tundra_comment(existing: Option<&str>) -> String {
     let existing = existing.unwrap_or_default().trim();
-    let is_tundra_line =
-        |line: &&str| marker_line_version(line).is_some() || marked_instrument_line(line).is_some();
+    let is_tundra_line = |line: &&str| marker_line_version(line).is_some() || marked_instrument_line(line).is_some();
     if !existing.lines().any(|line| is_tundra_line(&line)) && !existing.is_empty() {
         return existing.to_string();
     }
@@ -404,16 +392,16 @@ fn explicit_instrument_from_tag(tag: &Tag) -> Option<String> {
         if (description.eq_ignore_ascii_case("instrument")
             || description.eq_ignore_ascii_case("instrumentname")
             || description.eq_ignore_ascii_case("instrument type"))
-            && let ItemValue::Text(text) = item.value() {
-                let trimmed = text.trim();
-                if !trimmed.is_empty() {
-                    return Some(trimmed.to_string());
-                }
+            && let ItemValue::Text(text) = item.value()
+        {
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
             }
+        }
     }
 
-    if let Some(value) = tag.comment().and_then(|text| instrument_from_marked_comment(&text))
-    {
+    if let Some(value) = tag.comment().and_then(|text| instrument_from_marked_comment(&text)) {
         return Some(value);
     }
     None
@@ -426,8 +414,7 @@ pub(crate) fn durable_instrument(path: &Path, native: &NativeTags, tags: Option<
     }
     let legacy = match tags {
         Some(tags) => tags.iter().find_map(explicit_instrument_from_tag),
-        None => read_file_tags(path)
-            .and_then(|tags| tags.generic.iter().find_map(explicit_instrument_from_tag)),
+        None => read_file_tags(path).and_then(|tags| tags.generic.iter().find_map(explicit_instrument_from_tag)),
     };
     legacy.or_else(|| crate::tag_store::instrument(path))
 }
@@ -443,10 +430,7 @@ fn overlay_nonempty(dest: &mut String, source: &str) {
     }
 }
 
-pub(crate) fn overlay_sidecar_manual_fields(
-    fields: &mut TagFields,
-    sidecar: &super::fields::ManualTagEdits,
-) {
+pub(crate) fn overlay_sidecar_manual_fields(fields: &mut TagFields, sidecar: &super::fields::ManualTagEdits) {
     overlay_nonempty(&mut fields.title, &sidecar.title);
     overlay_nonempty(&mut fields.artist, &sidecar.artist);
     if !sidecar.artist.trim().is_empty() {
@@ -474,10 +458,7 @@ pub(crate) fn generic_tag_fields(tags: &[Tag]) -> TagFields {
         push_field(&mut fields.album, tag.album());
         push_field(&mut fields.genre, tag.genre());
         push_field(&mut fields.comment, tag.comment());
-        push_field(
-            &mut fields.album_artist,
-            tag.get_string(ItemKey::AlbumArtist),
-        );
+        push_field(&mut fields.album_artist, tag.get_string(ItemKey::AlbumArtist));
         push_field(&mut fields.composer, tag.get_string(ItemKey::Composer));
         push_field(&mut fields.label, tag.get_string(ItemKey::Label));
         push_field(&mut fields.title, tag.get_string(ItemKey::TrackTitle));
@@ -502,9 +483,7 @@ pub fn read_tag_fields(path: &Path) -> Option<TagFields> {
     if file_tags.is_none() && sidecar_instrument.is_none() && sidecar_manual.is_none() {
         return None;
     }
-    let (native, tags) = file_tags
-        .map(|tags| (tags.native, tags.generic))
-        .unwrap_or_default();
+    let (native, tags) = file_tags.map(|tags| (tags.native, tags.generic)).unwrap_or_default();
     let tags = tags.as_slice();
 
     let mut fields = generic_tag_fields(tags);

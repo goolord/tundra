@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use super::AllowedDirectories;
 use crate::locks::{lock, read, write};
-use crate::metadata::{refresh_cached_metadata, CachedMetadata, TagFields};
+use crate::metadata::{CachedMetadata, TagFields, refresh_cached_metadata};
 
 pub type Listings = HashMap<PathBuf, Vec<PathBuf>>;
 pub type MetadataMap = HashMap<PathBuf, CachedMetadata>;
@@ -107,8 +107,7 @@ where
 
     pub fn persist_map_to(path: &Path, map: &HashMap<PathBuf, V>) {
         // Borrowed keys and values encode to the same bytes as the owned map.
-        let persistable: HashMap<&PathBuf, &V> =
-            map.iter().filter(|(_, value)| value.worth_saving()).collect();
+        let persistable: HashMap<&PathBuf, &V> = map.iter().filter(|(_, value)| value.worth_saving()).collect();
         crate::app_data::write_bincode(path, &persistable, &path.display().to_string());
     }
 
@@ -171,8 +170,7 @@ impl DirCache {
     }
 
     pub fn contains_key(&self, dir: &Path) -> bool {
-        self.snapshot()
-            .contains_key(&crate::path_util::cache_key(dir))
+        self.snapshot().contains_key(&crate::path_util::cache_key(dir))
     }
 }
 
@@ -196,10 +194,7 @@ impl MetadataCache {
     }
 
     pub fn merge_path(&mut self, path: &Path, entry: CachedMetadata) {
-        self.merge(HashMap::from([(
-            crate::path_util::cache_key(path),
-            entry,
-        )]));
+        self.merge(HashMap::from([(crate::path_util::cache_key(path), entry)]));
     }
 
     /// Indexed tags without touching the disk, for display.
@@ -294,7 +289,10 @@ mod tests {
         let path = PathBuf::from("/samples/kick.wav");
         cache.merge_path(&path, entry(20, "saved"));
         cache.merge_path(&path, entry(10, "stale search result"));
-        assert_eq!(cache.cached_fields(&path).map(|fields| fields.title), Some("saved".into()));
+        assert_eq!(
+            cache.cached_fields(&path).map(|fields| fields.title),
+            Some("saved".into())
+        );
         cache.merge_path(&path, entry(30, "edited again"));
         assert_eq!(
             cache.cached_fields(&path).map(|fields| fields.title),
@@ -307,8 +305,15 @@ mod tests {
         let mut map = MetadataMap::new();
         let raw = PathBuf::from(r"C:\Samples\Kick.wav");
         keep_newer(&mut map, crate::path_util::cache_key(&raw), entry(50, "new"));
-        keep_newer(&mut map, crate::path_util::cache_key(&raw), entry(40, "old raw spelling"));
+        keep_newer(
+            &mut map,
+            crate::path_util::cache_key(&raw),
+            entry(40, "old raw spelling"),
+        );
         assert_eq!(map.len(), 1);
-        assert_eq!(map.values().next().map(|cached| cached.fields.title.as_str()), Some("new"));
+        assert_eq!(
+            map.values().next().map(|cached| cached.fields.title.as_str()),
+            Some("new")
+        );
     }
 }

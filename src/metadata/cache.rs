@@ -47,13 +47,8 @@ impl MetadataLookup {
 
     fn store_fields(&mut self, path: &Path, mtime_secs: u64, fields: TagFields) -> TagFields {
         let fields_clone = fields.clone();
-        self.new_entries.insert(
-            crate::path_util::cache_key(path),
-            CachedMetadata {
-                mtime_secs,
-                fields,
-            },
-        );
+        self.new_entries
+            .insert(crate::path_util::cache_key(path), CachedMetadata { mtime_secs, fields });
         fields_clone
     }
 
@@ -69,9 +64,10 @@ impl MetadataLookup {
 
         if let Some(mtime_secs) = file_mtime_secs(path) {
             if let Some(cached) = &cached
-                && cached.mtime_secs == mtime_secs {
-                    return cached.fields.clone();
-                }
+                && cached.mtime_secs == mtime_secs
+            {
+                return cached.fields.clone();
+            }
             let Some(fields) = read_tag_fields(path) else {
                 return TagFields::default();
             };
@@ -109,8 +105,5 @@ pub fn index_paths(
 pub fn refresh_cached_metadata(path: &Path) -> Option<CachedMetadata> {
     let mtime_secs = file_mtime_secs(path)?;
     let fields = read_tag_fields(path)?;
-    Some(CachedMetadata {
-        mtime_secs,
-        fields,
-    })
+    Some(CachedMetadata { mtime_secs, fields })
 }

@@ -2,8 +2,8 @@
 //! with the file's size and modification time.
 
 use super::ClassificationResult;
-use crate::path_util::{self, FileStamp};
 use crate::app_data;
+use crate::path_util::{self, FileStamp};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -34,10 +34,7 @@ impl ClassifyCache {
         let entries = app_data::cache_file(CACHE_FILE)
             .and_then(|path| app_data::read_bincode(&path))
             .unwrap_or_default();
-        Self {
-            entries,
-            dirty: false,
-        }
+        Self { entries, dirty: false }
     }
 
     fn persist(&mut self) {
@@ -72,8 +69,7 @@ impl ClassifyCache {
     }
 }
 
-static CLASSIFY_CACHE: LazyLock<Mutex<ClassifyCache>> =
-    LazyLock::new(|| Mutex::new(ClassifyCache::load()));
+static CLASSIFY_CACHE: LazyLock<Mutex<ClassifyCache>> = LazyLock::new(|| Mutex::new(ClassifyCache::load()));
 
 fn cache() -> MutexGuard<'static, ClassifyCache> {
     crate::locks::lock(&CLASSIFY_CACHE)
@@ -124,10 +120,7 @@ mod tests {
 
         let mut cache = ClassifyCache::default();
         cache.insert(&audio, stamp, &kick());
-        assert_eq!(
-            cache.get(&audio).map(|result| result.instrument),
-            Some("Kick".into())
-        );
+        assert_eq!(cache.get(&audio).map(|result| result.instrument), Some("Kick".into()));
 
         let modified = std::fs::metadata(&audio)
             .and_then(|meta| meta.modified())
@@ -154,12 +147,8 @@ mod tests {
         assert!(!cache.dirty);
         assert_eq!(dir.sidecar_count(), 0);
 
-        let entries: HashMap<PathBuf, CachedClassification> =
-            app_data::read_bincode(&path).expect("reload");
-        let reloaded = ClassifyCache {
-            entries,
-            dirty: false,
-        };
+        let entries: HashMap<PathBuf, CachedClassification> = app_data::read_bincode(&path).expect("reload");
+        let reloaded = ClassifyCache { entries, dirty: false };
         assert!(reloaded.get(&audio).is_some());
     }
 }

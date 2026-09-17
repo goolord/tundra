@@ -2,16 +2,16 @@
 //! out of the app, the sidebar resizer, the file list scrollbar, the custom
 //! title bar, and keyboard shortcuts.
 
-use super::prefs::{self, on_window, MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH};
+use super::prefs::{self, MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH, on_window};
 use super::{App, Modal};
-use crate::ui::file_selector::{FilterFocus, FILE_LIST_SCROLL_ID};
-use crate::ui::message::{FilterMsg, Message, WindowMsg};
 use crate::ui::FILE_DRAG_THRESHOLD;
+use crate::ui::file_selector::{FILE_LIST_SCROLL_ID, FilterFocus};
+use crate::ui::message::{FilterMsg, Message, WindowMsg};
 use iced::keyboard::key::Named;
 use iced::keyboard::{Key, Modifiers};
-use iced::widget::operation::{self, AbsoluteOffset};
 use iced::widget::Id;
-use iced::{window, Point, Task};
+use iced::widget::operation::{self, AbsoluteOffset};
+use iced::{Point, Task, window};
 use std::path::PathBuf;
 
 /// How far a title bar press must move before it drags the window.
@@ -65,7 +65,11 @@ pub(super) struct ScrollbarDrag {
 
 /// Explains a failed drag-out and how to drag from the file manager instead.
 pub(super) fn drag_out_notice(intro: &str) -> String {
-    let gesture = if cfg!(target_os = "macos") { "Control-click or use a two-finger click" } else { "Right-click" };
+    let gesture = if cfg!(target_os = "macos") {
+        "Control-click or use a two-finger click"
+    } else {
+        "Right-click"
+    };
     format!(
         "{intro} {gesture} the file and choose \"{}\", then drag it from there.",
         crate::platform::file_manager_label()
@@ -106,7 +110,9 @@ impl App {
             let metrics = self.file_selector.scroll_metrics();
             if metrics.max_scroll > 0.0 {
                 let track_y = (point.y - drag.track_top).clamp(0.0, drag.track_height);
-                tasks.push(scroll_file_list_to(metrics.offset_for_track_y(track_y, drag.grab_offset)));
+                tasks.push(scroll_file_list_to(
+                    metrics.offset_for_track_y(track_y, drag.grab_offset),
+                ));
             }
         }
         if self.sidebar_resize.is_none() && self.file_list_scrollbar_drag.is_none() {
@@ -203,7 +209,9 @@ impl App {
                 }
                 operation::scroll_by(FILE_LIST_SCROLL_ID, AbsoluteOffset { x: 0.0, y: dy })
             }
-            Some(FileDrag::File { path, origin, stage, .. }) => {
+            Some(FileDrag::File {
+                path, origin, stage, ..
+            }) => {
                 let Some(origin) = *origin else {
                     *origin = Some(point);
                     return Task::none();
@@ -258,7 +266,10 @@ impl App {
 
     pub(super) fn drag_window_ready(&mut self, window_id: Option<u32>) -> Task<Message> {
         let init = match window_id {
-            Some(id) => self.native_drag.init_with_window_id(id).map_err(|err| format!("Could not initialize drag-out: {err}.")),
+            Some(id) => self
+                .native_drag
+                .init_with_window_id(id)
+                .map_err(|err| format!("Could not initialize drag-out: {err}.")),
             None if cfg!(all(unix, not(target_os = "macos"))) => {
                 Err("Drag-out from the file list requires X11 and is unavailable on native Wayland.".into())
             }
@@ -325,7 +336,8 @@ impl App {
     }
 
     pub(super) fn update_window(&mut self, message: WindowMsg) -> Task<Message> {
-        let sync_maximized = |id: window::Id| window::is_maximized(id).map(|maximized| WindowMsg::MaximizedChanged(maximized).into());
+        let sync_maximized =
+            |id: window::Id| window::is_maximized(id).map(|maximized| WindowMsg::MaximizedChanged(maximized).into());
         match message {
             WindowMsg::TitleBarPress => {
                 self.title_bar_press = Some(self.last_cursor);

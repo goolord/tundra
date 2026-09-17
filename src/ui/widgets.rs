@@ -62,7 +62,10 @@ pub fn modal_button<'a>(label: &'a str, message: Option<Message>, primary: bool)
 pub fn modal_info_row<'a>(label: &'a str, value: impl Into<std::borrow::Cow<'a, str>>) -> Element<'a, Message> {
     container(
         row![
-            text(label).size(11).width(Length::Fixed(88.0)).style(style::faded_text(0.65)),
+            text(label)
+                .size(11)
+                .width(Length::Fixed(88.0))
+                .style(style::faded_text(0.65)),
             text(value.into()).size(12).width(Length::Fill),
         ]
         .spacing(8)

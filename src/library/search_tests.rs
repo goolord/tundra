@@ -1,7 +1,7 @@
-use super::{cached_paths_for_root, execute_file_search, SearchOutput, SearchRequest, Shared};
+use super::{SearchOutput, SearchRequest, Shared, cached_paths_for_root, execute_file_search};
 use crate::metadata::{CachedMetadata, TagField, TagFields, TagFilter};
-use crate::path_util::file_mtime_secs;
 use crate::path_util::cache_key;
+use crate::path_util::file_mtime_secs;
 use crate::test_fixtures::ScratchDir;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -66,7 +66,10 @@ fn file_query_keeps_tagged_files_the_walk_cannot_reach() {
     Arc::make_mut(&mut metadata.write().unwrap()).insert(cache_key(&ghost), kick_tags(0));
 
     let tag_only = search(&[root.path()], Arc::clone(&metadata), "", "kick").result.paths;
-    assert!(contains_path(&tag_only, &ghost), "tag-only search missed {ghost:?}, got {tag_only:?}");
+    assert!(
+        contains_path(&tag_only, &ghost),
+        "tag-only search missed {ghost:?}, got {tag_only:?}"
+    );
 
     // Narrowing with a file query must not drop what the tag filter just surfaced.
     let narrowed = search(&[root.path()], metadata, "ghost", "kick").result.paths;
@@ -92,7 +95,10 @@ fn tag_only_search_walks_a_root_with_no_cache_or_metadata() {
     std::fs::write(cold.path().join("snare.wav"), b"RIFF").unwrap();
 
     let result = search(&[known.path(), cold.path()], metadata, "", "kick");
-    assert!(!result.walked_roots.contains_key(known.path()), "root with metadata should not be walked");
+    assert!(
+        !result.walked_roots.contains_key(known.path()),
+        "root with metadata should not be walked"
+    );
     assert!(
         result.walked_roots.contains_key(cold.path()),
         "root with no cache and no metadata must be walked, got {:?}",
@@ -110,7 +116,9 @@ fn tag_filter_matches_regardless_of_query_case() {
 #[test]
 fn file_query_narrows_an_active_tag_filter() {
     let (root, audio, metadata) = library_with_tagged_kick();
-    let hit = search(&[root.path()], Arc::clone(&metadata), "shot", "kick").result.paths;
+    let hit = search(&[root.path()], Arc::clone(&metadata), "shot", "kick")
+        .result
+        .paths;
     assert!(hit.contains(&audio), "matching query dropped {audio:?}");
     let miss = search(&[root.path()], metadata, "zzzz", "kick").result.paths;
     assert!(miss.is_empty(), "non-matching query still returned {miss:?}");
@@ -122,11 +130,17 @@ fn cached_paths_for_root_reports_missing_when_only_subtrees_are_cached() {
     let sub = PathBuf::from("/Samples/ADM Samples - Copy");
     let cache = HashMap::from([(
         sub.clone(),
-        vec![sub.join("Snare").join("01_Snare.flac"), sub.join("Snare").join("02_Snare.flac")],
+        vec![
+            sub.join("Snare").join("01_Snare.flac"),
+            sub.join("Snare").join("02_Snare.flac"),
+        ],
     )]);
 
     let (paths, found) = cached_paths_for_root(&cache, &root);
-    assert!(!found, "visited subtrees are a slice of the library, not coverage of the root");
+    assert!(
+        !found,
+        "visited subtrees are a slice of the library, not coverage of the root"
+    );
     assert_eq!(paths.len(), 2);
     assert!(paths.iter().any(|p| p.ends_with("01_Snare.flac")));
 }
@@ -169,8 +183,14 @@ fn cached_paths_for_root_unions_stale_parent_and_verbatim_root() {
 fn cached_paths_for_root_keeps_one_listing_per_cache_key() {
     let root = PathBuf::from(r"F:\Samples");
     let cache = HashMap::from([
-        (root.clone(), vec![PathBuf::from(r"F:\Samples\a.wav"), PathBuf::from(r"F:\Samples\b.wav")]),
-        (PathBuf::from(r"\\?\F:\Samples"), vec![PathBuf::from(r"\\?\F:\Samples\stale.wav")]),
+        (
+            root.clone(),
+            vec![PathBuf::from(r"F:\Samples\a.wav"), PathBuf::from(r"F:\Samples\b.wav")],
+        ),
+        (
+            PathBuf::from(r"\\?\F:\Samples"),
+            vec![PathBuf::from(r"\\?\F:\Samples\stale.wav")],
+        ),
     ]);
 
     let (paths, found) = cached_paths_for_root(&cache, &root);

@@ -60,10 +60,10 @@ impl TagEditorState {
 }
 
 pub fn tag_editor_view(state: &TagEditorState) -> Element<'_, Message> {
-    let target_label = state
-        .target
-        .as_deref()
-        .map_or_else(|| NO_AUDIO_SELECTED.to_string(), |path| crate::path_util::truncate_path(path, 56));
+    let target_label = state.target.as_deref().map_or_else(
+        || NO_AUDIO_SELECTED.to_string(),
+        |path| crate::path_util::truncate_path(path, 56),
+    );
 
     let mut body = column![
         text("Edit Tags").size(18),
@@ -77,7 +77,10 @@ pub fn tag_editor_view(state: &TagEditorState) -> Element<'_, Message> {
     for field in ManualTagEdits::EDITOR_FIELDS {
         body = body.push(
             row![
-                text(field.label()).size(11).width(Length::Fixed(88.0)).style(style::faded_text(0.65)),
+                text(field.label())
+                    .size(11)
+                    .width(Length::Fixed(88.0))
+                    .style(style::faded_text(0.65)),
                 text_input("", state.edits.field_value(field))
                     .on_input(move |input| TagEditorMsg::Input(field, input).into())
                     .padding([6, 8])

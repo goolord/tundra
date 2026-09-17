@@ -10,10 +10,8 @@ use rodio::{Decoder, Source};
 use super::position::PlaybackPosition;
 
 fn open_decoder(path: &Path) -> Result<Decoder<BufReader<File>>, String> {
-    let file = File::open(path)
-        .map_err(|err| format!("Cannot open {}: {err}", path.display()))?;
-    Decoder::try_from(file)
-        .map_err(|err| format!("Cannot decode {}: {err}", path.display()))
+    let file = File::open(path).map_err(|err| format!("Cannot open {}: {err}", path.display()))?;
+    Decoder::try_from(file).map_err(|err| format!("Cannot decode {}: {err}", path.display()))
 }
 
 pub fn probe_decoder(path: &Path) -> Result<StreamInfo, String> {
@@ -87,10 +85,7 @@ impl StreamSource {
                 if total_frames > 0 {
                     (progress * total_frames as f64).round() as u64
                 } else if let Some(duration) = decoder.total_duration() {
-                    frames_from_duration(
-                        Duration::from_secs_f64(progress * duration.as_secs_f64()),
-                        sample_rate,
-                    )
+                    frames_from_duration(Duration::from_secs_f64(progress * duration.as_secs_f64()), sample_rate)
                 } else {
                     0
                 }
@@ -124,10 +119,12 @@ impl Iterator for StreamSource {
 
     fn next(&mut self) -> Option<Self::Item> {
         let sample = self.decoder.next()?;
-        if self.channels > 0 && self.sample_index.is_multiple_of(self.channels)
-            && let Some(position) = &self.position {
-                position.set_frame(self.frame_at(self.sample_index));
-            }
+        if self.channels > 0
+            && self.sample_index.is_multiple_of(self.channels)
+            && let Some(position) = &self.position
+        {
+            position.set_frame(self.frame_at(self.sample_index));
+        }
         self.sample_index += 1;
         Some(sample)
     }
@@ -161,11 +158,7 @@ pub fn append_stream(
     output_sample_rate: u32,
 ) -> Result<(), String> {
     let source = StreamSource::open(path, progress, total_frames, position)?;
-    sink.append(UniformSourceIterator::new(
-        source,
-        output_channels,
-        output_sample_rate,
-    ));
+    sink.append(UniformSourceIterator::new(source, output_channels, output_sample_rate));
     Ok(())
 }
 
@@ -192,12 +185,8 @@ mod tests {
         let position = PlaybackPosition::new(info.total_frames);
 
         let mut source =
-            StreamSource::open(&path, 0.5, info.total_frames, Some(Arc::clone(&position)))
-                .expect("open seeked stream");
-        assert!(
-            source.start_frame > 0,
-            "test needs a decoder that can actually seek"
-        );
+            StreamSource::open(&path, 0.5, info.total_frames, Some(Arc::clone(&position))).expect("open seeked stream");
+        assert!(source.start_frame > 0, "test needs a decoder that can actually seek");
 
         // Pulling samples must advance from the seek point, not replay the file's frame
         // numbering from zero and drag the playhead back to the start.

@@ -12,7 +12,7 @@ use rusqlite::Connection;
 
 use crate::locks::{lock, read, write};
 use crate::metadata::ManualTagEdits;
-use crate::path_util::{cache_key, FileStamp};
+use crate::path_util::{FileStamp, cache_key};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct Row {
@@ -317,7 +317,9 @@ fn update(path: &Path, change: impl FnOnce(&mut Row)) -> Result<(), String> {
 
 /// Instrument recorded for `path`, if the container could not hold one.
 pub fn instrument(path: &Path) -> Option<String> {
-    current_row(path).map(|row| row.fields.instrument).filter(|instrument| !instrument.is_empty())
+    current_row(path)
+        .map(|row| row.fields.instrument)
+        .filter(|instrument| !instrument.is_empty())
 }
 
 /// Instrument the classifier stored, which a newer classifier may replace.
@@ -333,7 +335,9 @@ pub fn tag_version(path: &Path) -> Option<u32> {
 }
 
 pub fn manual_fields(path: &Path) -> Option<ManualTagEdits> {
-    current_row(path).map(|row| row.fields).filter(|fields| !fields.is_empty())
+    current_row(path)
+        .map(|row| row.fields)
+        .filter(|fields| !fields.is_empty())
 }
 
 pub fn set_instrument(path: &Path, instrument: &str, tag_version: u32) -> Result<(), String> {
@@ -463,8 +467,14 @@ mod tests {
         assert!(stamp_matches(&audio, &row));
 
         std::fs::write(&audio, b"audio-v1-replaced").expect("replace");
-        assert!(!stamp_matches(&audio, &row), "recycled path with new contents must hide the old sidecar");
-        assert!(!stamp_matches(&audio, &Row::default()), "pre-stamp rows must not match a real file");
+        assert!(
+            !stamp_matches(&audio, &row),
+            "recycled path with new contents must hide the old sidecar"
+        );
+        assert!(
+            !stamp_matches(&audio, &Row::default()),
+            "pre-stamp rows must not match a real file"
+        );
 
         let _ = std::fs::remove_file(&audio);
         assert!(!stamp_matches(&audio, &row));
@@ -480,7 +490,10 @@ mod tests {
         let writer = Connection::open(&src).expect("open src");
         prepare_schema(&writer).expect("schema");
         writer
-            .execute("INSERT INTO instrument_tags (path, instrument) VALUES ('c:/kick.wav', 'Kick')", [])
+            .execute(
+                "INSERT INTO instrument_tags (path, instrument) VALUES ('c:/kick.wav', 'Kick')",
+                [],
+            )
             .expect("insert");
 
         // `writer` stays open, so the row may still live only in the WAL.
@@ -514,7 +527,10 @@ mod tests {
         with_test_db(db, || {
             assert_eq!(instrument(&audio).as_deref(), Some("Kick"), "reloaded from disk");
             std::fs::write(&audio, b"short").expect("replace file");
-            assert!(instrument(&audio).is_none(), "stamp mismatch must hide stale sidecar row");
+            assert!(
+                instrument(&audio).is_none(),
+                "stamp mismatch must hide stale sidecar row"
+            );
         });
     }
 
@@ -556,7 +572,10 @@ mod tests {
 
             std::fs::write(&audio, b"someone else's file").expect("replace");
             restamp(&audio, before);
-            assert!(instrument(&audio).is_none(), "a stale stamp must not carry the row over");
+            assert!(
+                instrument(&audio).is_none(),
+                "a stale stamp must not carry the row over"
+            );
         });
     }
 }

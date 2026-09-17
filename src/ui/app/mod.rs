@@ -23,13 +23,13 @@ use super::player::Player;
 use super::tag_editor::TagEditorState;
 use super::waveform::WaveFormView;
 use crate::drag_out::NativeDrag;
-use crate::library::cache::{load_startup_caches, DirCache, MetadataCache};
+use crate::library::cache::{DirCache, MetadataCache, load_startup_caches};
 use crate::library::{AllowedDirectories, FavoritesStore};
 use crate::playback::{PlayerEvent, PlayerWorker};
 use futures::channel::oneshot;
 use futures::future::AbortHandle;
 use iced::keyboard::Modifiers;
-use iced::{window, Point, Task};
+use iced::{Point, Task, window};
 use input::{FileDrag, ScrollbarDrag, SidebarResize};
 use prefs::on_window;
 use std::cell::RefCell;
@@ -135,7 +135,9 @@ impl App {
     fn new() -> Self {
         let allowed_directories = AllowedDirectories::load();
         let settings_first_run = allowed_directories.is_empty();
-        let current_dir = allowed_directories.startup_directory().unwrap_or_else(startup_directory);
+        let current_dir = allowed_directories
+            .startup_directory()
+            .unwrap_or_else(startup_directory);
         App {
             file_selector: FileSelector::new(&current_dir),
             player: Player::new(prefs::load_volume(), prefs::load_looping()),
@@ -149,7 +151,11 @@ impl App {
             search_enabled_memo: RefCell::default(),
             caches_ready: false,
             pending_launch_path: crate::launch::primary_open_target(&crate::launch::paths_from_args()),
-            modal: if settings_first_run { Modal::Settings } else { Modal::None },
+            modal: if settings_first_run {
+                Modal::Settings
+            } else {
+                Modal::None
+            },
             dialog: None,
             settings_first_run,
             settings_error: None,
@@ -178,16 +184,22 @@ impl App {
     fn boot() -> (Self, Task<Message>) {
         let mut app = Self::new();
         let allowed = app.allowed_directories.clone();
-        let (is_playing, looping) = (Arc::clone(&app.player.controls.is_playing), Arc::clone(&app.player.controls.looping));
+        let (is_playing, looping) = (
+            Arc::clone(&app.player.controls.is_playing),
+            Arc::clone(&app.player.controls.looping),
+        );
         let volume = app.player.controls.volume;
         let tasks = [
             Task::perform(run_blocking(move || load_startup_caches(allowed)), |caches| {
                 Message::StartupCachesReady(caches.expect("loading caches panicked"))
             }),
-            Task::perform(run_blocking(move || PlayerWorker::spawn(is_playing, looping, volume)), |spawned| {
-                let (worker, events) = spawned.expect("starting the audio thread panicked");
-                Message::PlayerWorkerReady(worker, Arc::new(events))
-            }),
+            Task::perform(
+                run_blocking(move || PlayerWorker::spawn(is_playing, looping, volume)),
+                |spawned| {
+                    let (worker, events) = spawned.expect("starting the audio thread panicked");
+                    Message::PlayerWorkerReady(worker, Arc::new(events))
+                },
+            ),
             app.open_pending_launch(),
             on_window(|id| window::is_maximized(id).map(|maximized| WindowMsg::MaximizedChanged(maximized).into())),
         ];
@@ -199,7 +211,10 @@ impl App {
     }
 
     fn current_file_name(&self) -> Option<String> {
-        self.player.current_file.as_deref().and_then(crate::path_util::file_name_lossy)
+        self.player
+            .current_file
+            .as_deref()
+            .and_then(crate::path_util::file_name_lossy)
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -233,9 +248,11 @@ impl App {
                 self.file_selector.list_viewport_height = viewport.bounds().height;
                 Task::none()
             }
-            Message::FileListScrollbarPress { track_y, track_top, track_height } => {
-                self.press_scrollbar(track_y, track_top, track_height)
-            }
+            Message::FileListScrollbarPress {
+                track_y,
+                track_top,
+                track_height,
+            } => self.press_scrollbar(track_y, track_top, track_height),
             Message::FileListHoverChanged(hovered) => {
                 self.file_list_focused &= hovered;
                 Task::none()
@@ -306,7 +323,8 @@ impl App {
             }
             Message::PlayerWorkerReady(worker, events) => {
                 self.player.attach_worker(worker);
-                let events = Arc::try_unwrap(events).map_or_else(|_| Task::none(), |events| Task::run(events, Message::Player));
+                let events =
+                    Arc::try_unwrap(events).map_or_else(|_| Task::none(), |events| Task::run(events, Message::Player));
                 Task::batch([events, self.open_pending_launch()])
             }
 
@@ -387,7 +405,10 @@ impl App {
                 self.show_error(format!("Couldn't play this file. {err}"));
             }
             // Events for a track that has since been replaced.
-            PlayerEvent::Ended(_) | PlayerEvent::Looped(_) | PlayerEvent::WaveformPeaksReady(_) | PlayerEvent::FileFailed(..) => {}
+            PlayerEvent::Ended(_)
+            | PlayerEvent::Looped(_)
+            | PlayerEvent::WaveformPeaksReady(_)
+            | PlayerEvent::FileFailed(..) => {}
         }
     }
 

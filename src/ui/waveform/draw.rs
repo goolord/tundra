@@ -6,10 +6,10 @@
 //! Lanczos-interpolated trace through them.
 
 use super::view::{WaveFormView, WaveformLayout};
-use super::{PlotArea, WaveForm, PLOT_CLIP_BLEED_LEFT, TIME_MARKER_HEIGHT};
+use super::{PLOT_CLIP_BLEED_LEFT, PlotArea, TIME_MARKER_HEIGHT, WaveForm};
 use crate::waveform_peaks::WaveformPeaks;
 use iced::alignment::{Horizontal, Vertical};
-use iced::widget::canvas::{gradient, path, Frame, Geometry, Gradient, LineCap, LineJoin, Path, Stroke, Text};
+use iced::widget::canvas::{Frame, Geometry, Gradient, LineCap, LineJoin, Path, Stroke, Text, gradient, path};
 use iced::{Color, Pixels, Point, Renderer, Size, Theme, Vector};
 
 /// Share of columns with both lobes at which fills switch to plain two-outline mode, and back.
@@ -25,9 +25,16 @@ const LANCZOS_A: i32 = 3;
 pub(super) fn theme_cache_key(theme: &Theme) -> u32 {
     let palette = theme.extended_palette();
     let (primary, background) = (palette.primary.base.color, palette.background.base.color);
-    [primary.r, primary.g, primary.b, background.r, background.g, background.b]
-        .iter()
-        .fold(0, |key, channel| key ^ channel.to_bits())
+    [
+        primary.r,
+        primary.g,
+        primary.b,
+        background.r,
+        background.g,
+        background.b,
+    ]
+    .iter()
+    .fold(0, |key, channel| key ^ channel.to_bits())
 }
 
 /// One plot column's envelope, in plot coordinates (y grows downward).
@@ -96,7 +103,10 @@ impl WaveForm {
         draw: impl FnOnce(&mut Frame),
     ) {
         let (scale_x, scale_y) = view.content_scale();
-        let origin = Vector::new(view.content_transform_origin_x(size.width, sample_count), size.height / 2.0);
+        let origin = Vector::new(
+            view.content_transform_origin_x(size.width, sample_count),
+            size.height / 2.0,
+        );
         frame.push_transform();
         frame.translate(Vector::new(view.content_translate_x(size.width), 0.0) + origin);
         frame.scale_nonuniform(Vector::new(scale_x, scale_y));
@@ -157,7 +167,11 @@ impl WaveForm {
 
         for amplitude in AMPLITUDE_TICKS {
             let y = plot.amplitude_y(amplitude);
-            let grid_color = if amplitude == 0.0 { palette.axis } else { palette.marker.scale_alpha(0.22) };
+            let grid_color = if amplitude == 0.0 {
+                palette.axis
+            } else {
+                palette.marker.scale_alpha(0.22)
+            };
             let grid = Path::line(Point::new(plot.x, y), Point::new(plot.x + plot.width, y));
             frame.stroke(&grid, Stroke::default().with_color(grid_color).with_width(1.0));
             let tick = Path::line(Point::new(plot.x - 4.0, y), Point::new(plot.x, y));
@@ -172,7 +186,11 @@ impl WaveForm {
                 (Vertical::Center, y)
             };
             frame.fill_text(Text {
-                content: if amplitude == 0.0 { "0".into() } else { format!("{amplitude:.1}") },
+                content: if amplitude == 0.0 {
+                    "0".into()
+                } else {
+                    format!("{amplitude:.1}")
+                },
                 position: Point::new(plot.x - 6.0, label_y),
                 color: palette.marker_label,
                 size: Pixels(10.0),
@@ -227,7 +245,14 @@ impl WaveForm {
 
     /// Fills each lobe from its outline toward the center line. When the whole view has lobes
     /// on only one side, the fill continues past the center as a fading mirror image.
-    fn draw_lobe_fills(&self, frame: &mut Frame, columns: &[ColumnSample], column_width: f32, center: f32, fill: Color) {
+    fn draw_lobe_fills(
+        &self,
+        frame: &mut Frame,
+        columns: &[ColumnSample],
+        column_width: f32,
+        center: f32,
+        fill: Color,
+    ) {
         let half = column_width * 0.5;
         let quad = |builder: &mut path::Builder, x: f32, y0: f32, y1: f32| {
             builder.move_to(Point::new(x - half, y0));
@@ -279,7 +304,10 @@ impl WaveForm {
             frame.fill(&solid.build(), fill);
         }
         if mirror_any && let Some(peak) = peak {
-            frame.fill(&mirror.build(), mirror_fill_gradient(fill, center, flip_y(peak, center), center));
+            frame.fill(
+                &mirror.build(),
+                mirror_fill_gradient(fill, center, flip_y(peak, center), center),
+            );
         }
     }
 
@@ -309,7 +337,12 @@ impl WaveForm {
                 return;
             }
             let line = Path::line(Point::new(x, 0.0), Point::new(x, size.height));
-            frame.stroke(&line, Stroke::default().with_color(palette.marker.scale_alpha(alpha)).with_width(1.0));
+            frame.stroke(
+                &line,
+                Stroke::default()
+                    .with_color(palette.marker.scale_alpha(alpha))
+                    .with_width(1.0),
+            );
             if let Some(content) = label {
                 frame.fill_text(Text {
                     content,
@@ -362,7 +395,13 @@ fn stroke_playhead(frame: &mut Frame, x: f32, height: f32, theme: &Theme) {
     let accent = theme.extended_palette().primary.base.color;
     let line = Path::line(Point::new(x, 0.0), Point::new(x, height));
     for (color, width) in [(accent, 2.0), (accent.scale_alpha(0.35), 6.0)] {
-        frame.stroke(&line, Stroke::default().with_color(color).with_width(width).with_line_cap(LineCap::Round));
+        frame.stroke(
+            &line,
+            Stroke::default()
+                .with_color(color)
+                .with_width(width)
+                .with_line_cap(LineCap::Round),
+        );
     }
 }
 
@@ -384,7 +423,12 @@ struct Window {
     phase: f32,
 }
 
-fn columns_from_window(peaks: &WaveformPeaks, center: f32, window: Window, layout: WaveformLayout) -> Vec<ColumnSample> {
+fn columns_from_window(
+    peaks: &WaveformPeaks,
+    center: f32,
+    window: Window,
+    layout: WaveformLayout,
+) -> Vec<ColumnSample> {
     debug_assert!(layout.column_count <= layout.width.ceil() as usize);
     let x_shift = -window.phase * layout.px_per_sample;
     (0..layout.column_count)
@@ -478,7 +522,11 @@ fn sinc_pi(x: f64) -> f64 {
 /// `L(x) = sinc(x) sinc(x/3)` for `|x| < 3`.
 fn lanczos3(x: f64) -> f64 {
     let a = f64::from(LANCZOS_A);
-    if !x.is_finite() || x.abs() >= a { 0.0 } else { sinc_pi(x) * sinc_pi(x / a) }
+    if !x.is_finite() || x.abs() >= a {
+        0.0
+    } else {
+        sinc_pi(x) * sinc_pi(x / a)
+    }
 }
 
 /// Lanczos-3 at index `t` over `len` samples read through `sample`;
@@ -516,7 +564,10 @@ fn mirror_fill_gradient(fill: Color, outline_y: f32, mirror_y: f32, center: f32)
     let delta = mirror_y - outline_y;
     // A gradient needs distinct end points; nudge a degenerate one away from the mirror side.
     let outline_y = if delta.abs() < 1.0 {
-        let direction = [delta, center - outline_y].into_iter().find(|d| *d != 0.0).map_or(1.0, f32::signum);
+        let direction = [delta, center - outline_y]
+            .into_iter()
+            .find(|d| *d != 0.0)
+            .map_or(1.0, f32::signum);
         outline_y - direction
     } else {
         outline_y
@@ -564,7 +615,10 @@ fn nice_time_step(visible_secs: f64) -> f64 {
     }
     let raw = visible_secs / 8.0;
     let magnitude = 10_f64.powf(raw.log10().floor());
-    let nice = [1.0, 2.0, 5.0].into_iter().find(|nice| raw / magnitude <= *nice).unwrap_or(10.0);
+    let nice = [1.0, 2.0, 5.0]
+        .into_iter()
+        .find(|nice| raw / magnitude <= *nice)
+        .unwrap_or(10.0);
     (nice * magnitude).max(0.001)
 }
 
@@ -590,7 +644,10 @@ fn minor_time_step(major_step: f64, visible_secs: f64, width: f32) -> Option<f64
 /// A ruler label: `h:mm:ss`, `m:ss`, or `s` with as many decimals as `step` needs.
 fn format_time(secs: f64, step: f64) -> String {
     let secs = secs.max(0.0);
-    let decimals = [1.0, 0.1, 0.01].into_iter().position(|limit| step >= limit).unwrap_or(3);
+    let decimals = [1.0, 0.1, 0.01]
+        .into_iter()
+        .position(|limit| step >= limit)
+        .unwrap_or(3);
     let width = if decimals == 0 { 2 } else { decimals + 3 };
     let hours = (secs / 3600.0).floor() as u32;
     let minutes = ((secs % 3600.0) / 60.0).floor() as u32;
@@ -650,7 +707,8 @@ mod tests {
     fn far_zoom_picks_minor_step_that_still_has_gap() {
         let (visible_secs, width) = (200.0, 800.0);
         let major = nice_time_step(visible_secs);
-        let minor = minor_time_step(major, visible_secs, width).expect("far zoom should still have a sparse minor grid");
+        let minor =
+            minor_time_step(major, visible_secs, width).expect("far zoom should still have a sparse minor grid");
         assert!(minor < major);
         assert!(tick_step_visible(minor, visible_secs, width));
         assert!(minor >= 1.0, "blended 0.1s/1s ticks must not be chosen");
@@ -694,7 +752,10 @@ mod tests {
 
     #[test]
     fn mixed_sides_clip_fill_at_center() {
-        assert_eq!(fill_span(&column(20.0, 100.0), 100.0, false, Side::Up), Some((20.0, 100.0)));
+        assert_eq!(
+            fill_span(&column(20.0, 100.0), 100.0, false, Side::Up),
+            Some((20.0, 100.0))
+        );
     }
 
     #[test]
@@ -761,7 +822,10 @@ mod tests {
             let stem = peaks.midpoint_at(start + index);
             let x = (index as f32 + 0.5 - phase) * px_per_sample;
             let trace = interpolate_peak_at(&peaks, sample_index_at_x(x, start, phase, px_per_sample));
-            assert!((trace - stem).abs() < 1e-5, "sample {index} at x {x}: stem {stem}, trace {trace}");
+            assert!(
+                (trace - stem).abs() < 1e-5,
+                "sample {index} at x {x}: stem {stem}, trace {trace}"
+            );
         }
     }
 

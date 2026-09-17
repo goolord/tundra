@@ -5,8 +5,8 @@ use std::hash::Hasher;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
-use super::read::{generic_tag_fields, read_container_tags_as, Container};
-use super::riff::{is_aiff_tag_chunk, is_wav_tag_chunk, Endian};
+use super::read::{Container, generic_tag_fields, read_container_tags_as};
+use super::riff::{Endian, is_aiff_tag_chunk, is_wav_tag_chunk};
 use super::write::TagEdit;
 
 pub(crate) fn verify_staged_write(
@@ -26,12 +26,7 @@ pub(crate) fn verify_staged_write(
     verify_read_back(original, staged, container, edit)
 }
 
-fn verify_read_back(
-    original: &Path,
-    staged: &Path,
-    container: Container,
-    edit: &TagEdit,
-) -> Result<(), String> {
+fn verify_read_back(original: &Path, staged: &Path, container: Container, edit: &TagEdit) -> Result<(), String> {
     let tags = read_container_tags_as(staged, container).ok_or_else(|| {
         format!(
             "Refused to save tags to {}: the tagged copy could not be read back",
@@ -88,9 +83,7 @@ fn audio_fingerprint(path: &Path, container: Container) -> Result<u64, String> {
         Container::Wav => hash_iff(&mut reader, &mut hasher, Endian::Little, |id, head| {
             !is_wav_tag_chunk(id, head)
         }),
-        Container::Aiff => {
-            hash_iff(&mut reader, &mut hasher, Endian::Big, |id, _| !is_aiff_tag_chunk(id))
-        }
+        Container::Aiff => hash_iff(&mut reader, &mut hasher, Endian::Big, |id, _| !is_aiff_tag_chunk(id)),
         Container::Flac => hash_flac(&mut reader, &mut hasher),
         Container::Mp3 => hash_mpeg(&mut reader, &mut hasher, len),
         Container::Ogg => hash_ogg_properties(path, &mut hasher),
@@ -270,8 +263,7 @@ mod tests {
             bytes[index] ^= 0xFF;
             std::fs::write(&staged, bytes).expect("staged");
 
-            let err = verify_staged_write(&original, &staged, container, &TagEdit::default())
-                .expect_err(ext);
+            let err = verify_staged_write(&original, &staged, container, &TagEdit::default()).expect_err(ext);
             assert!(err.contains("audio data would have changed"), "{ext}: {err}");
 
             std::fs::copy(&original, &staged).expect("identical copy");

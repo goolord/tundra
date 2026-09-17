@@ -4,12 +4,14 @@ use super::App;
 use crate::ui::message::{BulkAutoTagMsg, Message, WaveformMsg, WindowMsg};
 use futures::StreamExt;
 use iced::event::{self, Event};
-use iced::{keyboard, mouse, window, Subscription};
+use iced::{Subscription, keyboard, mouse, window};
 use std::time::Duration;
 
 /// A message every `millis` milliseconds.
 fn every(millis: u64) -> Subscription<()> {
-    Subscription::run_with(millis, |&millis| async_io::Timer::interval(Duration::from_millis(millis)).map(|_| ()))
+    Subscription::run_with(millis, |&millis| {
+        async_io::Timer::interval(Duration::from_millis(millis)).map(|_| ())
+    })
 }
 
 fn global_event(event: Event, status: event::Status, _window: window::Id) -> Option<Message> {

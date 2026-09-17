@@ -3,9 +3,9 @@
 //! Windows and macOS use the [`drag`] crate. Linux/X11 uses an XDND source adapted
 //! from [guth](https://docs.rs/guth) (Apache-2.0 / MIT).
 
-use iced::window::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 #[cfg(any(windows, target_os = "macos"))]
 use iced::window::raw_window_handle::{HandleError, WindowHandle};
+use iced::window::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::path::PathBuf;
 
 #[cfg(any(windows, target_os = "macos"))]
@@ -48,12 +48,11 @@ mod x11 {
     use std::path::Path;
     use std::time::{Duration, Instant};
     use x11rb::connection::Connection;
-    use x11rb::protocol::xproto::{
-        Atom, AtomEnum, ClientMessageEvent, ConfigureWindowAux, ConnectionExt as _,
-        CreateWindowAux, EventMask, PropMode, SelectionNotifyEvent, SelectionRequestEvent,
-        StackMode, Window, WindowClass, SELECTION_NOTIFY_EVENT,
-    };
     use x11rb::protocol::Event;
+    use x11rb::protocol::xproto::{
+        Atom, AtomEnum, ClientMessageEvent, ConfigureWindowAux, ConnectionExt as _, CreateWindowAux, EventMask,
+        PropMode, SELECTION_NOTIFY_EVENT, SelectionNotifyEvent, SelectionRequestEvent, StackMode, Window, WindowClass,
+    };
     use x11rb::rust_connection::RustConnection;
     use x11rb::wrapper::ConnectionExt as _;
 
@@ -268,11 +267,7 @@ mod x11 {
                 )?
                 .check()?;
             self.connection
-                .set_selection_owner(
-                    self.source_window,
-                    self.atoms.XdndSelection,
-                    x11rb::CURRENT_TIME,
-                )?
+                .set_selection_owner(self.source_window, self.atoms.XdndSelection, x11rb::CURRENT_TIME)?
                 .check()?;
             let timestamp = self.server_timestamp()?;
             let owner = self
@@ -295,14 +290,9 @@ mod x11 {
                 owns_selection: true,
             });
             self.connection.flush()?;
-            let pointer = self
-                .connection
-                .query_pointer(self.root)?
-                .reply()?;
+            let pointer = self.connection.query_pointer(self.root)?.reply()?;
             self.move_icon(pointer.root_x, pointer.root_y)?;
-            self.connection
-                .map_window(self.source_window)?
-                .check()?;
+            self.connection.map_window(self.source_window)?.check()?;
             self.connection.flush()?;
             Ok(())
         }
@@ -340,20 +330,13 @@ mod x11 {
         }
 
         fn update_target(&mut self) -> Result<bool, X11Error> {
-            let pointer = self
-                .connection
-                .query_pointer(self.root)?
-                .reply()?;
+            let pointer = self.connection.query_pointer(self.root)?.reply()?;
             self.move_icon(pointer.root_x, pointer.root_y)?;
             let target = self.find_target(pointer.child)?;
             let previous = self.drag.as_ref().and_then(|drag| drag.target);
             if target != previous {
                 if let Some(previous) = previous {
-                    self.send_target(
-                        previous,
-                        self.atoms.XdndLeave,
-                        [self.source_window, 0, 0, 0, 0],
-                    )?;
+                    self.send_target(previous, self.atoms.XdndLeave, [self.source_window, 0, 0, 0, 0])?;
                 }
                 if let Some(target) = target {
                     self.send_target(
@@ -374,11 +357,7 @@ mod x11 {
                     drag.position_pending = false;
                 }
             }
-            let send_position = target.is_some()
-                && self
-                    .drag
-                    .as_ref()
-                    .is_some_and(|drag| !drag.position_pending);
+            let send_position = target.is_some() && self.drag.as_ref().is_some_and(|drag| !drag.position_pending);
             if let Some(target) = target.filter(|_| send_position) {
                 let coordinates = Self::pack_xdnd_coords(pointer.root_x, pointer.root_y);
                 let timestamp = self
@@ -389,13 +368,7 @@ mod x11 {
                 self.send_target(
                     target,
                     self.atoms.XdndPosition,
-                    [
-                        self.source_window,
-                        0,
-                        coordinates,
-                        timestamp,
-                        self.atoms.XdndActionCopy,
-                    ],
+                    [self.source_window, 0, coordinates, timestamp, self.atoms.XdndActionCopy],
                 )?;
                 if let Some(drag) = self.drag.as_mut() {
                     drag.accepted = false;
@@ -407,14 +380,13 @@ mod x11 {
         }
 
         fn move_icon(&self, root_x: i16, root_y: i16) -> Result<(), X11Error> {
-            self.connection
-                .configure_window(
-                    self.source_window,
-                    &ConfigureWindowAux::new()
-                        .x(i32::from(root_x) + 16)
-                        .y(i32::from(root_y) + 16)
-                        .stack_mode(StackMode::ABOVE),
-                )?;
+            self.connection.configure_window(
+                self.source_window,
+                &ConfigureWindowAux::new()
+                    .x(i32::from(root_x) + 16)
+                    .y(i32::from(root_y) + 16)
+                    .stack_mode(StackMode::ABOVE),
+            )?;
             Ok(self.connection.flush()?)
         }
 
@@ -439,11 +411,7 @@ mod x11 {
             let timestamp = drag.timestamp;
             if let Some(target) = target.filter(|_| accepted)
                 && self
-                    .send_target(
-                        target,
-                        self.atoms.XdndDrop,
-                        [self.source_window, 0, timestamp, 0, 0],
-                    )
+                    .send_target(target, self.atoms.XdndDrop, [self.source_window, 0, timestamp, 0, 0])
                     .is_ok()
             {
                 if let Some(drag) = self.drag.as_mut() {
@@ -464,24 +432,16 @@ mod x11 {
                 .filter(|drag| !drag.dropped)
                 .and_then(|drag| drag.target)
             {
-                let _ = self.send_target(
-                    target,
-                    self.atoms.XdndLeave,
-                    [self.source_window, 0, 0, 0, 0],
-                );
+                let _ = self.send_target(target, self.atoms.XdndLeave, [self.source_window, 0, 0, 0, 0]);
             }
             self.reset(true);
         }
 
         fn reset(&mut self, release_selection: bool) {
-            if release_selection
-                && let Some(drag) = self.drag.as_ref().filter(|drag| drag.owns_selection)
-            {
-                let _ = self.connection.set_selection_owner(
-                    x11rb::NONE,
-                    self.atoms.XdndSelection,
-                    drag.timestamp,
-                );
+            if release_selection && let Some(drag) = self.drag.as_ref().filter(|drag| drag.owns_selection) {
+                let _ = self
+                    .connection
+                    .set_selection_owner(x11rb::NONE, self.atoms.XdndSelection, drag.timestamp);
                 let _ = self.connection.flush();
             }
             let _ = self.connection.unmap_window(self.source_window);
@@ -490,16 +450,9 @@ mod x11 {
         }
 
         fn find_target(&self, child: Window) -> Result<Option<DragTarget>, X11Error> {
-            let mut current = if child == x11rb::NONE {
-                self.root
-            } else {
-                child
-            };
+            let mut current = if child == x11rb::NONE { self.root } else { child };
             for _ in 0..WINDOW_HIERARCHY_LIMIT {
-                let reply = self
-                    .connection
-                    .query_pointer(current)?
-                    .reply()?;
+                let reply = self.connection.query_pointer(current)?.reply()?;
                 if reply.child == x11rb::NONE || reply.child == current {
                     break;
                 }
@@ -514,10 +467,7 @@ mod x11 {
                 if current == self.root {
                     break;
                 }
-                let tree = self
-                    .connection
-                    .query_tree(current)?
-                    .reply()?;
+                let tree = self.connection.query_tree(current)?.reply()?;
                 if tree.parent == x11rb::NONE || tree.parent == current {
                     break;
                 }
@@ -590,8 +540,7 @@ mod x11 {
                             && drag.target.is_some_and(|target| target.window == data[0])
                         {
                             drag.position_pending = false;
-                            drag.accepted =
-                                data[1] & 1 != 0 && data[4] == self.atoms.XdndActionCopy;
+                            drag.accepted = data[1] & 1 != 0 && data[4] == self.atoms.XdndActionCopy;
                         }
                     }
                     Event::ClientMessage(event)
@@ -614,8 +563,7 @@ mod x11 {
         }
 
         fn answer_selection_request(&self, request: SelectionRequestEvent) -> Result<(), X11Error> {
-            if request.owner != self.source_window || request.selection != self.atoms.XdndSelection
-            {
+            if request.owner != self.source_window || request.selection != self.atoms.XdndSelection {
                 return Ok(());
             }
             let property = if request.property == x11rb::NONE {
@@ -624,9 +572,7 @@ mod x11 {
                 request.property
             };
             let active = self.drag.as_ref().filter(|drag| {
-                drag.dropped
-                    && drag.owns_selection
-                    && timestamp_not_older(request.time, drag.timestamp)
+                drag.dropped && drag.owns_selection && timestamp_not_older(request.time, drag.timestamp)
             });
             let written = if request.target == self.atoms.TextUriList {
                 active.is_some_and(|drag| {
@@ -660,11 +606,7 @@ mod x11 {
                 requestor: request.requestor,
                 selection: request.selection,
                 target: request.target,
-                property: if written {
-                    property
-                } else {
-                    x11rb::NONE
-                },
+                property: if written { property } else { x11rb::NONE },
             };
             self.connection
                 .send_event(false, request.requestor, EventMask::NO_EVENT, notify)?
@@ -672,12 +614,7 @@ mod x11 {
             Ok(self.connection.flush()?)
         }
 
-        fn send_target(
-            &self,
-            target: DragTarget,
-            message_type: Atom,
-            data: [u32; 5],
-        ) -> Result<(), X11Error> {
+        fn send_target(&self, target: DragTarget, message_type: Atom, data: [u32; 5]) -> Result<(), X11Error> {
             let event = ClientMessageEvent::new(32, target.window, message_type, data);
             self.connection
                 .send_event(false, target.recipient, EventMask::NO_EVENT, event)?

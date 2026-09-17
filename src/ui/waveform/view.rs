@@ -4,7 +4,7 @@
 //! `overscroll` is the rubber-band stretch when panning past either end; it
 //! springs back to zero.
 
-use iced::keyboard::{key::Named, Key};
+use iced::keyboard::{Key, key::Named};
 use iced::mouse::ScrollDelta;
 
 const MIN_ZOOM: f32 = 1.0;
@@ -34,7 +34,11 @@ fn visible_samples(sample_count: usize, zoom: f32) -> usize {
 /// The largest `offset`: the window's start when it shows the track's end.
 fn max_left(sample_count: usize, zoom: f32) -> f64 {
     let max_start = sample_count.saturating_sub(visible_samples(sample_count, zoom));
-    if max_start == 0 { 0.0 } else { max_start as f64 / sample_count as f64 }
+    if max_start == 0 {
+        0.0
+    } else {
+        max_start as f64 / sample_count as f64
+    }
 }
 
 pub(super) fn visible_fraction_of(sample_count: usize, zoom: f32) -> f64 {
@@ -109,7 +113,10 @@ impl WaveFormView {
 
     /// Pans by `delta` visible widths.
     pub fn pan(&mut self, delta: f32, sample_count: usize) {
-        self.apply_pan_delta(f64::from(delta) * visible_fraction_of(sample_count, self.zoom), sample_count);
+        self.apply_pan_delta(
+            f64::from(delta) * visible_fraction_of(sample_count, self.zoom),
+            sample_count,
+        );
     }
 
     /// Moves `offset` by `offset_delta`, stretching into overscroll past either end.
@@ -234,7 +241,11 @@ impl WaveFormView {
         let samples_per_col = if visible_count == 0 {
             1
         } else {
-            let columns = if width <= 0.0 { 1 } else { (width.ceil() as usize).clamp(1, visible_count) };
+            let columns = if width <= 0.0 {
+                1
+            } else {
+                (width.ceil() as usize).clamp(1, visible_count)
+            };
             visible_count.div_ceil(columns).next_power_of_two()
         };
         let column_count = visible_count.div_ceil(samples_per_col);
@@ -309,7 +320,10 @@ mod tests {
         let before = sample_under(&view);
         view.apply_zoom_at(2.0, anchor_x, samples);
         let after = sample_under(&view);
-        assert!((after - before).abs() < 2.0, "cursor sample moved: before={before} after={after}");
+        assert!(
+            (after - before).abs() < 2.0,
+            "cursor sample moved: before={before} after={after}"
+        );
     }
 
     #[test]
@@ -348,7 +362,10 @@ mod tests {
         assert_eq!((start, phase), (0, 0.0));
         let layout = view.waveform_layout(800.0, end - start);
         let first_col_left = 0.5 * layout.column_width - phase * layout.px_per_sample - layout.column_width * 0.5;
-        assert!(first_col_left >= -f32::EPSILON, "first column envelope should reach the left plot edge");
+        assert!(
+            first_col_left >= -f32::EPSILON,
+            "first column envelope should reach the left plot edge"
+        );
     }
 
     #[test]

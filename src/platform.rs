@@ -41,7 +41,11 @@ pub fn reveal_in_file_manager(path: &Path) {
     #[cfg(all(unix, not(target_os = "macos")))]
     let mut command = {
         let mut command = Command::new("xdg-open");
-        command.arg(if path.is_dir() { path } else { path.parent().unwrap_or(path) });
+        command.arg(if path.is_dir() {
+            path
+        } else {
+            path.parent().unwrap_or(path)
+        });
         command
     };
     if let Err(err) = command.spawn() {

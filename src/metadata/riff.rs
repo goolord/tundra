@@ -10,7 +10,7 @@ use lofty::id3::v2::Id3v2Tag;
 use lofty::tag::TagExt;
 
 use super::read::{WAV_ARTIST_KEY, WAV_COMMENT_KEY, WAV_GENRE_KEY, WAV_INSTRUMENT_KEY, WAV_TITLE_KEY};
-use super::write::{apply_id3_edit, TagEdit};
+use super::write::{TagEdit, apply_id3_edit};
 
 pub(crate) type ChunkId = [u8; 4];
 
@@ -230,15 +230,10 @@ pub(crate) fn write_wav_tags(path: &std::path::Path, edit: &TagEdit) -> Result<(
         replace_chunk(&mut chunks, id3_index, id3_chunk);
     }
 
-    std::fs::write(path, encode_riff_wave(&chunks))
-        .map_err(|err| path_io_error("write tags to", path, err))
+    std::fs::write(path, encode_riff_wave(&chunks)).map_err(|err| path_io_error("write tags to", path, err))
 }
 
-fn replace_chunk(
-    chunks: &mut Vec<(ChunkId, Vec<u8>)>,
-    index: Option<usize>,
-    chunk: Option<(ChunkId, Vec<u8>)>,
-) {
+fn replace_chunk(chunks: &mut Vec<(ChunkId, Vec<u8>)>, index: Option<usize>, chunk: Option<(ChunkId, Vec<u8>)>) {
     match (index, chunk) {
         (Some(index), Some(chunk)) => chunks[index] = chunk,
         (Some(index), None) => {

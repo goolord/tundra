@@ -5,8 +5,8 @@ use super::read::is_audio;
 use super::fields::TagFields;
 use super::hints::artist_hint_from_path;
 use super::read::{
-    durable_instrument, file_tundra_tag_version, instrument_from_marked_comment, parse_tundra_comment_version,
-    read_native_tags, tundra_tagged_file, NativeTags, TUNDRA_TAG_VERSION,
+    NativeTags, TUNDRA_TAG_VERSION, durable_instrument, file_tundra_tag_version, instrument_from_marked_comment,
+    parse_tundra_comment_version, read_native_tags, tundra_tagged_file,
 };
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -42,19 +42,14 @@ impl AutoTagFieldStatus {
     ) -> Self {
         let tundra_tagged = tundra_tagged_file(path, comment, native_instrument);
         let has_instrument = !explicit_instrument.trim().is_empty();
-        let current_tag =
-            file_tundra_tag_version(path, comment, native_instrument) == Some(TUNDRA_TAG_VERSION);
+        let current_tag = file_tundra_tag_version(path, comment, native_instrument) == Some(TUNDRA_TAG_VERSION);
         Self {
             needs_instrument: !has_instrument,
             can_retag_instrument: tundra_tagged && has_instrument && !current_tag,
-            needs_artist: native_writable
-                && file_artist.trim().is_empty()
-                && artist_hint_from_path(path).is_some(),
+            needs_artist: native_writable && file_artist.trim().is_empty() && artist_hint_from_path(path).is_some(),
             // The marker claims the instrument for future upgrades, so it only goes
             // on files whose instrument Tundra writes or already owns.
-            needs_comment: native_writable
-                && (!has_instrument || tundra_tagged)
-                && needs_auto_tag_comment(comment),
+            needs_comment: native_writable && (!has_instrument || tundra_tagged) && needs_auto_tag_comment(comment),
         }
     }
 }
@@ -80,7 +75,11 @@ pub(crate) fn inspect_native(path: &Path) -> NativeInspection {
         native.comment.as_deref().unwrap_or_default(),
         native_writable,
     );
-    NativeInspection { native, durable_instrument, status }
+    NativeInspection {
+        native,
+        durable_instrument,
+        status,
+    }
 }
 
 pub fn auto_tag_field_status(path: &Path) -> Option<AutoTagFieldStatus> {

@@ -32,10 +32,8 @@ pub fn title_bar(always_on_top: bool, active_file: Option<&str>) -> Element<'sta
 
     container(
         row![
-            fill(stack![blank_drag_area(), fill(menu_bar_widget(always_on_top))].into())
-                .width(Length::FillPortion(1)),
-            fill(drag_area(fill(title.into()).align_y(Alignment::Center)))
-                .width(Length::FillPortion(2)),
+            fill(stack![blank_drag_area(), fill(menu_bar_widget(always_on_top))].into()).width(Length::FillPortion(1)),
+            fill(drag_area(fill(title.into()).align_y(Alignment::Center))).width(Length::FillPortion(2)),
             fill(
                 stack![
                     blank_drag_area(),
@@ -105,7 +103,11 @@ fn window_button(label: &'static str, message: Message, close: bool) -> Element<
             Color::from_rgb8(0xc4, 0x2b, 0x1c),
             Color::from_rgb8(0x9a, 0x1f, 0x12),
         );
-        let text_color = if red == Color::TRANSPARENT { base.text_color } else { Color::WHITE };
+        let text_color = if red == Color::TRANSPARENT {
+            base.text_color
+        } else {
+            Color::WHITE
+        };
         button::Style { text_color, ..base }.with_background(red)
     })
     .into()
@@ -131,23 +133,30 @@ fn menu_bar_widget(always_on_top: bool) -> Element<'static, Message> {
     };
 
     menu_bar!(
-        (menu_root("File"), menu_tpl(menu_items!(
-            (menu_item("Open File…", Message::OpenFile)),
-            (menu_item("Open Folder…", Message::OpenFolder)),
-            (menu_item("Go to Home", Message::GoHome)),
-            (menu_item("Refresh", Message::RefreshDirectory)),
-            (menu_item("Settings…", SettingsMsg::Open.into())),
-            (menu_item("Auto Tag (untagged)…", AutoTagMsg::Open.into())),
-            (menu_item("Bulk Auto Tag…", BulkAutoTagMsg::Open.into())),
-            (menu_item("Invalidate Cache", Message::InvalidateDircache)),
-            (menu_item("Quit", Message::Quit)),
-        ))),
-        (menu_root("View"), menu_tpl(menu_items!(
-            (menu_toggle_item("Always On Top", always_on_top, Message::SetAlwaysOnTop(!always_on_top))),
-        ))),
-        (menu_root("Help"), menu_tpl(menu_items!(
-            (menu_item("About Tundra", Message::About)),
-        ))),
+        (
+            menu_root("File"),
+            menu_tpl(menu_items!(
+                (menu_item("Open File…", Message::OpenFile)),
+                (menu_item("Open Folder…", Message::OpenFolder)),
+                (menu_item("Go to Home", Message::GoHome)),
+                (menu_item("Refresh", Message::RefreshDirectory)),
+                (menu_item("Settings…", SettingsMsg::Open.into())),
+                (menu_item("Auto Tag (untagged)…", AutoTagMsg::Open.into())),
+                (menu_item("Bulk Auto Tag…", BulkAutoTagMsg::Open.into())),
+                (menu_item("Invalidate Cache", Message::InvalidateDircache)),
+                (menu_item("Quit", Message::Quit)),
+            ))
+        ),
+        (
+            menu_root("View"),
+            menu_tpl(menu_items!(
+                (menu_toggle_item("Always On Top", always_on_top, Message::SetAlwaysOnTop(!always_on_top))),
+            ))
+        ),
+        (
+            menu_root("Help"),
+            menu_tpl(menu_items!((menu_item("About Tundra", Message::About)),))
+        ),
     )
     .height(Length::Fill)
     .padding(Padding::from([0.0, 2.0]))
@@ -193,10 +202,7 @@ fn menu_item(label: &'static str, message: Message) -> button::Button<'static, M
     menu_button(text(label).size(13).width(Length::Fill), message)
 }
 
-fn menu_button(
-    content: impl Into<Element<'static, Message>>,
-    message: Message,
-) -> button::Button<'static, Message> {
+fn menu_button(content: impl Into<Element<'static, Message>>, message: Message) -> button::Button<'static, Message> {
     button(content)
         .width(Length::Fill)
         .padding([3, 10])

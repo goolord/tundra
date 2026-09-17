@@ -12,23 +12,22 @@
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
+use lofty::TextEncoding;
 use lofty::config::WriteOptions;
 use lofty::file::AudioFile;
 use lofty::id3::v2::{Frame, FrameId, Id3v2Tag, TextInformationFrame};
 use lofty::ogg::tag::VorbisComments;
 use lofty::tag::Accessor;
-use lofty::TextEncoding;
 
-use crate::path_util::{open_file, path_io_error, FileStamp};
 use super::read::is_audio;
+use crate::path_util::{FileStamp, open_file, path_io_error};
 
-use super::auto_tag::{inspect_native, NativeInspection};
+use super::auto_tag::{NativeInspection, inspect_native};
 use super::fields::ManualTagEdits;
 use super::hints::artist_hint_from_path;
 use super::read::{
-    non_empty, tundra_comment, write_parse_options,
-    Container, NativeTags, ID3_INSTRUMENT_KEY, TUNDRA_TAG_VERSION, VORBIS_ARTIST_KEY,
-    VORBIS_COMMENT_KEY, VORBIS_INSTRUMENT_KEY,
+    Container, ID3_INSTRUMENT_KEY, NativeTags, TUNDRA_TAG_VERSION, VORBIS_ARTIST_KEY, VORBIS_COMMENT_KEY,
+    VORBIS_INSTRUMENT_KEY, non_empty, tundra_comment, write_parse_options,
 };
 
 const VORBIS_TITLE_KEY: &str = "TITLE";
@@ -174,8 +173,7 @@ pub(crate) fn write_tags(path: &Path, edit: &TagEdit) -> Result<(), String> {
         return Ok(());
     }
     let target = write_target(path);
-    let container = Container::detect(&target)
-        .ok_or_else(|| format!("Unsupported file type: {}", path.display()))?;
+    let container = Container::detect(&target).ok_or_else(|| format!("Unsupported file type: {}", path.display()))?;
     // Reads pick the parser by extension; a tag written in a format they will
     // not look for would vanish from search.
     if Container::of(&target) != Some(container) {
@@ -201,21 +199,19 @@ pub(crate) fn write_tags(path: &Path, edit: &TagEdit) -> Result<(), String> {
 /// turn it into a detached copy and leave the real file untagged.
 fn write_target(path: &Path) -> PathBuf {
     let is_link = std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink());
-    if is_link
-        && let Ok(target) = crate::path_util::canonical_path(path) {
-            return target;
-        }
+    if is_link && let Ok(target) = crate::path_util::canonical_path(path) {
+        return target;
+    }
     path.to_path_buf()
 }
 
 /// Edits a copy, then swaps it in, so a failed write never truncates the original.
-pub(crate) fn stage_and_replace(
-    path: &Path,
-    edit: impl FnOnce(&Path) -> Result<(), String>,
-) -> Result<(), String> {
+pub(crate) fn stage_and_replace(path: &Path, edit: impl FnOnce(&Path) -> Result<(), String>) -> Result<(), String> {
     use crate::safe_write::{ensure_writable, replace_file, sync_file, sync_parent_dir, unique_sidecar};
 
-    let original_perms = std::fs::metadata(path).map_err(|err| path_io_error("read", path, err))?.permissions();
+    let original_perms = std::fs::metadata(path)
+        .map_err(|err| path_io_error("read", path, err))?
+        .permissions();
     // Size and mtime, to notice another program writing the file mid-edit.
     let before_stamp = FileStamp::of(path);
     let tmp = unique_sidecar(path, "tag");
@@ -312,13 +308,11 @@ pub fn write_manual_tags(path: &Path, edits: &ManualTagEdits) -> Result<SavedTo,
         // The file now holds every field, so stale sidecar values must not
         // shadow it on the next read.
         Ok(()) => crate::tag_store::clear_manual_fields(path).map(|()| SavedTo::File),
-        Err(disk_err) => crate::tag_store::set_manual_fields(
-            path,
-            &sidecar_fields_for_fallback(path, edits),
-            TUNDRA_TAG_VERSION,
-        )
-        .map(|()| SavedTo::Sidecar(disk_err.clone()))
-        .map_err(|store_err| format!("{disk_err} (sidecar: {store_err})")),
+        Err(disk_err) => {
+            crate::tag_store::set_manual_fields(path, &sidecar_fields_for_fallback(path, edits), TUNDRA_TAG_VERSION)
+                .map(|()| SavedTo::Sidecar(disk_err.clone()))
+                .map_err(|store_err| format!("{disk_err} (sidecar: {store_err})"))
+        }
     }
 }
 
@@ -342,9 +336,8 @@ pub fn write_auto_tags(path: &Path, instrument: &str) -> Result<bool, String> {
     }
 
     let current = durable.as_deref().unwrap_or_default().trim();
-    let instrument_changed = status.allows_instrument_work()
-        && !instrument.is_empty()
-        && !current.eq_ignore_ascii_case(instrument);
+    let instrument_changed =
+        status.allows_instrument_work() && !instrument.is_empty() && !current.eq_ignore_ascii_case(instrument);
     let pending = NativeTags {
         instrument: instrument_changed.then(|| instrument.to_string()),
         artist: status
@@ -352,9 +345,7 @@ pub fn write_auto_tags(path: &Path, instrument: &str) -> Result<bool, String> {
             .then(|| artist_hint_from_path(path))
             .flatten()
             .filter(|artist| !artist.is_empty()),
-        comment: status
-            .needs_comment
-            .then(|| tundra_comment(native.comment.as_deref())),
+        comment: status.needs_comment.then(|| tundra_comment(native.comment.as_deref())),
     };
 
     if pending.is_empty() {

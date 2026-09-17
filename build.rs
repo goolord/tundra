@@ -43,8 +43,6 @@ fn warn_if_lfs_pointer(path: &Path, name: &str) {
         return;
     };
     if bytes.starts_with(b"version https://git-lfs.github.com") {
-        println!(
-            "cargo:warning=Resource {name} is a Git LFS pointer; run `git lfs pull` or `cargo xtask setup`"
-        );
+        println!("cargo:warning=Resource {name} is a Git LFS pointer; run `git lfs pull` or `cargo xtask setup`");
     }
 }

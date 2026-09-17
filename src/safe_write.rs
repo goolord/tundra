@@ -158,7 +158,11 @@ fn replace_existing_windows(from: &Path, to: &Path) -> io::Result<()> {
             std::ptr::null_mut(),
         )
     };
-    if ok == 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
+    if ok == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 /// Clear the read-only attribute (Windows) or grant the owner write permission
@@ -182,12 +186,19 @@ pub fn ensure_writable(path: &Path) -> io::Result<()> {
 
 /// Flush file data/metadata to disk before atomic replace.
 pub fn sync_file(path: &Path) -> io::Result<()> {
-    std::fs::OpenOptions::new().read(true).write(true).open(path)?.sync_all()
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)?
+        .sync_all()
 }
 
 /// Flush the directory entry, so a completed rename survives power loss.
 pub fn sync_parent_dir(path: &Path) -> io::Result<()> {
-    let parent = path.parent().filter(|dir| !dir.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let parent = path
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
 
     #[cfg(unix)]
     {
@@ -227,7 +238,10 @@ pub fn reclaim_write_sidecars(dir: &Path) -> Vec<PathBuf> {
             continue;
         };
         if let Some((dest_name, kind, pid)) = parse_write_sidecar(&name) {
-            groups.entry(path.with_file_name(dest_name)).or_default().push((path, kind, pid));
+            groups
+                .entry(path.with_file_name(dest_name))
+                .or_default()
+                .push((path, kind, pid));
         }
     }
 
@@ -303,7 +317,7 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_fixtures::{dead_pid_tag_tmp, ScratchDir, DEAD_PID};
+    use crate::test_fixtures::{DEAD_PID, ScratchDir, dead_pid_tag_tmp};
     use std::fs;
 
     fn read_only(path: &Path) {
@@ -383,7 +397,10 @@ mod tests {
         reclaim_write_sidecars(dir.path());
 
         assert_eq!(fs::read(&dest).unwrap(), b"aside-original");
-        assert!(!sidecar(&dest, TAG_TMP_SUFFIX).exists(), "legacy tmp is deleted once dest is present");
+        assert!(
+            !sidecar(&dest, TAG_TMP_SUFFIX).exists(),
+            "legacy tmp is deleted once dest is present"
+        );
         assert!(!sidecar(&dest, TAG_BAK_SUFFIX).exists());
         assert!(!sidecar(&dest, REPLACE_OLD_SUFFIX).exists());
     }
