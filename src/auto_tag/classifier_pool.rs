@@ -4,10 +4,10 @@
 //! protocol stream (a stray print, a reply to an earlier request) retires the
 //! worker, so one file's label can never be attributed to another file.
 
-use super::{bundled_python, configure_classifier_command, scripts_dir, ClassifyError};
+use super::ClassifyError;
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -50,10 +50,6 @@ struct WorkerRequest<'a> {
     tier1_zcr: f64,
 }
 
-fn failure(details: impl Into<String>) -> ClassifyError {
-    ClassifyError::new("Couldn't analyze this file.", details)
-}
-
 struct Worker {
     child: Child,
     stdin: ChildStdin,
@@ -75,7 +71,7 @@ impl Worker {
         }
         Err(ClassifyError::new(
             "Couldn't start classifier worker.",
-            format!("{}. {}", super::INSTALL_HINT, attempts.join("; ")),
+            format!("{INSTALL_HINT}. {}", attempts.join("; ")),
         ))
     }
 
@@ -86,7 +82,7 @@ impl Worker {
             .stderr(Stdio::piped());
         let mut child = command
             .spawn()
-            .map_err(|err| failure(format!("Failed to spawn worker: {err}")))?;
+            .map_err(|err| ClassifyError::analysis_failed(format!("Failed to spawn worker: {err}")))?;
         let stdin = child.stdin.take().expect("stdin piped");
         let stdout = child.stdout.take().expect("stdout piped");
         let stderr = child.stderr.take().expect("stderr piped");
@@ -126,11 +122,11 @@ impl Worker {
     fn wait_for_ready(&mut self) -> Result<(), ClassifyError> {
         let line = self
             .next_line(Instant::now() + READY_TIMEOUT)
-            .map_err(failure)?;
+            .map_err(ClassifyError::analysis_failed)?;
         let ready: WorkerReady = serde_json::from_str(&line)
-            .map_err(|err| failure(format!("Unexpected worker greeting {line:?}: {err}")))?;
+            .map_err(|err| ClassifyError::analysis_failed(format!("Unexpected worker greeting {line:?}: {err}")))?;
         if !ready.ready {
-            return Err(failure(
+            return Err(ClassifyError::analysis_failed(
                 ready.error.unwrap_or_else(|| "unknown worker error".into()),
             ));
         }
@@ -160,20 +156,20 @@ impl Worker {
             tier1_zcr,
         };
         let mut payload = serde_json::to_vec(&request)
-            .map_err(|err| failure(format!("Failed to encode worker request: {err}")))?;
+            .map_err(|err| ClassifyError::analysis_failed(format!("Failed to encode worker request: {err}")))?;
         payload.push(b'\n');
         self.stdin
             .write_all(&payload)
             .and_then(|()| self.stdin.flush())
-            .map_err(|err| failure(format!("Failed to write to classifier worker: {err}")))?;
+            .map_err(|err| ClassifyError::analysis_failed(format!("Failed to write to classifier worker: {err}")))?;
 
         let line = self
             .next_line(Instant::now() + REQUEST_TIMEOUT)
-            .map_err(failure)?;
+            .map_err(ClassifyError::analysis_failed)?;
         let response: WorkerResponse = serde_json::from_str(&line)
-            .map_err(|err| failure(format!("Invalid worker output {line:?}: {err}")))?;
+            .map_err(|err| ClassifyError::analysis_failed(format!("Invalid worker output {line:?}: {err}")))?;
         if response.id != Some(id) {
-            return Err(failure(format!(
+            return Err(ClassifyError::analysis_failed(format!(
                 "Worker replied to request {:?} while {id} was pending",
                 response.id
             )));
@@ -183,9 +179,9 @@ impl Worker {
         Ok(if response.ok {
             response
                 .result
-                .ok_or_else(|| failure("Worker success response missing result"))
+                .ok_or_else(|| ClassifyError::analysis_failed("Worker success response missing result"))
         } else {
-            Err(failure(
+            Err(ClassifyError::analysis_failed(
                 response.error.unwrap_or_else(|| "Unknown worker error".into()),
             ))
         })
@@ -199,6 +195,84 @@ impl Drop for Worker {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+const INSTALL_HINT: &str =
+    "Install classifiers with `cargo xtask setup`, or use a release package that includes python/";
+
+/// Pinned for every platform by `scripts/.python-version` (xtask reads it too).
+fn uv_python() -> &'static str {
+    include_str!("../../scripts/.python-version").trim()
+}
+
+/// A Python that ships with Tundra, if any: the standalone interpreter plus
+/// `site-packages` from a release package, or the `scripts/.venv` that
+/// `cargo xtask setup` creates for development.
+struct BundledPython {
+    exe: PathBuf,
+    /// Set as PYTHONPATH so the interpreter finds the packaged dependencies.
+    site_packages: Option<PathBuf>,
+}
+
+fn bundled_python() -> Option<BundledPython> {
+    let packaged = crate::platform::find_beside(&["python"], |dir| dir.join("site-packages").is_dir()).and_then(|python| {
+        let exe = std::fs::read_dir(&python)
+            .ok()?
+            .flatten()
+            .flat_map(|entry| {
+                let dir = entry.path();
+                [dir.join("python.exe"), dir.join("bin").join("python3")]
+            })
+            .find(|candidate| candidate.is_file())?;
+        Some(BundledPython {
+            exe,
+            site_packages: Some(python.join("site-packages")),
+        })
+    });
+    #[cfg(windows)]
+    const VENV_PYTHON: &str = "scripts/.venv/Scripts/python.exe";
+    #[cfg(not(windows))]
+    const VENV_PYTHON: &str = "scripts/.venv/bin/python3";
+    packaged.or_else(|| {
+        crate::platform::find_beside(&[VENV_PYTHON], |candidate| candidate.is_file()).map(|exe| BundledPython {
+            exe,
+            site_packages: None,
+        })
+    })
+}
+
+fn scripts_dir() -> PathBuf {
+    crate::platform::find_beside(&["scripts"], |dir| dir.join("classifier_worker.py").is_file())
+        .unwrap_or_else(|| PathBuf::from("scripts"))
+}
+
+/// Directory holding the YAMNet model and its class map (see `tools/yamnet`).
+fn bundled_models_dir() -> Option<PathBuf> {
+    crate::platform::find_beside(&["models", "resources/models"], |dir| {
+        dir.join("yamnet.onnx").is_file() && dir.join("yamnet_class_map.csv").is_file()
+    })
+}
+
+fn configure_classifier_command(command: &mut Command) {
+    // Cap BLAS/OpenMP threads per subprocess so bulk parallel runs stay polite.
+    // CUDA_VISIBLE_DEVICES only affects this child env (classifier may still ignore it).
+    for (key, value) in [
+        ("OMP_NUM_THREADS", "1"),
+        ("OPENBLAS_NUM_THREADS", "1"),
+        ("MKL_NUM_THREADS", "1"),
+        ("VECLIB_MAXIMUM_THREADS", "1"),
+        ("NUMEXPR_NUM_THREADS", "1"),
+        ("CUDA_VISIBLE_DEVICES", "-1"),
+    ] {
+        command.env(key, value);
+    }
+    // Paths cross the pipe as UTF-8 whatever the system code page is.
+    command.env("PYTHONUTF8", "1").env("PYTHONIOENCODING", "utf-8");
+    if let Some(models) = bundled_models_dir() {
+        command.env("TUNDRA_MODELS", &models);
+        command.env("TUNDRA_ONNX_DL", "1");
+    }
+    crate::platform::hide_console(command);
 }
 
 /// Interpreters to try, in order: the bundled Python, `uv run`, then a system
@@ -222,7 +296,7 @@ fn launch_commands() -> Vec<(String, Command)> {
     }
     let mut uv = Command::new("uv");
     uv.current_dir(&scripts_dir)
-        .args(["run", "--python", super::UV_PYTHON, "classifier_worker.py"]);
+        .args(["run", "--python", uv_python(), "classifier_worker.py"]);
     commands.push(("uv run".to_string(), uv));
     #[cfg(not(windows))]
     for system in ["python3", "python"] {
@@ -340,7 +414,7 @@ impl ClassifierPool {
 }
 
 /// Cap at two workers: each loads the model and onnxruntime.
-pub fn worker_count() -> usize {
+fn worker_count() -> usize {
     std::thread::available_parallelism()
         .map(|count| (count.get() / 2).clamp(1, 2))
         .unwrap_or(1)

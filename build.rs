@@ -1,24 +1,30 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-include!("src/resource_files.rs");
-
-/// Generates `embedded_resources.rs`, which bakes the SVG icons into the binary.
-/// Models and scripts are not copied anywhere: dev builds find them in the
-/// source tree, and `cargo xtask package` stages them for release.
+/// Generates `embedded_resources.rs`, which bakes every `resources/*.svg` icon
+/// into the binary. Models and scripts are not copied anywhere: dev builds find
+/// them in the source tree, and `cargo xtask package` stages them for release.
 fn main() {
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let resources = manifest.join("resources");
+    println!("cargo:rerun-if-changed={}", resources.display());
+
+    let mut names: Vec<String> = fs::read_dir(&resources)
+        .expect("read resources/")
+        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+        .filter(|name| name.ends_with(".svg"))
+        .collect();
+    names.sort();
+    if names.is_empty() {
+        panic!("no icons in resources/; run `git lfs pull` or `cargo xtask setup`");
+    }
 
     let mut body = String::from(
         "use iced::widget::svg::Handle;\n\npub fn handle(name: &str) -> Option<Handle> {\n    let bytes: &[u8] = match name {\n",
     );
-    for name in RESOURCE_FILES {
+    for name in &names {
         let src = resources.join(name);
         println!("cargo:rerun-if-changed={}", src.display());
-        if !src.is_file() {
-            panic!("missing resources/{name}; run `git lfs pull` or `cargo xtask setup`");
-        }
         warn_if_lfs_pointer(&src, name);
         body.push_str(&format!(
             "        {name:?} => include_bytes!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/resources/{name}\")),\n"

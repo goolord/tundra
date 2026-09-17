@@ -19,7 +19,7 @@
 
 YAMNet recognises instrument families well (vocals, cymbals, guitars, FX) but not which drum a short hit is, so for drum results tier 2 picks kick, snare, or hi-hat from the spectrum. Folder and file-name hints still take precedence over anything below high confidence.
 
-Classifier Python is pinned to **3.12** on every platform (`scripts/.python-version`, xtask, and `auto_tag::UV_PYTHON` must agree).
+Classifier Python is pinned to **3.12** on every platform (set in `scripts/.python-version`, which xtask and the app both read).
 
 ### Models
 

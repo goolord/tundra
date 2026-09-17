@@ -1,14 +1,15 @@
 use anyhow::{bail, Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 use std::time::Duration;
 
-/// Classifier Python, pinned for every platform. Keep in sync with
-/// `scripts/.python-version` and `auto_tag::UV_PYTHON`.
-const PYTHON_VERSION: &str = "3.12";
+/// Classifier Python, pinned for every platform by `scripts/.python-version`.
+fn python_version() -> &'static str {
+    include_str!("../../scripts/.python-version").trim()
+}
 const MODEL_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
 /// Scripts the app runs; everything else under `scripts/` is development-only.
 const RUNTIME_SCRIPTS: [&str; 2] = ["classifier_worker.py", "tier2_lib.py"];
@@ -84,23 +85,15 @@ enum Commands {
         /// Use `cross` instead of `cargo`
         #[arg(long)]
         cross: bool,
-        /// Skip setup step
-        #[arg(long)]
-        no_setup: bool,
-        /// Skip the ONNX runtime during setup
-        #[arg(long)]
-        skip_dl: bool,
+        #[command(flatten)]
+        setup: SetupBeforeBuild,
     },
     /// `cargo run` (runs setup first).
     Run {
         #[arg(long, short)]
         release: bool,
-        /// Skip setup step
-        #[arg(long)]
-        no_setup: bool,
-        /// Skip the ONNX runtime during setup
-        #[arg(long)]
-        skip_dl: bool,
+        #[command(flatten)]
+        setup: SetupBeforeBuild,
         /// Audio paths to open (pass after `--`)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
@@ -111,18 +104,8 @@ enum Commands {
         /// Version used in the archive name; defaults to `v` + Cargo.toml version
         #[arg(long)]
         version: Option<String>,
-        /// Rust target triple (defaults to host)
-        #[arg(long)]
-        target: Option<String>,
-        /// Use `cross` instead of `cargo` for the build step
-        #[arg(long)]
-        cross: bool,
-        /// Skip `cargo build --release`
-        #[arg(long)]
-        skip_build: bool,
-        /// Skip bundled Python even when host matches target
-        #[arg(long)]
-        skip_python: bool,
+        #[command(flatten)]
+        options: PackageOptions,
     },
     /// Package this host's build and attach it to a draft GitHub release for
     /// `v<Cargo.toml version>`. Published tags are never moved.
@@ -150,13 +133,42 @@ enum CrossCommands {
         /// Use `cross` where the target OS differs from the host
         #[arg(long)]
         cross: bool,
-        /// Skip setup step
-        #[arg(long)]
-        no_setup: bool,
-        /// Skip the ONNX runtime during setup
-        #[arg(long)]
-        skip_dl: bool,
+        #[command(flatten)]
+        setup: SetupBeforeBuild,
     },
+}
+
+/// Flags for commands that run `setup` before building.
+#[derive(Args)]
+struct SetupBeforeBuild {
+    /// Skip setup step
+    #[arg(long)]
+    no_setup: bool,
+    /// Skip the ONNX runtime during setup
+    #[arg(long)]
+    skip_dl: bool,
+}
+
+impl SetupBeforeBuild {
+    fn run(&self) -> Result<()> {
+        if self.no_setup { Ok(()) } else { setup(false, self.skip_dl) }
+    }
+}
+
+#[derive(Args, Default)]
+struct PackageOptions {
+    /// Rust target triple (defaults to host)
+    #[arg(long)]
+    target: Option<String>,
+    /// Use `cross` instead of `cargo` for the build step
+    #[arg(long)]
+    cross: bool,
+    /// Skip `cargo build --release`
+    #[arg(long)]
+    skip_build: bool,
+    /// Skip bundled Python even when host matches target
+    #[arg(long)]
+    skip_python: bool,
 }
 
 fn main() -> Result<()> {
@@ -164,47 +176,24 @@ fn main() -> Result<()> {
         Commands::Setup { skip_lfs, skip_dl } => setup(skip_lfs, skip_dl),
         Commands::Models => download_models(),
         Commands::Classifiers { skip_dl } => setup_classifiers(skip_dl),
-        Commands::Build {
-            release,
-            target,
-            cross,
-            no_setup,
-            skip_dl,
-        } => {
-            if !no_setup {
-                setup(false, skip_dl)?;
-            }
+        Commands::Build { release, target, cross, setup } => {
+            setup.run()?;
             cargo_build(release, target.as_deref(), cross)
         }
-        Commands::Run {
-            release,
-            no_setup,
-            skip_dl,
-            args,
-        } => {
-            if !no_setup {
-                setup(false, skip_dl)?;
-            }
+        Commands::Run { release, setup, args } => {
+            setup.run()?;
             cargo_run(release, &args)
         }
-        Commands::Package {
-            version,
-            target,
-            cross,
-            skip_build,
-            skip_python,
-        } => {
-            let version = version.unwrap_or_else(release_tag);
-            package_release(&version, target.as_deref(), cross, skip_build, skip_python).map(drop)
+        Commands::Package { version, options } => {
+            package_release(&version.unwrap_or_else(release_tag), &options).map(drop)
         }
         Commands::Release { ci, skip_build } => release(ci, skip_build),
         Commands::Cross { command } => match command {
             CrossCommands::InstallTargets => install_release_targets(),
-            CrossCommands::BuildAll {
-                cross,
-                no_setup,
-                skip_dl,
-            } => cross_build_all(cross, no_setup, skip_dl),
+            CrossCommands::BuildAll { cross, setup } => {
+                setup.run()?;
+                cross_build_all(cross)
+            }
         },
     }
 }
@@ -269,10 +258,17 @@ fn sha256_file(path: &Path) -> Result<String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
+/// Where a download or build of `dest` is staged until it is complete.
+fn part_path(dest: &Path) -> PathBuf {
+    let mut part = dest.as_os_str().to_owned();
+    part.push(".part");
+    PathBuf::from(part)
+}
+
 /// Download `url` to `dest` through a `.part` file, keeping it only if its
 /// SHA-256 matches.
 fn fetch_verified(url: &str, sha256: &str, dest: &Path) -> Result<()> {
-    let part = PathBuf::from(format!("{}.part", dest.display()));
+    let part = part_path(dest);
     let response = ureq::get(url)
         .timeout(MODEL_DOWNLOAD_TIMEOUT)
         .call()
@@ -299,9 +295,9 @@ fn convert_yamnet(dest: &Path) -> Result<()> {
         println!("models: downloading YAMNet weights");
         fetch_verified(YAMNET_WEIGHTS_URL, YAMNET_WEIGHTS_SHA256, &weights)?;
     }
-    let part = PathBuf::from(format!("{}.part", dest.display()));
+    let part = part_path(dest);
     let mut convert = Command::new("uv");
-    convert.args(["run", "--no-project", "--python", PYTHON_VERSION]);
+    convert.args(["run", "--no-project", "--python", python_version()]);
     for dependency in YAMNET_CONVERT_DEPS {
         convert.args(["--with", dependency]);
     }
@@ -340,8 +336,7 @@ fn download_models() -> Result<()> {
     verify_models()
 }
 
-fn verify_models
-() -> Result<()> {
+fn verify_models() -> Result<()> {
     for model in &MODELS {
         let path = models_dir().join(model.name);
         if !path.is_file() || sha256_file(&path)? != model.sha256 {
@@ -360,10 +355,10 @@ fn setup_classifiers(skip_dl: bool) -> Result<()> {
         bail!("missing scripts/pyproject.toml");
     }
     run(Command::new("uv")
-        .args(["python", "install", PYTHON_VERSION])
+        .args(["python", "install", python_version()])
         .current_dir(&scripts))?;
     let mut sync = Command::new("uv");
-    sync.args(["sync", "--locked", "--python", PYTHON_VERSION])
+    sync.args(["sync", "--locked", "--python", python_version()])
         .current_dir(&scripts);
     if skip_dl {
         println!("classifiers: skipping the ONNX runtime (--skip-dl)");
@@ -424,10 +419,7 @@ fn cross_targets_for_host() -> Vec<&'static str> {
     }
 }
 
-fn cross_build_all(cross: bool, no_setup: bool, skip_dl: bool) -> Result<()> {
-    if !no_setup {
-        setup(false, skip_dl)?;
-    }
+fn cross_build_all(cross: bool) -> Result<()> {
     install_release_targets()?;
     let mut failures = Vec::new();
     for target in cross_targets_for_host() {
@@ -537,7 +529,7 @@ fn bundle_python(staging: &Path) -> Result<()> {
     let python_root = staging.join("python");
     std::fs::create_dir_all(&python_root)?;
     run(Command::new("uv")
-        .args(["python", "install", PYTHON_VERSION])
+        .args(["python", "install", python_version()])
         .env("UV_PYTHON_INSTALL_DIR", &python_root))?;
     let python = find_bundled_python(&python_root)?;
 
@@ -553,7 +545,7 @@ fn bundle_python(staging: &Path) -> Result<()> {
             "--format",
             "requirements-txt",
             "--python",
-            PYTHON_VERSION,
+            python_version(),
             "--output-file",
         ])
         .arg(&requirements)
@@ -571,21 +563,16 @@ fn bundle_python(staging: &Path) -> Result<()> {
 
 /// Builds `target/package/tundra-<version>-<target>/` and archives it with that
 /// folder at the top, plus a `.sha256` file. Returns the archive paths.
-fn package_release(
-    version: &str,
-    target: Option<&str>,
-    cross: bool,
-    skip_build: bool,
-    skip_python: bool,
-) -> Result<Vec<PathBuf>> {
+fn package_release(version: &str, options: &PackageOptions) -> Result<Vec<PathBuf>> {
+    let PackageOptions { target, cross, skip_build, skip_python } = options;
     let target = match target {
-        Some(target) => target.to_string(),
-        None if skip_build => bail!("--skip-build requires --target"),
+        Some(target) => target.clone(),
+        None if *skip_build => bail!("--skip-build requires --target"),
         None => host_triple()?.to_string(),
     };
     verify_models()?;
     if !skip_build {
-        cargo_build(true, Some(&target), cross)?;
+        cargo_build(true, Some(&target), *cross)?;
     }
 
     let root = project_root();
@@ -617,7 +604,7 @@ fn package_release(
         copy_file(&root.join(doc), &staging.join(doc))?;
     }
 
-    if skip_python {
+    if *skip_python {
         println!("package: skipping bundled Python (--skip-python)");
     } else if is_host(&target) {
         bundle_python(&staging)?;
@@ -715,7 +702,7 @@ fn release(ci: bool, skip_build: bool) -> Result<()> {
             })
             .collect()
     } else {
-        package_release(&tag, None, false, false, false)?
+        package_release(&tag, &PackageOptions::default())?
     };
     if assets.is_empty() {
         bail!("no packages for {tag} under target/package");

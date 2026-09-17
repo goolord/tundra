@@ -3,9 +3,9 @@
 //! Windows and macOS use the [`drag`] crate. Linux/X11 uses an XDND source adapted
 //! from [guth](https://docs.rs/guth) (Apache-2.0 / MIT).
 
-use iced::window::raw_window_handle::{
-    HandleError, HasWindowHandle, RawWindowHandle, WindowHandle,
-};
+use iced::window::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+#[cfg(any(windows, target_os = "macos"))]
+use iced::window::raw_window_handle::{HandleError, WindowHandle};
 use std::path::PathBuf;
 
 #[cfg(any(windows, target_os = "macos"))]
@@ -99,7 +99,7 @@ mod x11 {
             if self.source.is_some() {
                 return Ok(());
             }
-            self.source = Some(X11DragSource::new(app_window)?);
+            self.source = Some(X11DragSource::new(app_window).map_err(|X11Error(message)| message)?);
             Ok(())
         }
 
@@ -111,7 +111,7 @@ mod x11 {
             let Some(source) = self.source.as_mut() else {
                 return Err("X11 drag is unavailable on this display".to_string());
             };
-            source.start(&[path])
+            source.start(&[path]).map_err(|X11Error(message)| message)
         }
 
         pub fn update(&mut self, pointer_down: bool, pointer_released: bool) {
@@ -153,11 +153,11 @@ mod x11 {
     impl X11DragSource {
         /// Opens a dedicated X11 connection for XDND. Iced owns the window connection;
         /// a separate client is standard for drag sources and must target the same display.
-        fn new(app_window: Window) -> Result<Self, String> {
-            let (connection, screen_number) = x11rb::connect(None).map_err(display_error)?;
+        fn new(app_window: Window) -> Result<Self, X11Error> {
+            let (connection, screen_number) = x11rb::connect(None)?;
             let screen = &connection.setup().roots[screen_number];
             let root = screen.root;
-            let source_window = connection.generate_id().map_err(display_error)?;
+            let source_window = connection.generate_id()?;
             connection
                 .create_window(
                     screen.root_depth,
@@ -175,14 +175,9 @@ mod x11 {
                         .background_pixel(screen.white_pixel)
                         .border_pixel(screen.black_pixel)
                         .event_mask(EventMask::PROPERTY_CHANGE),
-                )
-                .map_err(display_error)?
-                .check()
-                .map_err(display_error)?;
-            let atoms = Atoms::new(&connection)
-                .map_err(display_error)?
-                .reply()
-                .map_err(display_error)?;
+                )?
+                .check()?;
+            let atoms = Atoms::new(&connection)?.reply()?;
             connection
                 .change_property32(
                     PropMode::REPLACE,
@@ -190,11 +185,9 @@ mod x11 {
                     atoms._NET_WM_WINDOW_TYPE,
                     AtomEnum::ATOM,
                     &[atoms._NET_WM_WINDOW_TYPE_DND],
-                )
-                .map_err(display_error)?
-                .check()
-                .map_err(display_error)?;
-            connection.flush().map_err(display_error)?;
+                )?
+                .check()?;
+            connection.flush()?;
             Ok(Self {
                 connection,
                 root,
@@ -252,17 +245,8 @@ mod x11 {
             }
         }
 
-        fn start(&mut self, paths: &[PathBuf]) -> Result<(), String> {
-            if paths.is_empty() || paths.len() > DRAG_PATH_LIMIT {
-                return Err(format!(
-                    "drag must contain between 1 and {DRAG_PATH_LIMIT} paths"
-                ));
-            }
-            if paths.iter().any(|path| !path.is_absolute()) {
-                return Err("all drag paths must be absolute".to_string());
-            }
-            let paths = paths.to_vec();
-            let uri_list = encode_uri_list(&paths)?;
+        fn start(&mut self, paths: &[PathBuf]) -> Result<(), X11Error> {
+            let uri_list = encode_uri_list(paths)?;
             self.connection
                 .change_property32(
                     PropMode::REPLACE,
@@ -270,10 +254,8 @@ mod x11 {
                     self.atoms.XdndTypeList,
                     AtomEnum::ATOM,
                     &[self.atoms.TextUriList],
-                )
-                .map_err(display_error)?
-                .check()
-                .map_err(display_error)?;
+                )?
+                .check()?;
             self.connection
                 .change_property32(
                     PropMode::REPLACE,
@@ -281,29 +263,23 @@ mod x11 {
                     self.atoms.XdndActionList,
                     AtomEnum::ATOM,
                     &[self.atoms.XdndActionCopy],
-                )
-                .map_err(display_error)?
-                .check()
-                .map_err(display_error)?;
+                )?
+                .check()?;
             self.connection
                 .set_selection_owner(
                     self.source_window,
                     self.atoms.XdndSelection,
                     x11rb::CURRENT_TIME,
-                )
-                .map_err(display_error)?
-                .check()
-                .map_err(display_error)?;
+                )?
+                .check()?;
             let timestamp = self.server_timestamp()?;
             let owner = self
                 .connection
-                .get_selection_owner(self.atoms.XdndSelection)
-                .map_err(display_error)?
-                .reply()
-                .map_err(display_error)?
+                .get_selection_owner(self.atoms.XdndSelection)?
+                .reply()?
                 .owner;
             if owner != self.source_window {
-                return Err("could not own the XDND selection".to_string());
+                return Err("could not own the XDND selection".into());
             }
             self.drag = Some(ActiveDrag {
                 uri_list,
@@ -316,24 +292,20 @@ mod x11 {
                 timestamp,
                 owns_selection: true,
             });
-            self.connection.flush().map_err(display_error)?;
+            self.connection.flush()?;
             let pointer = self
                 .connection
-                .query_pointer(self.root)
-                .map_err(display_error)?
-                .reply()
-                .map_err(display_error)?;
+                .query_pointer(self.root)?
+                .reply()?;
             self.move_icon(pointer.root_x, pointer.root_y)?;
             self.connection
-                .map_window(self.source_window)
-                .map_err(display_error)?
-                .check()
-                .map_err(display_error)?;
-            self.connection.flush().map_err(display_error)?;
+                .map_window(self.source_window)?
+                .check()?;
+            self.connection.flush()?;
             Ok(())
         }
 
-        fn server_timestamp(&self) -> Result<u32, String> {
+        fn server_timestamp(&self) -> Result<u32, X11Error> {
             self.connection
                 .change_property8(
                     PropMode::REPLACE,
@@ -341,13 +313,11 @@ mod x11 {
                     self.atoms.TUNDRA_DRAG_TIMESTAMP,
                     AtomEnum::INTEGER,
                     &[0],
-                )
-                .map_err(display_error)?
-                .check()
-                .map_err(display_error)?;
-            self.connection.flush().map_err(display_error)?;
+                )?
+                .check()?;
+            self.connection.flush()?;
             for _ in 0..TIMESTAMP_POLL_LIMIT {
-                let Some(event) = self.connection.poll_for_event().map_err(display_error)? else {
+                let Some(event) = self.connection.poll_for_event()? else {
                     std::thread::sleep(Duration::from_millis(1));
                     continue;
                 };
@@ -358,7 +328,7 @@ mod x11 {
                     return Ok(event.time);
                 }
             }
-            Err("timed out waiting for X11 server timestamp".to_string())
+            Err("timed out waiting for X11 server timestamp".into())
         }
 
         fn pack_xdnd_coords(x: i16, y: i16) -> u32 {
@@ -367,13 +337,11 @@ mod x11 {
             ((x & 0xFFFF) << 16) | (y & 0xFFFF)
         }
 
-        fn update_target(&mut self) -> Result<bool, String> {
+        fn update_target(&mut self) -> Result<bool, X11Error> {
             let pointer = self
                 .connection
-                .query_pointer(self.root)
-                .map_err(display_error)?
-                .reply()
-                .map_err(display_error)?;
+                .query_pointer(self.root)?
+                .reply()?;
             self.move_icon(pointer.root_x, pointer.root_y)?;
             let target = self.find_target(pointer.child)?;
             let previous = self.drag.as_ref().and_then(|drag| drag.target);
@@ -436,7 +404,7 @@ mod x11 {
             Ok(false)
         }
 
-        fn move_icon(&self, root_x: i16, root_y: i16) -> Result<(), String> {
+        fn move_icon(&self, root_x: i16, root_y: i16) -> Result<(), X11Error> {
             self.connection
                 .configure_window(
                     self.source_window,
@@ -444,9 +412,8 @@ mod x11 {
                         .x(i32::from(root_x) + 16)
                         .y(i32::from(root_y) + 16)
                         .stack_mode(StackMode::ABOVE),
-                )
-                .map_err(display_error)?;
-            self.connection.flush().map_err(display_error)
+                )?;
+            Ok(self.connection.flush()?)
         }
 
         fn advance_release(&mut self) {
@@ -520,7 +487,7 @@ mod x11 {
             self.drag = None;
         }
 
-        fn find_target(&self, child: Window) -> Result<Option<DragTarget>, String> {
+        fn find_target(&self, child: Window) -> Result<Option<DragTarget>, X11Error> {
             let mut current = if child == x11rb::NONE {
                 self.root
             } else {
@@ -529,10 +496,8 @@ mod x11 {
             for _ in 0..WINDOW_HIERARCHY_LIMIT {
                 let reply = self
                     .connection
-                    .query_pointer(current)
-                    .map_err(display_error)?
-                    .reply()
-                    .map_err(display_error)?;
+                    .query_pointer(current)?
+                    .reply()?;
                 if reply.child == x11rb::NONE || reply.child == current {
                     break;
                 }
@@ -549,10 +514,8 @@ mod x11 {
                 }
                 let tree = self
                     .connection
-                    .query_tree(current)
-                    .map_err(display_error)?
-                    .reply()
-                    .map_err(display_error)?;
+                    .query_tree(current)?
+                    .reply()?;
                 if tree.parent == x11rb::NONE || tree.parent == current {
                     break;
                 }
@@ -571,13 +534,11 @@ mod x11 {
             Ok(None)
         }
 
-        fn xdnd_version(&self, window: Window) -> Result<Option<u32>, String> {
+        fn xdnd_version(&self, window: Window) -> Result<Option<u32>, X11Error> {
             let property = self
                 .connection
-                .get_property(false, window, self.atoms.XdndAware, AtomEnum::ATOM, 0, 1)
-                .map_err(display_error)?
-                .reply()
-                .map_err(display_error)?;
+                .get_property(false, window, self.atoms.XdndAware, AtomEnum::ATOM, 0, 1)?
+                .reply()?;
             if property.type_ != u32::from(AtomEnum::ATOM) || property.format != 32 {
                 return Ok(None);
             }
@@ -587,13 +548,11 @@ mod x11 {
                 .filter(|version| *version >= 3))
         }
 
-        fn xdnd_proxy(&self, window: Window) -> Result<Option<Window>, String> {
+        fn xdnd_proxy(&self, window: Window) -> Result<Option<Window>, X11Error> {
             let proxy = self
                 .connection
-                .get_property(false, window, self.atoms.XdndProxy, AtomEnum::WINDOW, 0, 1)
-                .map_err(display_error)?
-                .reply()
-                .map_err(display_error)?;
+                .get_property(false, window, self.atoms.XdndProxy, AtomEnum::WINDOW, 0, 1)?
+                .reply()?;
             if proxy.type_ != u32::from(AtomEnum::WINDOW) || proxy.format != 32 {
                 return Ok(None);
             }
@@ -602,10 +561,8 @@ mod x11 {
             };
             let confirmation = self
                 .connection
-                .get_property(false, proxy, self.atoms.XdndProxy, AtomEnum::WINDOW, 0, 1)
-                .map_err(display_error)?
-                .reply()
-                .map_err(display_error)?;
+                .get_property(false, proxy, self.atoms.XdndProxy, AtomEnum::WINDOW, 0, 1)?
+                .reply()?;
             Ok(
                 (confirmation.type_ == u32::from(AtomEnum::WINDOW) && confirmation.format == 32)
                     .then(|| confirmation.value32().and_then(|mut values| values.next()))
@@ -614,9 +571,9 @@ mod x11 {
             )
         }
 
-        fn poll_events(&mut self) -> Result<(), String> {
+        fn poll_events(&mut self) -> Result<(), X11Error> {
             for _ in 0..EVENT_LIMIT {
-                let Some(event) = self.connection.poll_for_event().map_err(display_error)? else {
+                let Some(event) = self.connection.poll_for_event()? else {
                     break;
                 };
                 match event {
@@ -654,7 +611,7 @@ mod x11 {
             Ok(())
         }
 
-        fn answer_selection_request(&self, request: SelectionRequestEvent) -> Result<(), String> {
+        fn answer_selection_request(&self, request: SelectionRequestEvent) -> Result<(), X11Error> {
             if request.owner != self.source_window || request.selection != self.atoms.XdndSelection
             {
                 return Ok(());
@@ -669,8 +626,8 @@ mod x11 {
                     && drag.owns_selection
                     && timestamp_not_older(request.time, drag.timestamp)
             });
-            let result = if request.target == self.atoms.TextUriList {
-                active.map_or(Err(()), |drag| {
+            let written = if request.target == self.atoms.TextUriList {
+                active.is_some_and(|drag| {
                     self.connection
                         .change_property8(
                             PropMode::REPLACE,
@@ -679,9 +636,7 @@ mod x11 {
                             self.atoms.TextUriList,
                             &drag.uri_list,
                         )
-                        .map_err(|_| ())?
-                        .check()
-                        .map_err(|_| ())
+                        .is_ok_and(|cookie| cookie.check().is_ok())
                 })
             } else if request.target == self.atoms.TARGETS && active.is_some() {
                 self.connection
@@ -692,10 +647,9 @@ mod x11 {
                         AtomEnum::ATOM,
                         &[self.atoms.TextUriList, self.atoms.TARGETS],
                     )
-                    .map_err(|_| ())
-                    .and_then(|cookie| cookie.check().map_err(|_| ()))
+                    .is_ok_and(|cookie| cookie.check().is_ok())
             } else {
-                Err(())
+                false
             };
             let notify = SelectionNotifyEvent {
                 response_type: SELECTION_NOTIFY_EVENT,
@@ -704,18 +658,16 @@ mod x11 {
                 requestor: request.requestor,
                 selection: request.selection,
                 target: request.target,
-                property: if result.is_ok() {
+                property: if written {
                     property
                 } else {
                     x11rb::NONE
                 },
             };
             self.connection
-                .send_event(false, request.requestor, EventMask::NO_EVENT, notify)
-                .map_err(display_error)?
-                .check()
-                .map_err(display_error)?;
-            self.connection.flush().map_err(display_error)
+                .send_event(false, request.requestor, EventMask::NO_EVENT, notify)?
+                .check()?;
+            Ok(self.connection.flush()?)
         }
 
         fn send_target(
@@ -723,14 +675,12 @@ mod x11 {
             target: DragTarget,
             message_type: Atom,
             data: [u32; 5],
-        ) -> Result<(), String> {
+        ) -> Result<(), X11Error> {
             let event = ClientMessageEvent::new(32, target.window, message_type, data);
             self.connection
-                .send_event(false, target.recipient, EventMask::NO_EVENT, event)
-                .map_err(display_error)?
-                .check()
-                .map_err(display_error)?;
-            self.connection.flush().map_err(display_error)
+                .send_event(false, target.recipient, EventMask::NO_EVENT, event)?
+                .check()?;
+            Ok(self.connection.flush()?)
         }
     }
 
@@ -742,17 +692,15 @@ mod x11 {
         }
     }
 
-    fn encode_uri_list(paths: &[PathBuf]) -> Result<Vec<u8>, String> {
+    fn encode_uri_list(paths: &[PathBuf]) -> Result<Vec<u8>, X11Error> {
         if paths.is_empty() || paths.len() > DRAG_PATH_LIMIT {
-            return Err(format!(
-                "drag must contain between 1 and {DRAG_PATH_LIMIT} paths"
-            ));
+            return Err(format!("drag must contain between 1 and {DRAG_PATH_LIMIT} paths").into());
         }
         let mut output = Vec::new();
         for path in paths {
             let uri = file_uri(path)?;
             if output.len().saturating_add(uri.len()).saturating_add(2) > URI_LIST_BYTES_LIMIT {
-                return Err("drag URI list exceeds the supported size".to_string());
+                return Err("drag URI list exceeds the supported size".into());
             }
             output.extend_from_slice(uri.as_bytes());
             output.extend_from_slice(b"\r\n");
@@ -764,9 +712,9 @@ mod x11 {
         candidate == x11rb::CURRENT_TIME || candidate.wrapping_sub(reference) < (1_u32 << 31)
     }
 
-    fn file_uri(path: &Path) -> Result<String, String> {
+    fn file_uri(path: &Path) -> Result<String, X11Error> {
         if !path.is_absolute() {
-            return Err("drag path must be absolute".to_string());
+            return Err("drag path must be absolute".into());
         }
         // Percent-encode non-unreserved bytes for file:// URIs (RFC 8089).
         use std::os::unix::ffi::OsStrExt;
@@ -785,8 +733,14 @@ mod x11 {
         Ok(uri)
     }
 
-    fn display_error(error: impl std::fmt::Display) -> String {
-        error.to_string()
+    /// Why an X11 request failed. Any displayable error converts with `?`;
+    /// `X11Drag` hands callers the message.
+    struct X11Error(String);
+
+    impl<E: std::fmt::Display> From<E> for X11Error {
+        fn from(error: E) -> Self {
+            Self(error.to_string())
+        }
     }
 }
 
