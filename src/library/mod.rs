@@ -47,7 +47,8 @@ pub struct ListedEntry {
 
 /// The folders and audio files directly inside `dir`, unsorted.
 pub fn list_directory(dir: &Path) -> Result<Vec<ListedEntry>, String> {
-    let entries = std::fs::read_dir(dir).map_err(|err| format!("Cannot read {}: {err}", dir.display()))?;
+    let entries =
+        std::fs::read_dir(dir).map_err(|err| format!("Cannot read {}: {err}", crate::path_util::display_path(dir)))?;
     let mut sweep = SidecarSweep::default();
     let mut listed: Vec<ListedEntry> = entries
         .filter_map(|entry| {

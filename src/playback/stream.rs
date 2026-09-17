@@ -10,8 +10,9 @@ use rodio::{Decoder, Source};
 use super::position::PlaybackPosition;
 
 fn open_decoder(path: &Path) -> Result<Decoder<BufReader<File>>, String> {
-    let file = File::open(path).map_err(|err| format!("Cannot open {}: {err}", path.display()))?;
-    Decoder::try_from(file).map_err(|err| format!("Cannot decode {}: {err}", path.display()))
+    let file =
+        File::open(path).map_err(|err| format!("Cannot open {}: {err}", crate::path_util::display_path(path)))?;
+    Decoder::try_from(file).map_err(|err| format!("Cannot decode {}: {err}", crate::path_util::display_path(path)))
 }
 
 pub fn probe_decoder(path: &Path) -> Result<StreamInfo, String> {
@@ -69,7 +70,10 @@ impl StreamSource {
         let channels = decoder.channels() as usize;
         let sample_rate = decoder.sample_rate();
         if channels == 0 || sample_rate == 0 {
-            return Err(format!("{} has invalid audio layout", path.display()));
+            return Err(format!(
+                "{} has invalid audio layout",
+                crate::path_util::display_path(path)
+            ));
         }
 
         let progress = progress.clamp(0.0, 1.0);

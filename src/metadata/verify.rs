@@ -20,7 +20,7 @@ pub(crate) fn verify_staged_write(
     if before != after {
         return Err(format!(
             "Refused to save tags to {}: the audio data would have changed",
-            original.display()
+            crate::path_util::display_path(original)
         ));
     }
     verify_read_back(original, staged, container, edit)
@@ -30,7 +30,7 @@ fn verify_read_back(original: &Path, staged: &Path, container: Container, edit: 
     let tags = read_container_tags_as(staged, container).ok_or_else(|| {
         format!(
             "Refused to save tags to {}: the tagged copy could not be read back",
-            original.display()
+            crate::path_util::display_path(original)
         )
     })?;
     let generic = generic_tag_fields(&tags.generic);
@@ -65,7 +65,7 @@ fn verify_read_back(original: &Path, staged: &Path, container: Container, edit: 
         if wanted.trim() != found.trim() {
             return Err(format!(
                 "Refused to save tags to {}: {label} did not read back as written",
-                original.display()
+                crate::path_util::display_path(original)
             ));
         }
     }
@@ -74,7 +74,7 @@ fn verify_read_back(original: &Path, staged: &Path, container: Container, edit: 
 
 /// Hash of everything in the file that is not a tag.
 fn audio_fingerprint(path: &Path, container: Container) -> Result<u64, String> {
-    let fail = |err: String| format!("Cannot verify audio in {}: {err}", path.display());
+    let fail = |err: String| format!("Cannot verify audio in {}: {err}", crate::path_util::display_path(path));
     let file = std::fs::File::open(path).map_err(|err| fail(err.to_string()))?;
     let len = file.metadata().map_err(|err| fail(err.to_string()))?.len();
     let mut reader = BufReader::with_capacity(1 << 16, file);

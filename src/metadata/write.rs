@@ -20,7 +20,7 @@ use lofty::ogg::tag::VorbisComments;
 use lofty::tag::Accessor;
 
 use super::read::is_audio;
-use crate::path_util::{FileStamp, open_file, path_io_error};
+use crate::path_util::{FileStamp, display_path, open_file, path_io_error};
 
 use super::auto_tag::{NativeInspection, inspect_native};
 use super::fields::ManualTagEdits;
@@ -173,13 +173,14 @@ pub(crate) fn write_tags(path: &Path, edit: &TagEdit) -> Result<(), String> {
         return Ok(());
     }
     let target = write_target(path);
-    let container = Container::detect(&target).ok_or_else(|| format!("Unsupported file type: {}", path.display()))?;
+    let container =
+        Container::detect(&target).ok_or_else(|| format!("Unsupported file type: {}", display_path(path)))?;
     // Reads pick the parser by extension; a tag written in a format they will
     // not look for would vanish from search.
     if Container::of(&target) != Some(container) {
         return Err(format!(
             "{} does not contain the audio format its extension says",
-            path.display()
+            display_path(path)
         ));
     }
     let sidecar_stamp = FileStamp::of(path);
@@ -217,19 +218,19 @@ pub(crate) fn stage_and_replace(path: &Path, edit: impl FnOnce(&Path) -> Result<
     let tmp = unique_sidecar(path, "tag");
 
     let staged = (|| {
-        std::fs::copy(path, &tmp).map_err(|err| format!("Failed to stage {}: {err}", path.display()))?;
-        ensure_writable(&tmp).map_err(|err| format!("Failed to prepare tagged file {}: {err}", path.display()))?;
+        std::fs::copy(path, &tmp).map_err(|err| format!("Failed to stage {}: {err}", display_path(path)))?;
+        ensure_writable(&tmp).map_err(|err| format!("Failed to prepare tagged file {}: {err}", display_path(path)))?;
         edit(&tmp)?;
-        sync_file(&tmp).map_err(|err| format!("Failed to sync tagged file {}: {err}", tmp.display()))?;
+        sync_file(&tmp).map_err(|err| format!("Failed to sync tagged file {}: {err}", display_path(&tmp)))?;
         if FileStamp::of(path) != before_stamp {
             return Err(format!(
                 "{} changed on disk while its tags were being written; nothing was saved",
-                path.display()
+                display_path(path)
             ));
         }
         ensure_writable(path).map_err(|err| {
             let _ = std::fs::set_permissions(path, original_perms.clone());
-            format!("Cannot write tags to read-only file {}: {err}", path.display())
+            format!("Cannot write tags to read-only file {}: {err}", display_path(path))
         })
     })();
     let discard = |message: String| {
@@ -242,19 +243,19 @@ pub(crate) fn stage_and_replace(path: &Path, edit: impl FnOnce(&Path) -> Result<
     if let Err(err) = replace_file(&tmp, path) {
         if path.exists() {
             let _ = std::fs::set_permissions(path, original_perms);
-            return discard(format!("Failed to replace {}: {err}", path.display()));
+            return discard(format!("Failed to replace {}: {err}", display_path(path)));
         }
         // `ReplaceFileW` can fail after moving the original away. The staged
         // copy holds the full audio plus the new tags, so it takes its place.
         if let Err(rename_err) = std::fs::rename(&tmp, path) {
             return Err(format!(
                 "Failed to replace {}: {err}. The tagged audio is preserved at {} ({rename_err})",
-                path.display(),
-                tmp.display()
+                display_path(path),
+                display_path(&tmp)
             ));
         }
         let _ = std::fs::set_permissions(path, original_perms);
-        return Err(format!("Failed to replace {}: {err}", path.display()));
+        return Err(format!("Failed to replace {}: {err}", display_path(path)));
     }
 
     let _ = sync_parent_dir(path);
@@ -266,7 +267,7 @@ fn require_audio(path: &Path) -> Result<(), String> {
     if is_audio(path) {
         Ok(())
     } else {
-        Err(format!("Not an audio file: {}", path.display()))
+        Err(format!("Not an audio file: {}", display_path(path)))
     }
 }
 

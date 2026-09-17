@@ -32,7 +32,7 @@ pub fn classify(path: &Path) -> Result<Tier1Result, ClassifyError> {
     if !path.is_file() {
         return Err(ClassifyError::new(
             "Couldn't find that audio file.",
-            format!("File not found: {}", path.display()),
+            format!("File not found: {}", crate::path_util::display_path(path)),
         ));
     }
     let audio = load_mono_audio(path)?;
@@ -66,21 +66,31 @@ fn classify_zcr(zcr: f64) -> Tier1Result {
 /// resampled to `SAMPLE_RATE`.
 fn load_mono_audio(path: &Path) -> Result<Vec<f32>, ClassifyError> {
     let file_len = std::fs::metadata(path)
-        .map_err(|err| ClassifyError::analysis_failed(format!("Failed to stat {}: {err}", path.display())))?
+        .map_err(|err| {
+            ClassifyError::analysis_failed(format!(
+                "Failed to stat {}: {err}",
+                crate::path_util::display_path(path)
+            ))
+        })?
         .len();
     if file_len > MAX_AUDIO_BYTES {
         return Err(ClassifyError::analysis_failed(format!(
             "{} is too large ({} MB; limit is {} MB)",
-            path.display(),
+            crate::path_util::display_path(path),
             file_len / (1024 * 1024),
             MAX_AUDIO_BYTES / (1024 * 1024)
         )));
     }
 
-    let file = File::open(path)
-        .map_err(|err| ClassifyError::analysis_failed(format!("Failed to open {}: {err}", path.display())))?;
-    let mut decoder = rodio::Decoder::try_from(file)
-        .map_err(|err| ClassifyError::analysis_failed(format!("Cannot decode {}: {err}", path.display())))?;
+    let file = File::open(path).map_err(|err| {
+        ClassifyError::analysis_failed(format!(
+            "Failed to open {}: {err}",
+            crate::path_util::display_path(path)
+        ))
+    })?;
+    let mut decoder = rodio::Decoder::try_from(file).map_err(|err| {
+        ClassifyError::analysis_failed(format!("Cannot decode {}: {err}", crate::path_util::display_path(path)))
+    })?;
 
     let sample_rate = decoder.sample_rate();
     let channels = decoder.channels().max(1) as usize;
@@ -99,7 +109,7 @@ fn load_mono_audio(path: &Path) -> Result<Vec<f32>, ClassifyError> {
     if mono.is_empty() {
         return Err(ClassifyError::analysis_failed(format!(
             "{} contains no audio samples",
-            path.display()
+            crate::path_util::display_path(path)
         )));
     }
     Ok(resample_linear(&mono, sample_rate, SAMPLE_RATE))

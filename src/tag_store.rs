@@ -12,7 +12,7 @@ use rusqlite::Connection;
 
 use crate::locks::{lock, read, write};
 use crate::metadata::ManualTagEdits;
-use crate::path_util::{FileStamp, cache_key};
+use crate::path_util::{FileStamp, cache_key, display_path};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct Row {
@@ -190,7 +190,7 @@ impl Database {
         if self.connection.is_none() {
             let path = db_path().ok_or("No data directory available")?;
             let connection =
-                Connection::open(&path).map_err(|err| format!("Failed to open {}: {err}", path.display()))?;
+                Connection::open(&path).map_err(|err| format!("Failed to open {}: {err}", display_path(&path)))?;
             prepare_schema(&connection)?;
             self.connection = Some(connection);
         }
@@ -295,7 +295,7 @@ fn modify(path: &Path, change: impl FnOnce(Option<Row>) -> Option<Change>) -> Re
     };
     let key = cache_key(path);
     write_row(database.connection()?, &key, &change)
-        .map_err(|err| format!("Failed to save tag for {}: {err}", path.display()))?;
+        .map_err(|err| format!("Failed to save tag for {}: {err}", display_path(path)))?;
     let mut rows = write(&store.rows);
     match change {
         Change::Put(row) => rows.insert(key, row),

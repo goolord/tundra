@@ -106,14 +106,20 @@ pub fn file_stem_lossy(path: &Path) -> Option<String> {
     path.file_stem().map(|stem| stem.to_string_lossy().into_owned())
 }
 
+/// `path` as text for people to read, without the `\\?\` prefix. Display only:
+/// cache keys and filesystem calls keep the path as it is.
+pub fn display_path(path: &Path) -> String {
+    normalize_path(path.to_path_buf()).display().to_string()
+}
+
 /// The file name, or the whole path when it has none.
 pub fn file_label(path: &Path) -> String {
-    file_name_lossy(path).unwrap_or_else(|| path.display().to_string())
+    file_name_lossy(path).unwrap_or_else(|| display_path(path))
 }
 
 /// `path` as text, keeping the end when it is longer than `max_chars`.
 pub fn truncate_path(path: &Path, max_chars: usize) -> String {
-    let rendered = path.display().to_string();
+    let rendered = display_path(path);
     let count = rendered.chars().count();
     if count <= max_chars {
         return rendered;
@@ -178,7 +184,7 @@ pub fn file_mtime_secs(path: &Path) -> Option<u64> {
 
 /// A user-facing I/O error message: "Failed to <verb> <path>: <err>".
 pub fn path_io_error(verb: &str, path: &Path, err: impl std::fmt::Display) -> String {
-    format!("Failed to {verb} {}: {err}", path.display())
+    format!("Failed to {verb} {}: {err}", display_path(path))
 }
 
 pub fn open_file(path: &Path) -> Result<std::fs::File, String> {
@@ -266,6 +272,18 @@ mod tests {
             let verbatim = PathBuf::from(format!(r"\\?\{}", file.display()));
             assert_eq!(favorite_lookup_key(&verbatim), stored);
         }
+    }
+
+    #[test]
+    fn display_path_drops_verbatim_prefix() {
+        assert_eq!(display_path(Path::new(r"\\?\F:\Samples")), r"F:\Samples");
+        assert_eq!(
+            display_path(Path::new(r"\\?\UNC\nas\share\kick.wav")),
+            r"\\nas\share\kick.wav"
+        );
+        assert_eq!(display_path(Path::new(r"F:\Samples")), r"F:\Samples");
+        assert_eq!(display_path(Path::new("/samples/kick.wav")), "/samples/kick.wav");
+        assert_eq!(truncate_path(Path::new(r"\\?\F:\Samples"), 32), r"F:\Samples");
     }
 
     #[test]

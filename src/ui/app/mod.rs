@@ -506,7 +506,7 @@ fn copy_name(path: &Path) -> Task<Message> {
 }
 
 fn copy_path(path: &Path) -> Task<Message> {
-    iced::clipboard::write(path.to_string_lossy().into_owned())
+    iced::clipboard::write(crate::path_util::display_path(path))
 }
 
 fn reveal(path: &Path) -> Task<Message> {

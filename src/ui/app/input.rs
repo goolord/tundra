@@ -295,7 +295,10 @@ impl App {
         let canonical = match crate::path_util::canonical_path(&path) {
             Ok(path) => path,
             Err(err) => {
-                self.show_notice(drag_out_notice(&format!("Cannot drag {}: {err}.", path.display())));
+                self.show_notice(drag_out_notice(&format!(
+                    "Cannot drag {}: {err}.",
+                    crate::path_util::display_path(&path)
+                )));
                 self.file_drag = None;
                 return Task::none();
             }
