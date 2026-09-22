@@ -197,26 +197,24 @@ impl MetadataCache {
         self.merge(HashMap::from([(crate::path_util::cache_key(path), entry)]));
     }
 
-    /// Indexed tags without touching the disk, for display.
-    pub fn cached_fields(&self, path: &Path) -> Option<TagFields> {
+    fn cached(&self, path: &Path) -> Option<CachedMetadata> {
         let map = self.snapshot();
         crate::path_util::cache_lookup_keys(path)
             .iter()
             .find_map(|key| map.get(key))
-            .map(|cached| cached.fields.clone())
+            .cloned()
+    }
+
+    /// Indexed tags without touching the disk, for display.
+    pub fn cached_fields(&self, path: &Path) -> Option<TagFields> {
+        self.cached(path).map(|cached| cached.fields)
     }
 
     /// Tags for `path`, re-read when the file changed since it was indexed.
     pub fn tag_fields_for(&mut self, path: &Path) -> TagFields {
-        if let Some(mtime_secs) = crate::path_util::file_mtime_secs(path) {
-            let map = self.snapshot();
-            let current = crate::path_util::cache_lookup_keys(path)
-                .iter()
-                .find_map(|key| map.get(key))
-                .filter(|cached| cached.mtime_secs == mtime_secs);
-            if let Some(cached) = current {
-                return cached.fields.clone();
-            }
+        let mtime_secs = crate::path_util::file_mtime_secs(path);
+        if let Some(cached) = self.cached(path).filter(|cached| Some(cached.mtime_secs) == mtime_secs) {
+            return cached.fields;
         }
         let Some(entry) = refresh_cached_metadata(path) else {
             return TagFields::default();
@@ -228,11 +226,11 @@ impl MetadataCache {
 }
 
 fn keep_newer(map: &mut MetadataMap, key: PathBuf, entry: CachedMetadata) {
-    match map.get(&key) {
-        Some(existing) if existing.mtime_secs > entry.mtime_secs => {}
-        _ => {
-            map.insert(key, entry);
-        }
+    if map
+        .get(&key)
+        .is_none_or(|existing| existing.mtime_secs <= entry.mtime_secs)
+    {
+        map.insert(key, entry);
     }
 }
 
@@ -287,29 +285,20 @@ mod tests {
     fn merges_never_replace_newer_entries() {
         let mut cache = MetadataCache::new();
         let path = PathBuf::from("/samples/kick.wav");
+        let title = |cache: &MetadataCache| cache.cached_fields(&path).map(|fields| fields.title);
         cache.merge_path(&path, entry(20, "saved"));
         cache.merge_path(&path, entry(10, "stale search result"));
-        assert_eq!(
-            cache.cached_fields(&path).map(|fields| fields.title),
-            Some("saved".into())
-        );
+        assert_eq!(title(&cache).as_deref(), Some("saved"));
         cache.merge_path(&path, entry(30, "edited again"));
-        assert_eq!(
-            cache.cached_fields(&path).map(|fields| fields.title),
-            Some("edited again".into())
-        );
+        assert_eq!(title(&cache).as_deref(), Some("edited again"));
     }
 
     #[test]
     fn legacy_spellings_fold_into_the_newest_entry() {
         let mut map = MetadataMap::new();
-        let raw = PathBuf::from(r"C:\Samples\Kick.wav");
-        keep_newer(&mut map, crate::path_util::cache_key(&raw), entry(50, "new"));
-        keep_newer(
-            &mut map,
-            crate::path_util::cache_key(&raw),
-            entry(40, "old raw spelling"),
-        );
+        let key = crate::path_util::cache_key(Path::new(r"C:\Samples\Kick.wav"));
+        keep_newer(&mut map, key.clone(), entry(50, "new"));
+        keep_newer(&mut map, key, entry(40, "old raw spelling"));
         assert_eq!(map.len(), 1);
         assert_eq!(
             map.values().next().map(|cached| cached.fields.title.as_str()),

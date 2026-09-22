@@ -65,47 +65,44 @@ pub fn classify_file_bulk(path: &Path) -> Result<ClassificationResult, ClassifyE
     if let Some(cached) = classify_cache::get_cached(path) {
         return Ok(with_path_hint(path, cached));
     }
-
     // Stamp before analysis: if the file changes while it is being analysed,
     // the result is stored against the old version and never matches.
     let stamp = crate::path_util::FileStamp::of(path);
-    let tier1 = tier1::classify(path)?;
-    if let Some(instrument) = tier1.instrument {
+    let zcr = tier1::file_zcr(path)?;
+    let (result, cacheable) = if let Some((instrument, confidence)) = tier1::classify_zcr(zcr) {
+        let summary = format!(
+            "Tier 1 · ZCR {zcr:.4} · {instrument}{}",
+            format_confidence(Some(confidence))
+        );
         let result = ClassificationResult {
-            summary: format!(
-                "Tier 1 · ZCR {zcr:.4} · {instrument}{confidence}",
-                zcr = tier1.zcr,
-                confidence = format_confidence(tier1.confidence),
-            ),
-            instrument,
+            instrument: instrument.into(),
             tier: 1,
-            zcr: Some(tier1.zcr),
-            confidence: tier1.confidence,
+            zcr: Some(zcr),
+            confidence: Some(confidence),
+            summary,
         };
-        if let Some(stamp) = stamp {
-            classify_cache::store_cached(path, stamp, &result);
-        }
-        return Ok(with_path_hint(path, result));
-    }
-
-    let tier2 = classifier_pool::classify_tier2(path, tier1.zcr)?;
-    let yamnet = tier2.engine.as_deref() == Some("yamnet");
-    let result = ClassificationResult {
-        summary: format!(
+        (result, true)
+    } else {
+        let tier2 = classifier_pool::classify_tier2(path, zcr)?;
+        let yamnet = tier2.engine.as_deref() == Some("yamnet");
+        let summary = format!(
             "Tier 1 grey (ZCR {zcr:.4}) → Tier 2 ({engine}) · {instrument}{confidence}",
-            zcr = tier1.zcr,
             engine = if yamnet { "YAMNet" } else { "Librosa spectral" },
             instrument = tier2.instrument,
             confidence = format_confidence(tier2.confidence),
-        ),
-        instrument: tier2.instrument,
-        tier: 2,
-        zcr: tier2.zcr.or(Some(tier1.zcr)),
-        confidence: tier2.confidence,
+        );
+        let result = ClassificationResult {
+            instrument: tier2.instrument,
+            tier: 2,
+            zcr: tier2.zcr.or(Some(zcr)),
+            confidence: tier2.confidence,
+            summary,
+        };
+        // Results from the librosa fallback (YAMNet missing or failing) are not
+        // remembered, so the real model reclassifies once it is available.
+        (result, yamnet)
     };
-    // Results from the librosa fallback (YAMNet missing or failing) are not
-    // remembered, so the real model reclassifies once it is available.
-    if let Some(stamp) = stamp.filter(|_| yamnet) {
+    if let Some(stamp) = stamp.filter(|_| cacheable) {
         classify_cache::store_cached(path, stamp, &result);
     }
     Ok(with_path_hint(path, result))
@@ -117,9 +114,7 @@ pub fn confidence_percent(confidence: Option<f64>) -> String {
 }
 
 fn format_confidence(confidence: Option<f64>) -> String {
-    confidence
-        .map(|_| format!(" ({})", confidence_percent(confidence)))
-        .unwrap_or_default()
+    confidence.map_or_else(String::new, |value| format!(" ({:.0}%)", value * 100.0))
 }
 
 /// Replaces the classifier's label with an instrument the file's name or
@@ -145,41 +140,26 @@ fn with_path_hint(path: &Path, mut result: ClassificationResult) -> Classificati
 mod tests {
     use super::*;
 
-    fn classified(instrument: &str, tier: u8, confidence: f64) -> ClassificationResult {
-        ClassificationResult {
-            instrument: instrument.into(),
-            tier,
-            zcr: Some(0.01),
-            confidence: Some(confidence),
-            summary: format!("Tier {tier} · {instrument}"),
+    #[test]
+    fn path_hint_replaces_only_unrelated_labels() {
+        for (path, label, want, hinted) in [
+            ("/Samples/Bongo/hit_01.wav", "Kick", "Percussion", true),
+            ("/hats/tight_01.wav", "Closed Hat", "Closed Hat", false),
+            ("/Samples/Snares/one.wav", "", "Snare", true),
+            ("/Samples/untitled.wav", "Kick", "Kick", false),
+        ] {
+            let classified = ClassificationResult {
+                instrument: label.into(),
+                tier: 1,
+                zcr: None,
+                confidence: Some(0.9),
+                summary: "classifier".into(),
+            };
+            let result = with_path_hint(Path::new(path), classified);
+            assert_eq!(result.instrument, want, "{path}");
+            assert_eq!(result.confidence.is_none(), hinted, "{path}");
+            assert_eq!(result.summary.starts_with("Path hint"), hinted, "{path}");
         }
-    }
-
-    #[test]
-    fn folder_hint_overrides_even_a_confident_classifier() {
-        let result = with_path_hint(Path::new("/Samples/Bongo/hit_01.wav"), classified("Kick", 1, 0.90));
-        assert_eq!(result.instrument, "Percussion");
-        assert_eq!(result.confidence, None);
-        assert!(result.summary.contains("Path hint"));
-    }
-
-    #[test]
-    fn related_hint_keeps_the_classifier_label() {
-        let result = with_path_hint(Path::new("/hats/tight_01.wav"), classified("Closed Hat", 1, 0.9));
-        assert_eq!(result.instrument, "Closed Hat");
-        assert_eq!(result.summary, "Tier 1 · Closed Hat");
-    }
-
-    #[test]
-    fn empty_classifier_label_takes_the_hint() {
-        let result = with_path_hint(Path::new("/Samples/Snares/one.wav"), classified("", 2, 0.5));
-        assert_eq!(result.instrument, "Snare");
-    }
-
-    #[test]
-    fn no_hint_leaves_the_result_alone() {
-        let result = with_path_hint(Path::new("/Samples/untitled.wav"), classified("Kick", 1, 0.9));
-        assert_eq!((result.instrument.as_str(), result.confidence), ("Kick", Some(0.9)));
     }
 
     #[test]

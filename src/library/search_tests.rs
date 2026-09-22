@@ -1,7 +1,6 @@
 use super::{SearchOutput, SearchRequest, Shared, cached_paths_for_root, execute_file_search};
 use crate::metadata::{CachedMetadata, TagField, TagFields, TagFilter};
-use crate::path_util::cache_key;
-use crate::path_util::file_mtime_secs;
+use crate::path_util::{cache_key, file_mtime_secs};
 use crate::test_fixtures::ScratchDir;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -116,87 +115,64 @@ fn tag_filter_matches_regardless_of_query_case() {
 #[test]
 fn file_query_narrows_an_active_tag_filter() {
     let (root, audio, metadata) = library_with_tagged_kick();
-    let hit = search(&[root.path()], Arc::clone(&metadata), "shot", "kick")
-        .result
-        .paths;
-    assert!(hit.contains(&audio), "matching query dropped {audio:?}");
+    let hit = search(&[root.path()], Arc::clone(&metadata), "shot", "kick");
+    assert!(hit.result.paths.contains(&audio), "matching query dropped {audio:?}");
     let miss = search(&[root.path()], metadata, "zzzz", "kick").result.paths;
     assert!(miss.is_empty(), "non-matching query still returned {miss:?}");
 }
 
+/// `cached_paths_for_root` over listings given as `(dir, files)`.
+fn cached(listings: &[(&str, &[&str])], root: &str) -> (Vec<PathBuf>, bool) {
+    let cache = listings
+        .iter()
+        .map(|(dir, files)| (PathBuf::from(dir), files.iter().map(PathBuf::from).collect()))
+        .collect();
+    cached_paths_for_root(&cache, Path::new(root))
+}
+
+fn paths(files: &[&str]) -> Vec<PathBuf> {
+    files.iter().map(PathBuf::from).collect()
+}
+
 #[test]
-fn cached_paths_for_root_reports_missing_when_only_subtrees_are_cached() {
-    let root = PathBuf::from("/Samples");
-    let sub = PathBuf::from("/Samples/ADM Samples - Copy");
-    let cache = HashMap::from([(
-        sub.clone(),
-        vec![
-            sub.join("Snare").join("01_Snare.flac"),
-            sub.join("Snare").join("02_Snare.flac"),
+fn cached_paths_for_root_is_found_only_once_the_root_itself_is_walked() {
+    let sub: (&str, &[&str]) = (
+        "/Samples/ADM",
+        &["/Samples/ADM/01_Snare.flac", "/Samples/ADM/02_Snare.flac"],
+    );
+    // Visited subtrees are a slice of the library, not coverage of the root.
+    assert_eq!(cached(&[sub], "/Samples"), (paths(sub.1), false));
+
+    let walked = cached(&[sub, ("/Samples", &["/Samples/kick.wav"])], "/Samples");
+    assert_eq!(walked.0.len(), 3);
+    assert!(walked.1);
+}
+
+#[test]
+#[cfg(windows)]
+fn cached_paths_for_root_merges_spellings_of_one_directory() {
+    // A stale verbatim parent listing must not hide a later child cache.
+    let (found, walked) = cached(
+        &[
+            (r"\\?\F:\Samples", &[r"\\?\F:\Samples\Old\kick.wav"]),
+            (r"F:\Samples\ADM", &[r"F:\Samples\ADM\01_Snare.flac"]),
         ],
-    )]);
-
-    let (paths, found) = cached_paths_for_root(&cache, &root);
-    assert!(
-        !found,
-        "visited subtrees are a slice of the library, not coverage of the root"
+        r"\\?\F:\Samples",
     );
-    assert_eq!(paths.len(), 2);
-    assert!(paths.iter().any(|p| p.ends_with("01_Snare.flac")));
-}
-
-#[test]
-fn cached_paths_for_root_reports_found_once_the_root_itself_is_walked() {
-    let root = PathBuf::from("/Samples");
-    let sub = PathBuf::from("/Samples/ADM Samples - Copy");
-    let cache = HashMap::from([
-        (root.clone(), vec![root.join("kick.wav")]),
-        (sub.clone(), vec![sub.join("01_Snare.flac")]),
-    ]);
-
-    let (paths, found) = cached_paths_for_root(&cache, &root);
-    assert!(found);
-    assert_eq!(paths.len(), 2);
-}
-
-#[test]
-#[cfg(windows)]
-fn cached_paths_for_root_unions_stale_parent_and_verbatim_root() {
-    let root = PathBuf::from(r"\\?\F:\Samples");
-    let child = PathBuf::from(r"F:\Samples\ADM Samples - Copy");
-    let cache = HashMap::from([
-        (root.clone(), vec![PathBuf::from(r"\\?\F:\Samples\Old\kick.wav")]),
-        (child.clone(), vec![child.join("Snare").join("01_Snare.flac")]),
-    ]);
-
-    let (paths, found) = cached_paths_for_root(&cache, &root);
-    assert!(found);
-    assert!(
-        paths.iter().any(|p| p.ends_with("01_Snare.flac")),
-        "stale parent listing must not hide a later child cache"
+    assert!(walked);
+    assert_eq!(
+        found,
+        paths(&[r"\\?\F:\Samples\Old\kick.wav", r"F:\Samples\ADM\01_Snare.flac"])
     );
-    assert!(paths.iter().any(|p| p.ends_with("kick.wav")));
-}
 
-#[test]
-#[cfg(windows)]
-fn cached_paths_for_root_keeps_one_listing_per_cache_key() {
-    let root = PathBuf::from(r"F:\Samples");
-    let cache = HashMap::from([
-        (
-            root.clone(),
-            vec![PathBuf::from(r"F:\Samples\a.wav"), PathBuf::from(r"F:\Samples\b.wav")],
-        ),
-        (
-            PathBuf::from(r"\\?\F:\Samples"),
-            vec![PathBuf::from(r"\\?\F:\Samples\stale.wav")],
-        ),
-    ]);
-
-    let (paths, found) = cached_paths_for_root(&cache, &root);
-    assert!(found);
-    assert_eq!(paths.len(), 2, "same directory under two spellings must not union");
-    assert!(paths.iter().any(|p| p.ends_with("a.wav")));
-    assert!(paths.iter().any(|p| p.ends_with("b.wav")));
-    assert!(paths.iter().all(|p| !p.ends_with("stale.wav")));
+    // The same directory under two spellings keeps only the fuller listing.
+    let (found, walked) = cached(
+        &[
+            (r"F:\Samples", &[r"F:\Samples\a.wav", r"F:\Samples\b.wav"]),
+            (r"\\?\F:\Samples", &[r"\\?\F:\Samples\stale.wav"]),
+        ],
+        r"F:\Samples",
+    );
+    assert!(walked);
+    assert_eq!(found, paths(&[r"F:\Samples\a.wav", r"F:\Samples\b.wav"]));
 }

@@ -45,13 +45,13 @@ pub fn read_bincode<T: DeserializeOwned>(path: &Path) -> Option<T> {
 
 /// Saves `value` atomically, logging failures under `label`. True on success.
 pub fn write_bincode<T: Serialize>(path: &Path, value: &T, label: &str) -> bool {
-    let result = bincode::serialize(value)
-        .map_err(|err| err.to_string())
-        .and_then(|bytes| write_atomic(path, &bytes).map_err(|err| err.to_string()));
-    if let Err(err) = &result {
-        eprintln!("Failed to write {label}: {err}");
-    }
-    result.is_ok()
+    let result = match bincode::serialize(value) {
+        Ok(bytes) => write_atomic(path, &bytes).map_err(|err| err.to_string()),
+        Err(err) => Err(err.to_string()),
+    };
+    result
+        .inspect_err(|err| eprintln!("Failed to write {label}: {err}"))
+        .is_ok()
 }
 
 /// Load user data such as settings or favorites.
@@ -75,30 +75,19 @@ pub fn load_user_data<T: Default + DeserializeOwned>(path: &Path, label: &str) -
     };
     let err = match bincode::deserialize(&bytes) {
         Ok(value) => return (value, true),
-        Err(err) => err,
+        Err(err) => format!("Failed to load {label} ({}): {err}", path.display()),
     };
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs())
         .unwrap_or_default();
     let backup = sidecar(path, &format!(".unreadable-{stamp}"));
-    match std::fs::rename(path, &backup) {
-        Ok(()) => {
-            eprintln!(
-                "Failed to load {label} ({}): {err}. Kept the file as {}",
-                path.display(),
-                backup.display()
-            );
-            (T::default(), true)
-        }
-        Err(move_err) => {
-            eprintln!(
-                "Failed to load {label} ({}): {err}; could not move it aside ({move_err}), so it will not be overwritten",
-                path.display()
-            );
-            (T::default(), false)
-        }
+    let moved = std::fs::rename(path, &backup);
+    match &moved {
+        Ok(()) => eprintln!("{err}. Kept the file as {}", backup.display()),
+        Err(move_err) => eprintln!("{err}; could not move it aside ({move_err}), so it will not be overwritten"),
     }
+    (T::default(), moved.is_ok())
 }
 
 /// Move a file from an old location once, atomically, keeping the source
