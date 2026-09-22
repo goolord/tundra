@@ -20,8 +20,8 @@ pub struct AutoTagState {
     pub applying: bool,
     pub status: String,
     pub result: Option<ClassificationResult>,
-    pub error: Option<String>,
-    pub error_details: Option<String>,
+    /// Classifier errors carry details for the disclosure; others leave them empty.
+    pub error: Option<ClassifyError>,
     pub details_open: bool,
     pub applied: bool,
 }
@@ -40,33 +40,28 @@ impl AutoTagState {
     }
 
     pub fn set_error(&mut self, message: impl Into<String>) {
-        self.error = Some(message.into());
-        self.error_details = None;
+        self.error = Some(ClassifyError::new(message, ""));
     }
 
     pub fn clear_error(&mut self) {
         self.error = None;
-        self.error_details = None;
     }
 
     pub fn begin_run(&mut self) {
-        self.running = true;
-        self.clear_error();
-        self.result = None;
-        self.applied = false;
+        (self.running, self.applied) = (true, false);
+        (self.result, self.error) = (None, None);
     }
 
     pub fn finish_run(&mut self, result: Result<ClassificationResult, ClassifyError>) {
         self.running = false;
-        self.clear_error();
-        match result {
-            Ok(classification) => self.result = Some(classification),
-            Err(err) => {
-                self.result = None;
-                self.error = Some(err.message);
-                self.error_details = Some(err.details);
-            }
-        }
+        (self.result, self.error) = match result {
+            Ok(classification) => (Some(classification), None),
+            Err(err) => (None, Some(err)),
+        };
+    }
+
+    fn error_details(&self) -> Option<&str> {
+        self.error.as_ref().map(|err| err.details.as_str()).filter(|details| !details.is_empty())
     }
 }
 
@@ -96,7 +91,7 @@ fn details_disclosure(state: &AutoTagState) -> Element<'_, Message> {
         result.map(|result| modal_info_row("Tier", result.tier.to_string())),
         result.map(|result| modal_info_row("Pipeline", &result.summary)),
         result.and_then(|result| result.zcr).map(|zcr| modal_info_row("ZCR", format!("{zcr:.4}"))),
-        state.error_details.as_deref().map(muted),
+        state.error_details().map(muted),
         muted("Setup: cargo xtask setup"),
     ]
     .spacing(6)
@@ -143,7 +138,7 @@ pub fn auto_tag_view(state: &AutoTagState) -> Element<'_, Message> {
     if state.running {
         body = body.push(text("Analyzing…").size(12).width(Length::Fill));
     } else if let Some(error) = &state.error {
-        body = body.push(colored(error.clone(), style::ERROR));
+        body = body.push(colored(error.message.clone(), style::ERROR));
     } else if state.applied {
         let message = if state.status.is_empty() {
             "Instrument tag written. You can now find this file with tag search.".to_string()
@@ -170,7 +165,7 @@ pub fn auto_tag_view(state: &AutoTagState) -> Element<'_, Message> {
         && (!allows_instrument_work || state.result.is_some());
 
     let body = body
-        .push((state.result.is_some() || state.error_details.is_some()).then(|| details_disclosure(state)))
+        .push((state.result.is_some() || state.error_details().is_some()).then(|| details_disclosure(state)))
         .push(can_apply.then(|| {
             text("Apply writes missing tags permanently. There is no undo. Files with other metadata keep their existing values.")
                 .size(11)

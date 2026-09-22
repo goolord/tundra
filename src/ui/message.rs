@@ -1,7 +1,6 @@
 //! Every event the UI handles. `App::update` routes each group to the file
 //! under `app/` that owns it.
 
-use super::bulk_auto_tag::BulkFileKey;
 use super::waveform::WaveFormView;
 use crate::auto_tag::{ClassificationResult, ClassifyError};
 use crate::bulk_auto_tag::{BulkApplySummary, BulkScanSummary, ScanError};
@@ -192,8 +191,9 @@ pub enum BulkAutoTagMsg {
     RunScan,
     ProgressTick,
     ScanCompleted(u64, Result<BulkScanSummary, ScanError>),
-    SetFileAccepted(BulkFileKey, bool),
-    SelectFile(BulkFileKey),
+    /// Rows index `BulkAutoTagState::files`.
+    SetFileAccepted(usize, bool),
+    SelectFile(usize),
     SelectDirectory(usize),
     SelectAll,
     ClearSelection,

@@ -2,7 +2,7 @@
 //! instrument, group the proposals by directory for review, then write the
 //! accepted ones. Runs on background threads; the UI polls `BulkScanProgress`.
 
-use crate::auto_tag::{self, ClassificationResult, ClassifyError};
+use crate::auto_tag;
 use crate::library::cache::MetadataMap;
 use crate::locks::lock;
 use crate::metadata::{
@@ -10,6 +10,7 @@ use crate::metadata::{
 };
 use rayon::prelude::*;
 use std::collections::BTreeMap;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -112,36 +113,28 @@ impl BulkFileProposal {
     }
 }
 
+/// How many of `files` could be applied, and how many of those are checked.
+pub fn actionable_and_accepted(files: &[BulkFileProposal]) -> (usize, usize) {
+    let actionable = files.iter().filter(|file| file.is_actionable());
+    actionable.fold((0, 0), |(count, accepted), file| (count + 1, accepted + usize::from(file.accepted)))
+}
+
 #[derive(Debug, Clone)]
 pub struct BulkDirGroup {
     pub path: PathBuf,
-    pub files: Vec<BulkFileProposal>,
+    /// This folder's slice of `BulkScanSummary::files`.
+    pub files: Range<usize>,
     pub expanded: bool,
-}
-
-impl BulkDirGroup {
-    pub fn actionable_count(&self) -> usize {
-        self.files.iter().filter(|file| file.is_actionable()).count()
-    }
-
-    pub fn accepted_count(&self) -> usize {
-        self.files.iter().filter(|file| file.accepted && file.is_actionable()).count()
-    }
 }
 
 #[derive(Debug, Clone)]
 pub struct BulkScanSummary {
     pub root: PathBuf,
+    /// Every proposal, folder by folder in display order.
+    pub files: Vec<BulkFileProposal>,
     pub groups: Vec<BulkDirGroup>,
     pub skipped_complete: usize,
     pub failed: usize,
-}
-
-impl BulkScanSummary {
-    /// Nothing to review: every file was already tagged.
-    pub fn is_empty(&self) -> bool {
-        self.groups.is_empty() && self.failed == 0
-    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -161,23 +154,14 @@ pub struct BulkApplyItem {
     pub instrument: String,
 }
 
+/// A suggested instrument and its confidence, or the error shown instead.
+type Suggestion = Result<(String, Option<f64>), String>;
+
 /// The instrument already in the file, for files that only miss other auto tags.
-fn existing_instrument(path: &Path, metadata: &MetadataMap) -> Result<ClassificationResult, ClassifyError> {
+fn existing_instrument(path: &Path, metadata: &MetadataMap) -> Suggestion {
     let cached = metadata.get(path).map(|cached| cached.fields.explicit_instrument.trim());
     let instrument = cached.filter(|label| !label.is_empty()).map(str::to_string).or_else(|| instrument_tag(path));
-    let instrument = instrument.ok_or_else(|| {
-        ClassifyError::new(
-            "Could not read existing instrument tag.",
-            "Metadata-only auto tag requires an instrument label in the file.",
-        )
-    })?;
-    Ok(ClassificationResult {
-        instrument,
-        tier: 0,
-        zcr: None,
-        confidence: None,
-        summary: "Existing instrument tag".into(),
-    })
+    instrument.map(|instrument| (instrument, None)).ok_or_else(|| "Could not read existing instrument tag.".into())
 }
 
 /// Files that need classifying, files whose instrument is set but that miss
@@ -261,7 +245,7 @@ fn collect_audio_paths(
     Ok(paths)
 }
 
-type Classified = Vec<(PathBuf, Result<ClassificationResult, ClassifyError>)>;
+type Classified = Vec<(PathBuf, Suggestion)>;
 
 fn classify_files(
     paths: Vec<PathBuf>,
@@ -274,10 +258,12 @@ fn classify_files(
     let results = paths
         .into_par_iter()
         .map(|path| {
-            // After a cancel the remaining files are skipped, not analysed.
+            // After a cancel the remaining files are skipped, not analysed; the scan's result is discarded.
             let result = match check_cancel(cancel) {
-                Ok(()) => auto_tag::classify_file_bulk(&path),
-                Err(_) => Err(ClassifyError::new("Scan cancelled.", "Bulk classify interrupted")),
+                Ok(()) => auto_tag::classify_file_bulk(&path)
+                    .map(|result| (result.instrument, result.confidence))
+                    .map_err(|err| err.message),
+                Err(_) => Err("Scan cancelled.".into()),
             };
             progress.advance();
             (path, result)
@@ -312,8 +298,7 @@ pub fn scan_and_classify(
     let mut results = classified?;
     for path in metadata_only {
         check_cancel(&cancel)?;
-        let result = existing_instrument(&path, &metadata);
-        results.push((path, result));
+        results.push((path.clone(), existing_instrument(&path, &metadata)));
     }
     Ok(build_scan_summary(root, skipped_complete, results))
 }
@@ -325,8 +310,8 @@ fn build_scan_summary(root: PathBuf, skipped_complete: usize, mut results: Class
     let mut grouped: BTreeMap<PathBuf, Vec<BulkFileProposal>> = BTreeMap::new();
     for (path, result) in results {
         let (suggested, confidence, error) = match result {
-            Ok(classification) => (Some(classification.instrument), classification.confidence, None),
-            Err(err) => (None, None, Some(err.message)),
+            Ok((instrument, confidence)) => (Some(instrument), confidence, None),
+            Err(err) => (None, None, Some(err)),
         };
         // Pre-check only suggestions worth trusting; a low-confidence guess
         // must be opted into before Apply writes it permanently.
@@ -336,30 +321,31 @@ fn build_scan_summary(root: PathBuf, skipped_complete: usize, mut results: Class
         grouped.entry(parent).or_default().push(BulkFileProposal { path, suggested, confidence, accepted, error });
     }
     let expanded = expanded && grouped.len() <= COLLAPSE_DIR_THRESHOLD;
-    let groups = grouped.into_iter().map(|(path, files)| BulkDirGroup { path, files, expanded }).collect();
-    BulkScanSummary { root, groups, skipped_complete, failed }
+    let mut files = Vec::new();
+    let groups = grouped
+        .into_iter()
+        .map(|(path, proposals)| {
+            let start = files.len();
+            files.extend(proposals);
+            BulkDirGroup { path, files: start..files.len(), expanded }
+        })
+        .collect();
+    BulkScanSummary { root, files, groups, skipped_complete, failed }
 }
 
 /// The checked proposals, ready to write.
-pub fn collect_accepted(groups: &[BulkDirGroup]) -> Vec<BulkApplyItem> {
-    groups
+pub fn collect_accepted(files: &[BulkFileProposal]) -> Vec<BulkApplyItem> {
+    files
         .iter()
-        .flat_map(|group| &group.files)
         .filter(|file| file.accepted && file.error.is_none())
         .filter_map(|file| Some(BulkApplyItem { path: file.path.clone(), instrument: file.suggested.clone()? }))
         .collect()
 }
 
-/// Writes each item's tags, stopping early once `cancel` is set.
-pub fn apply_items(
-    items: &[BulkApplyItem],
-    progress: Option<&BulkScanProgress>,
-    cancel: &AtomicBool,
-) -> BulkApplySummary {
+/// Writes each item's tags, stopping early once `cancel` is set. The caller
+/// begins `progress` first, so the UI shows the total before this thread runs.
+pub fn apply_items(items: &[BulkApplyItem], progress: &BulkScanProgress, cancel: &AtomicBool) -> BulkApplySummary {
     let mut summary = BulkApplySummary::default();
-    if let Some(progress) = progress {
-        progress.begin(BulkPhase::Applying, items.len());
-    }
     for item in items {
         if check_cancel(cancel).is_err() {
             summary.cancelled = true;
@@ -375,10 +361,8 @@ pub fn apply_items(
             Ok(false) => summary.unchanged += 1,
             Err(err) => summary.failed.push((item.path.clone(), err)),
         }
-        if let Some(progress) = progress {
-            progress.advance();
-            std::thread::yield_now();
-        }
+        progress.advance();
+        std::thread::yield_now();
     }
     summary
 }
@@ -420,8 +404,9 @@ mod tests {
 
         let items: Vec<_> =
             paths.iter().map(|path| BulkApplyItem { path: path.clone(), instrument: "Kick".to_string() }).collect();
-        let progress = BulkScanProgress::new();
-        let summary = apply_items(&items, Some(&progress), &AtomicBool::new(false));
+        let progress = BulkScanProgress::default();
+        progress.begin(BulkPhase::Applying, count);
+        let summary = apply_items(&items, &progress, &AtomicBool::new(false));
         assert_eq!(summary.failed, Vec::new(), "no format should fail to tag");
         assert_eq!((summary.written, summary.unchanged, summary.cancelled), (count, 0, false));
         assert_eq!(progress.snapshot().detail(), format!("{count} / {count}"));
@@ -429,29 +414,21 @@ mod tests {
 
         // Same tag version: bulk scan should skip already-tagged files.
         assert_eq!(partition_auto_tag_candidates(&paths, &metadata), (vec![], vec![], count));
-        assert_eq!(apply_items(&items, None, &AtomicBool::new(false)).written, 0);
+        assert_eq!(apply_items(&items, &progress, &AtomicBool::new(false)).written, 0);
     }
 
     #[test]
     fn cancelled_apply_writes_nothing_and_says_so() {
         let (_root, paths) = kick_folder("bulk-cancel");
         let items = vec![BulkApplyItem { path: paths[0].clone(), instrument: "Kick".into() }];
-        let summary = apply_items(&items, None, &AtomicBool::new(true));
+        let summary = apply_items(&items, &BulkScanProgress::default(), &AtomicBool::new(true));
         assert!(summary.cancelled);
         assert_eq!(summary.written, 0);
     }
 
     #[test]
     fn low_confidence_suggestions_start_unchecked_and_errors_count_as_failed() {
-        let guess = |confidence| {
-            Ok(ClassificationResult {
-                instrument: "Kick".into(),
-                tier: 2,
-                zcr: None,
-                confidence: Some(confidence),
-                summary: String::new(),
-            })
-        };
+        let guess = |confidence| Ok(("Kick".into(), Some(confidence)));
         let root = PathBuf::from("/samples");
         let summary = build_scan_summary(
             root.clone(),
@@ -459,15 +436,16 @@ mod tests {
             vec![
                 (root.join("a/sure.wav"), guess(0.99)),
                 (root.join("a/unsure.wav"), guess(0.01)),
-                (root.join("b/broken.wav"), Err(ClassifyError::new("Nope", ""))),
+                (root.join("b/broken.wav"), Err("Nope".into())),
             ],
         );
         assert_eq!((summary.groups.len(), summary.failed, summary.skipped_complete), (2, 1, 3));
-        let accepted: Vec<bool> = summary.groups[0].files.iter().map(|file| file.accepted).collect();
+        let group = |index: usize| &summary.files[summary.groups[index].files.clone()];
+        let accepted: Vec<bool> = group(0).iter().map(|file| file.accepted).collect();
         assert_eq!(accepted, [true, false]);
-        assert_eq!(summary.groups[0].actionable_count(), 2);
-        assert_eq!(summary.groups[1].actionable_count(), 0);
-        assert_eq!(collect_accepted(&summary.groups).len(), 1);
+        assert_eq!(actionable_and_accepted(group(0)), (2, 1));
+        assert_eq!(actionable_and_accepted(group(1)), (0, 0));
+        assert_eq!(collect_accepted(&summary.files).len(), 1);
     }
 
     #[test]

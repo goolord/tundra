@@ -44,7 +44,8 @@ impl App {
             }
             BulkAutoTagMsg::DirectoryPicked(None) => {}
             BulkAutoTagMsg::RunScan => return self.start_bulk_scan(),
-            BulkAutoTagMsg::ProgressTick => state.update_progress(),
+            // The view reads progress from the job; the tick only redraws it.
+            BulkAutoTagMsg::ProgressTick => {}
             BulkAutoTagMsg::ScanCompleted(generation, result) => {
                 if state.finish_job(generation) {
                     match result {
@@ -54,13 +55,15 @@ impl App {
                     }
                 }
             }
-            BulkAutoTagMsg::SetFileAccepted(key, accepted) => state.set_file_accepted(key, accepted),
-            BulkAutoTagMsg::SelectFile(key) => state.select_file(key, shift, control),
+            BulkAutoTagMsg::SetFileAccepted(row, accepted) => state.set_accepted([row], accepted),
+            BulkAutoTagMsg::SelectFile(row) => state.select_file(row, shift, control),
             BulkAutoTagMsg::SelectDirectory(dir_idx) => state.select_directory(dir_idx, shift, control),
             BulkAutoTagMsg::SelectAll => state.select_all_files(),
             BulkAutoTagMsg::ClearSelection => state.selection.clear(),
-            BulkAutoTagMsg::CheckSelected(accepted) => state.set_selected_accepted(accepted),
-            BulkAutoTagMsg::CheckAll(accepted) => state.set_all_accepted(accepted),
+            BulkAutoTagMsg::CheckSelected(accepted) => {
+                state.set_accepted(state.selection.iter().collect::<Vec<_>>(), accepted)
+            }
+            BulkAutoTagMsg::CheckAll(accepted) => state.set_accepted(0..state.files.len(), accepted),
             BulkAutoTagMsg::ToggleDirectoryExpanded(dir_idx) => {
                 if let Some(group) = state.groups.get_mut(dir_idx) {
                     group.expanded = !group.expanded;
@@ -108,7 +111,7 @@ impl App {
 
     fn start_bulk_apply(&mut self) -> Task<Message> {
         let state = &mut self.bulk_auto_tag;
-        let items = bulk_auto_tag::collect_accepted(&state.groups);
+        let items = bulk_auto_tag::collect_accepted(&state.files);
         if items.is_empty() {
             return Task::none();
         }
@@ -117,7 +120,7 @@ impl App {
         state.start_apply();
         let generation = job.generation;
         background(
-            move || bulk_auto_tag::apply_items(&items, Some(&job.progress), &job.cancel),
+            move || bulk_auto_tag::apply_items(&items, &job.progress, &job.cancel),
             || BulkApplySummary {
                 failed: vec![(
                     PathBuf::new(),

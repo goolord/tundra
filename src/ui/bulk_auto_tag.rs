@@ -5,7 +5,9 @@ use super::message::{BulkAutoTagMsg, Message};
 use super::selection::Selection;
 use super::style::{self, ACCENT};
 use super::widgets::{icon, modal_button, modal_footer, modal_shell, selection_stripe, spacer};
-use crate::bulk_auto_tag::{BulkApplySummary, BulkDirGroup, BulkFileProposal, BulkScanProgress, BulkScanSummary};
+use crate::bulk_auto_tag::{
+    BulkApplySummary, BulkDirGroup, BulkFileProposal, BulkScanProgress, BulkScanSummary, actionable_and_accepted,
+};
 use crate::path_util::truncate_path;
 use iced::widget::{Column, Row, Text, button, checkbox, column, container, progress_bar, row, scrollable, text};
 use iced::{Alignment, Color, Element, Length, Theme};
@@ -22,12 +24,6 @@ const ROW_HEIGHT: f32 = 36.0;
 const SELECTION_STRIPE_WIDTH: f32 = 3.0;
 const CHECKBOX_COLUMN_WIDTH: f32 = 28.0;
 const EXPAND_TOGGLE_WIDTH: f32 = 32.0;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct BulkFileKey {
-    pub dir_idx: usize,
-    pub file_idx: usize,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BulkAutoTagPhase {
@@ -53,16 +49,16 @@ pub struct BulkAutoTagState {
     /// `None` while the modal is closed.
     pub phase: Option<BulkAutoTagPhase>,
     pub root: Option<PathBuf>,
+    /// Every proposal in display order; groups own ranges of it and the
+    /// selection holds indices into it.
+    pub files: Vec<BulkFileProposal>,
     pub groups: Vec<BulkDirGroup>,
     pub skipped_complete: usize,
     pub failed: usize,
     pub status: String,
     pub error: Option<String>,
     pub apply_summary: Option<BulkApplySummary>,
-    pub selection: Selection<BulkFileKey>,
-    pub progress_fraction: f32,
-    pub progress_label: String,
-    pub progress_detail: String,
+    pub selection: Selection,
     pub apply_stop_requested: bool,
     pub job: Option<BulkJob>,
     /// Survives closing the modal, so a job from an earlier session can never match.
@@ -117,127 +113,77 @@ impl BulkAutoTagState {
         current
     }
 
-    fn file(&self, key: BulkFileKey) -> Option<&BulkFileProposal> {
-        self.groups.get(key.dir_idx)?.files.get(key.file_idx)
+    /// The `rows` with a suggestion Apply could write; only these can be
+    /// selected or checked.
+    fn actionable(&self, rows: impl Iterator<Item = usize>) -> impl Iterator<Item = usize> {
+        rows.filter(|&row| self.files.get(row).is_some_and(BulkFileProposal::is_actionable))
     }
 
-    /// Every file that could be applied, in display order.
-    fn actionable_keys(&self) -> Vec<BulkFileKey> {
-        self.groups
-            .iter()
-            .enumerate()
-            .flat_map(|(dir_idx, group)| {
-                group
-                    .files
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, file)| file.is_actionable())
-                    .map(move |(file_idx, _)| BulkFileKey { dir_idx, file_idx })
-            })
-            .collect()
-    }
-
-    pub fn select_file(&mut self, key: BulkFileKey, shift: bool, control: bool) {
-        if self.file(key).is_some_and(BulkFileProposal::is_actionable) {
-            let order = self.actionable_keys();
-            self.selection.click(key, shift, control, &order);
+    pub fn select_file(&mut self, row: usize, shift: bool, control: bool) {
+        let files = &self.files;
+        let actionable = |row: usize| files.get(row).is_some_and(BulkFileProposal::is_actionable);
+        if actionable(row) {
+            self.selection.click(row, shift, control, actionable);
         }
     }
 
     /// Clicking a folder row selects its files. Ctrl toggles them as a block;
     /// Shift extends from the anchor through the folder's last file.
     pub fn select_directory(&mut self, dir_idx: usize, shift: bool, control: bool) {
-        let keys = self.actionable_keys();
-        let dir_keys: Vec<BulkFileKey> = keys.iter().copied().filter(|key| key.dir_idx == dir_idx).collect();
-        let Some(&first) = dir_keys.first() else {
+        let Some(group) = self.groups.get(dir_idx) else {
             return;
         };
-
+        let dir_rows: Vec<usize> = self.actionable(group.files.clone()).collect();
+        let (Some(&first), Some(&last)) = (dir_rows.first(), dir_rows.last()) else {
+            return;
+        };
         if control {
-            if dir_keys.iter().all(|key| self.selection.contains(key)) {
-                dir_keys.iter().for_each(|key| self.selection.remove(key));
-            } else {
-                dir_keys.into_iter().for_each(|key| self.selection.insert(key));
+            let all_selected = dir_rows.iter().all(|&row| self.selection.contains(row));
+            for row in dir_rows {
+                if all_selected { self.selection.remove(row) } else { self.selection.insert(row) }
             }
-            return;
+        } else if shift && let Some(anchor) = self.selection.anchor() {
+            let rows: Vec<usize> = self.actionable(anchor.min(last)..anchor.max(last) + 1).collect();
+            self.selection.set(rows, Some(anchor));
+        } else {
+            // A plain click replaces the selection; Shift with no anchor adds the folder to it.
+            let kept: Vec<usize> = self.selection.iter().filter(|_| shift).collect();
+            self.selection.set(kept.into_iter().chain(dir_rows), Some(first));
         }
-        if shift && let Some(anchor) = self.selection.anchor().copied() {
-            match keys.iter().position(|key| *key == anchor) {
-                Some(start) => {
-                    let end = keys.iter().rposition(|key| key.dir_idx == dir_idx).unwrap_or(start);
-                    self.selection.set(keys[start.min(end)..=start.max(end)].iter().copied(), Some(anchor));
-                }
-                None => self.selection.set(dir_keys, Some(first)),
-            }
-            return;
-        }
-        // A plain click replaces the selection; Shift with no anchor adds the folder to it.
-        let kept = self.selection.iter().copied().filter(|_| shift).collect::<Vec<_>>();
-        self.selection.set(kept.into_iter().chain(dir_keys), Some(first));
     }
 
     pub fn select_all_files(&mut self) {
-        let keys = self.actionable_keys();
-        let first = keys.first().copied();
-        self.selection.set(keys, first);
+        let rows: Vec<usize> = self.actionable(0..self.files.len()).collect();
+        self.selection.set(rows.iter().copied(), rows.first().copied());
     }
 
-    pub fn set_selected_accepted(&mut self, accepted: bool) {
-        for key in self.selection.iter().copied().collect::<Vec<_>>() {
-            self.set_file_accepted(key, accepted);
+    /// Checks or unchecks `rows`, skipping any Apply could not write.
+    pub fn set_accepted(&mut self, rows: impl IntoIterator<Item = usize>, accepted: bool) {
+        for row in rows {
+            if let Some(file) = self.files.get_mut(row).filter(|file| file.is_actionable()) {
+                file.accepted = accepted;
+            }
         }
-    }
-
-    pub fn set_file_accepted(&mut self, key: BulkFileKey, accepted: bool) {
-        if let Some(file) = self
-            .groups
-            .get_mut(key.dir_idx)
-            .and_then(|group| group.files.get_mut(key.file_idx))
-            .filter(|file| file.is_actionable())
-        {
-            file.accepted = accepted;
-        }
-    }
-
-    pub fn set_all_accepted(&mut self, accepted: bool) {
-        self.groups
-            .iter_mut()
-            .flat_map(|group| &mut group.files)
-            .filter(|file| file.is_actionable())
-            .for_each(|file| file.accepted = accepted);
     }
 
     pub fn start_running(&mut self, root: PathBuf) {
         self.root = Some(root);
         self.phase = Some(BulkAutoTagPhase::Running);
         self.status.clear();
-        self.progress_fraction = 0.0;
-        self.progress_label = "Scanning folder…".into();
-        self.progress_detail = "Starting…".into();
         self.error = None;
+        self.files.clear();
         self.groups.clear();
         self.selection.clear();
     }
 
-    pub fn update_progress(&mut self) {
-        if let Some(job) = &self.job {
-            let snapshot = job.progress.snapshot();
-            self.progress_fraction = snapshot.fraction();
-            self.progress_label = snapshot.label().into();
-            self.progress_detail = snapshot.detail();
-        }
-    }
-
     pub fn finish_scan(&mut self, summary: BulkScanSummary) {
-        let summary_is_empty = summary.is_empty();
         self.root = Some(summary.root);
-        self.skipped_complete = summary.skipped_complete;
-        self.failed = summary.failed;
-        self.groups = summary.groups;
+        (self.files, self.groups) = (summary.files, summary.groups);
+        (self.skipped_complete, self.failed) = (summary.skipped_complete, summary.failed);
         self.apply_summary = None;
         self.error = None;
         self.selection.clear();
-        if summary_is_empty {
+        if self.files.is_empty() {
             // Nothing to review: stay on the picker and say why.
             self.phase = Some(BulkAutoTagPhase::PickDirectory);
             self.status = match self.skipped_complete {
@@ -260,12 +206,6 @@ impl BulkAutoTagState {
     pub fn start_apply(&mut self) {
         self.phase = Some(BulkAutoTagPhase::Applying);
         self.apply_stop_requested = false;
-        self.progress_label = "Writing tags…".into();
-        self.progress_fraction = 0.0;
-        self.progress_detail = match self.accepted_count() {
-            0 => "Starting…".into(),
-            total => format!("0 / {total}"),
-        };
         self.error = None;
     }
 
@@ -274,7 +214,6 @@ impl BulkAutoTagState {
             job.cancel.store(true, Ordering::Relaxed);
         }
         self.apply_stop_requested = true;
-        self.progress_label = "Stopping… already-written tags stay.".into();
     }
 
     pub fn finish_apply(&mut self, summary: BulkApplySummary) {
@@ -283,21 +222,13 @@ impl BulkAutoTagState {
         self.status.clear();
         self.selection.clear();
     }
-
-    pub fn actionable_count(&self) -> usize {
-        self.groups.iter().map(BulkDirGroup::actionable_count).sum()
-    }
-
-    pub fn accepted_count(&self) -> usize {
-        self.groups.iter().map(BulkDirGroup::accepted_count).sum()
-    }
 }
 
 fn muted(label: impl text::IntoFragment<'static>, size: u32) -> Text<'static> {
     text(label).size(size).style(style::muted_text)
 }
 
-fn small_button(label: &'static str, message: BulkAutoTagMsg) -> Element<'static, Message> {
+fn small_button(label: &'static str, message: impl Into<Message>) -> Element<'static, Message> {
     button(text(label).size(11)).padding([4, 10]).on_press(message.into()).style(style::modal_button(false)).into()
 }
 
@@ -305,10 +236,7 @@ fn folder_line(root: &Path, label: String) -> Element<'static, Message> {
     row![
         icon("folder-solid.svg", 12.0, |_| ACCENT.scale_alpha(0.75)),
         muted(label, 11).width(Length::Fill),
-        button(text("Open folder").size(11))
-            .padding([4, 10])
-            .on_press(Message::FileRevealInFileManager(root.to_path_buf()))
-            .style(style::modal_button(false)),
+        small_button("Open folder", Message::FileRevealInFileManager(root.to_path_buf())),
     ]
     .spacing(6)
     .align_y(Alignment::Center)
@@ -389,12 +317,7 @@ fn row_button(label: Row<'static, Message>, message: BulkAutoTagMsg) -> button::
         .on_press(message.into())
 }
 
-fn file_row(
-    state: &BulkAutoTagState,
-    key: BulkFileKey,
-    file: &BulkFileProposal,
-    zebra: bool,
-) -> Element<'static, Message> {
+fn file_row(state: &BulkAutoTagState, row: usize, file: &BulkFileProposal, zebra: bool) -> Element<'static, Message> {
     let name = crate::path_util::file_label(&file.path);
     let indent: Element<'static, Message> = spacer(Length::Fixed(FILE_INDENT), Length::Shrink).into();
 
@@ -417,7 +340,7 @@ fn file_row(
         return list_row([indent, body.into()]).into();
     }
 
-    let selected = state.selection.contains(&key);
+    let selected = state.selection.contains(row);
     let accepted = file.accepted;
     let label = row![
         icon("music-solid.svg", 13.0, move |theme| {
@@ -434,7 +357,7 @@ fn file_row(
         .style(style::tinted(ACCENT, 0.14, 0.32, 12.0)),
         confidence_badge(file.confidence),
     ];
-    let checkbox = checkbox(accepted).on_toggle(move |accepted| BulkAutoTagMsg::SetFileAccepted(key, accepted).into());
+    let checkbox = checkbox(accepted).on_toggle(move |accepted| BulkAutoTagMsg::SetFileAccepted(row, accepted).into());
     list_row([
         indent,
         selection_stripe(selected, SELECTION_STRIPE_WIDTH, Length::Fixed(ROW_HEIGHT)),
@@ -443,7 +366,7 @@ fn file_row(
             .center_x(Length::Fixed(CHECKBOX_COLUMN_WIDTH))
             .align_y(Alignment::Center)
             .into(),
-        row_button(label, BulkAutoTagMsg::SelectFile(key))
+        row_button(label, BulkAutoTagMsg::SelectFile(row))
             .style(list_row_button_style(selected, accepted, zebra))
             .into(),
     ])
@@ -463,16 +386,10 @@ fn directory_group(
             text => text.into_owned(),
         },
     );
-    let count = group.actionable_count();
-    let accepted = group.accepted_count();
+    let files = &state.files[group.files.clone()];
+    let (count, accepted) = actionable_and_accepted(files);
     let expanded = group.expanded;
-    let dir_selected = count > 0
-        && group
-            .files
-            .iter()
-            .enumerate()
-            .filter(|(_, file)| file.is_actionable())
-            .all(|(file_idx, _)| state.selection.contains(&BulkFileKey { dir_idx, file_idx }));
+    let dir_selected = count > 0 && state.actionable(group.files.clone()).all(|row| state.selection.contains(row));
 
     let toggle = button(text(if expanded { "▾" } else { "▸" }).size(17).font(style::SEMIBOLD))
         .width(Length::Fixed(EXPAND_TOGGLE_WIDTH))
@@ -526,11 +443,8 @@ fn directory_group(
     if !expanded {
         return header.into();
     }
-    let files = group
-        .files
-        .iter()
-        .enumerate()
-        .map(|(file_idx, file)| file_row(state, BulkFileKey { dir_idx, file_idx }, file, file_idx % 2 == 1));
+    let start = group.files.start;
+    let files = files.iter().enumerate().map(|(offset, file)| file_row(state, start + offset, file, offset % 2 == 1));
     column![
         header,
         container(Column::with_children(files)).width(Length::Fill).style(|theme: &Theme| {
@@ -545,11 +459,12 @@ fn directory_group(
 fn review_body(state: &BulkAutoTagState) -> Element<'static, Message> {
     let root = state.root.clone().unwrap_or_default();
     let dir_count = state.groups.len();
-    let file_count: usize = state.groups.iter().map(|group| group.files.len()).sum();
+    let file_count = state.files.len();
+    let (ready, checked) = actionable_and_accepted(&state.files);
 
     let stats = row![
-        stat_chip("Ready", state.actionable_count(), true),
-        stat_chip("Checked", state.accepted_count(), true),
+        stat_chip("Ready", ready, true),
+        stat_chip("Checked", checked, true),
         stat_chip("Selected", state.selection.len(), false),
         stat_chip("Skipped", state.skipped_complete, false),
         stat_chip("Classify failed", state.failed, state.failed > 0),
@@ -710,18 +625,24 @@ pub fn bulk_auto_tag_view(state: &BulkAutoTagState) -> Element<'_, Message> {
             .spacing(10)
             .into()
         }
-        BulkAutoTagPhase::Running | BulkAutoTagPhase::Applying => container(
-            column![
-                text(&state.progress_label).size(12).width(Length::Fill),
-                progress_bar(0.0..=1.0, state.progress_fraction),
-                muted(state.progress_detail.clone(), 11),
-            ]
-            .spacing(8),
-        )
-        .padding([10, 12])
-        .width(Length::Fill)
-        .style(style::tinted(ACCENT, 0.10, 0.22, 6.0))
-        .into(),
+        BulkAutoTagPhase::Running | BulkAutoTagPhase::Applying => {
+            // Read straight from the job; the progress subscription only triggers redraws.
+            let progress = state.job.as_ref().map(|job| job.progress.snapshot()).unwrap_or_default();
+            let stopping = state.apply_stop_requested && phase == BulkAutoTagPhase::Applying;
+            let label = if stopping { "Stopping… already-written tags stay." } else { progress.label() };
+            container(
+                column![
+                    text(label).size(12).width(Length::Fill),
+                    progress_bar(0.0..=1.0, progress.fraction()),
+                    muted(progress.detail(), 11),
+                ]
+                .spacing(8),
+            )
+            .padding([10, 12])
+            .width(Length::Fill)
+            .style(style::tinted(ACCENT, 0.10, 0.22, 6.0))
+            .into()
+        }
         BulkAutoTagPhase::Review => container(review_body(state)).width(Length::Fill).height(Length::Fill).into(),
         BulkAutoTagPhase::Done => done_body(state),
     };
@@ -737,7 +658,8 @@ pub fn bulk_auto_tag_view(state: &BulkAutoTagState) -> Element<'_, Message> {
             ),
             modal_button(
                 "Apply checked",
-                (is_review && state.accepted_count() > 0).then(|| BulkAutoTagMsg::Apply.into()),
+                (is_review && state.files.iter().any(|file| file.accepted && file.is_actionable()))
+                    .then(|| BulkAutoTagMsg::Apply.into()),
                 true,
             ),
         ],
@@ -767,38 +689,35 @@ mod tests {
         }
     }
 
+    /// Folder `a` holds rows 0..3 (row 1 failed), folder `b` rows 3..5.
     fn state() -> BulkAutoTagState {
         let group = |path: &str, files| BulkDirGroup { path: PathBuf::from(path), files, expanded: true };
         BulkAutoTagState {
-            groups: vec![
-                group("a", vec![proposal("a1", true), proposal("a2", false), proposal("a3", true)]),
-                group("b", vec![proposal("b1", true), proposal("b2", true)]),
-            ],
+            files: [("a1", true), ("a2", false), ("a3", true), ("b1", true), ("b2", true)]
+                .map(|(name, actionable)| proposal(name, actionable))
+                .into(),
+            groups: vec![group("a", 0..3), group("b", 3..5)],
             ..BulkAutoTagState::default()
         }
-    }
-
-    fn key(dir_idx: usize, file_idx: usize) -> BulkFileKey {
-        BulkFileKey { dir_idx, file_idx }
     }
 
     #[test]
     fn failed_files_cannot_be_selected_or_checked() {
         let mut state = state();
-        state.select_file(key(0, 1), false, false);
+        state.select_file(1, false, false);
         assert_eq!(state.selection.len(), 0);
-        state.set_all_accepted(true);
-        assert_eq!(state.accepted_count(), 4);
-        assert!(!state.groups[0].files[1].accepted);
+        state.set_accepted(0..5, true);
+        assert_eq!(actionable_and_accepted(&state.files), (4, 4));
+        assert!(!state.files[1].accepted);
     }
 
     #[test]
     fn shift_click_ranges_skip_failed_files() {
         let mut state = state();
-        state.select_file(key(0, 0), false, false);
-        state.select_file(key(1, 0), true, false);
+        state.select_file(0, false, false);
+        state.select_file(3, true, false);
         assert_eq!(state.selection.len(), 3);
-        assert!(!state.selection.contains(&key(0, 1)));
+        assert!(!state.selection.contains(1));
     }
 
     #[test]
@@ -810,7 +729,7 @@ mod tests {
         state.select_directory(1, false, true);
         assert_eq!(state.selection.len(), 0);
         // Shift extends from the anchor through the folder's last file.
-        state.select_file(key(0, 2), false, false);
+        state.select_file(2, false, false);
         state.select_directory(1, true, false);
         assert_eq!(state.selection.len(), 3);
     }

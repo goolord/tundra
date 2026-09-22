@@ -55,7 +55,7 @@ pub struct FileButton {
 pub struct FileSelector {
     pub current_dir: PathBuf,
     pub file_list: Vec<FileButton>,
-    selection: Selection<usize>,
+    selection: Selection,
     pub hovered_file: Option<usize>,
     pub filter_focus: FilterFocus,
     pub search_value: String,
@@ -227,9 +227,9 @@ impl FileSelector {
     }
 
     pub fn select_row(&mut self, index: usize, shift: bool, control: bool) {
-        if index < self.file_list.len() {
-            let order: Vec<usize> = (0..self.file_list.len()).collect();
-            self.selection.click(index, shift, control, &order);
+        let len = self.file_list.len();
+        if index < len {
+            self.selection.click(index, shift, control, |row| row < len);
         }
     }
 
@@ -237,29 +237,20 @@ impl FileSelector {
     /// from the old listing would otherwise point at different files, and
     /// actions on "the selected file" (auto-tag, tag editor) would hit them.
     pub fn set_file_list(&mut self, file_list: Vec<FileButton>, list_error: Option<String>) {
-        let key_at = |&index: &usize| self.file_list.get(index).map(|entry| cache_key(&entry.file_path));
+        let old = std::mem::replace(&mut self.file_list, file_list);
+        let key_at = |index: usize| old.get(index).map(|entry| cache_key(&entry.file_path));
         let selected: HashSet<PathBuf> = self.selection.iter().filter_map(key_at).collect();
         let anchor = self.selection.anchor().and_then(key_at);
-
-        self.file_list = file_list;
         self.list_error = list_error;
         self.hovered_file = None;
         self.selection.clear();
         if selected.is_empty() {
             return;
         }
-        let mut new_anchor = None;
-        let mut indices = Vec::new();
-        for (index, entry) in self.file_list.iter().enumerate() {
-            let key = cache_key(&entry.file_path);
-            if selected.contains(&key) {
-                indices.push(index);
-                if anchor.as_ref() == Some(&key) {
-                    new_anchor = Some(index);
-                }
-            }
-        }
-        self.selection.set(indices, new_anchor);
+        let keys = self.file_list.iter().map(|entry| cache_key(&entry.file_path));
+        let kept: Vec<(usize, PathBuf)> = keys.enumerate().filter(|(_, key)| selected.contains(key)).collect();
+        let new_anchor = kept.iter().find(|(_, key)| anchor.as_ref() == Some(key)).map(|&(index, _)| index);
+        self.selection.set(kept.into_iter().map(|(index, _)| index), new_anchor);
     }
 
     pub fn clear_selection(&mut self) {
@@ -277,7 +268,7 @@ impl FileSelector {
         self.selection
             .anchor()
             .or_else(|| self.selection.iter().min())
-            .and_then(|&index| self.file_list.get(index))
+            .and_then(|index| self.file_list.get(index))
             .filter(|entry| !entry.is_dir && is_audio(&entry.file_path))
             .map(|entry| entry.file_path.clone())
     }
@@ -342,7 +333,7 @@ impl FileSelector {
             file_row(
                 entry,
                 index,
-                self.selection.contains(&index),
+                self.selection.contains(index),
                 self.hovered_file == Some(index),
                 search_enabled,
                 favorites.contains_listed(&entry.file_path),
@@ -433,26 +424,17 @@ impl FileSelector {
     }
 }
 
-/// Hides the scrollable's own scrollbar and middle-click autoscroll marker.
-fn hidden_scrollbar_style(_theme: &Theme, _status: scrollable::Status) -> scrollable::Style {
-    let clear = Color::TRANSPARENT.into();
-    let rail = scrollable::Rail {
-        background: None,
+/// Hides the middle-click autoscroll marker. The hidden scrollbar has zero
+/// width, so its rail is never drawn.
+fn hidden_scrollbar_style(theme: &Theme, status: scrollable::Status) -> scrollable::Style {
+    let clear = Color::TRANSPARENT;
+    let auto_scroll = scrollable::AutoScroll {
+        background: clear.into(),
         border: Border::default(),
-        scroller: scrollable::Scroller { background: clear, border: Border::default() },
+        shadow: iced::Shadow::default(),
+        icon: clear,
     };
-    scrollable::Style {
-        container: container::Style::default(),
-        vertical_rail: rail,
-        horizontal_rail: rail,
-        gap: None,
-        auto_scroll: scrollable::AutoScroll {
-            background: clear,
-            border: Border::default(),
-            shadow: iced::Shadow::default(),
-            icon: Color::TRANSPARENT,
-        },
-    }
+    scrollable::Style { auto_scroll, ..scrollable::default(theme, status) }
 }
 
 fn sidebar_panel(theme: &Theme) -> Color {
@@ -607,14 +589,8 @@ fn file_row(
 }
 
 fn favorite_star_button(path: PathBuf, favorite: bool) -> Element<'static, Message> {
-    let star =
-        icon(
-            "star-solid.svg",
-            11.0,
-            move |_| {
-                if favorite { ACCENT.scale_alpha(0.95) } else { MUTED_ICON.scale_alpha(0.42) }
-            },
-        );
+    let tint = if favorite { ACCENT.scale_alpha(0.95) } else { MUTED_ICON.scale_alpha(0.42) };
+    let star = icon("star-solid.svg", 11.0, move |_| tint);
     button(container(star).center(Length::Fill))
         .padding(0)
         .width(Length::Fixed(15.0))
