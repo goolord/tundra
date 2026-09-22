@@ -21,15 +21,9 @@ struct Row {
     /// The instrument came from the tag editor, not the classifier, so
     /// auto-tag must never replace it.
     user_owned: bool,
-    /// Whole seconds and bytes, as stored; zero in rows written before stamping.
-    mtime_secs: u64,
-    size: u64,
-}
-
-impl Row {
-    fn stamp(&self) -> (u64, u64) {
-        (self.mtime_secs, self.size)
-    }
+    /// Whole mtime seconds and size in bytes, as stored; zero in rows written
+    /// before stamping.
+    stamp: (u64, u64),
 }
 
 /// The part of a file's stamp the database stores.
@@ -37,14 +31,10 @@ fn file_stamp(path: &Path) -> Option<(u64, u64)> {
     FileStamp::of(path).map(|stamp| (stamp.secs, stamp.len))
 }
 
-fn stamp_matches(path: &Path, row: &Row) -> bool {
-    file_stamp(path) == Some(row.stamp())
-}
-
 fn db_path() -> Option<PathBuf> {
     // Tests only ever see the database `with_test_db` points at.
     #[cfg(test)]
-    return test_db_path();
+    return TEST_DB_PATH.with(|slot| slot.borrow().clone());
     #[cfg(not(test))]
     {
         let dest = crate::app_data::data_dir()?.join("tags.db");
@@ -136,18 +126,18 @@ fn prepare_schema(connection: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+/// Every column, in the order `load_rows` reads and `write_row` binds them.
+const ROW_COLUMNS: &str =
+    "path, instrument, tag_version, mtime_secs, size, title, artist, bpm, key, genre, comment, user_owned";
+
 fn load_rows(connection: &Connection) -> Result<HashMap<PathBuf, Row>, String> {
     let fail = |err: rusqlite::Error| format!("Failed to read tag store: {err}");
     let mut statement = connection
-        .prepare(
-            "SELECT path, instrument, tag_version, mtime_secs, size, title, artist, bpm, key,
-                    genre, comment, user_owned
-             FROM instrument_tags",
-        )
+        .prepare(&format!("SELECT {ROW_COLUMNS} FROM instrument_tags"))
         .map_err(fail)?;
     let rows = statement
         .query_map([], |row| {
-            let path: String = row.get(0)?;
+            let unsigned = |index| row.get::<_, i64>(index).map(|value| value.max(0) as u64);
             let fields = ManualTagEdits {
                 instrument: row.get(1)?,
                 title: row.get(5)?,
@@ -157,45 +147,35 @@ fn load_rows(connection: &Connection) -> Result<HashMap<PathBuf, Row>, String> {
                 genre: row.get(9)?,
                 comment: row.get(10)?,
             };
-            Ok((
-                cache_key(Path::new(&path)),
-                Row {
-                    fields,
-                    tag_version: row.get(2)?,
-                    mtime_secs: row.get::<_, i64>(3)?.max(0) as u64,
-                    size: row.get::<_, i64>(4)?.max(0) as u64,
-                    user_owned: row.get(11)?,
-                },
-            ))
+            let path: String = row.get(0)?;
+            let stored = Row {
+                fields,
+                tag_version: row.get(2)?,
+                stamp: (unsigned(3)?, unsigned(4)?),
+                user_owned: row.get(11)?,
+            };
+            Ok((cache_key(Path::new(&path)), stored))
         })
         .map_err(fail)?;
     rows.collect::<Result<_, _>>().map_err(fail)
 }
 
-/// The open database. Opened at start-up only when it already exists, so
-/// libraries that never need the fallback never get a database file.
-#[derive(Default)]
-struct Database {
-    connection: Option<Connection>,
-    /// Set when loading failed; writes are refused so a half-loaded view
-    /// cannot overwrite rows the database still holds.
-    error: Option<String>,
-}
+/// The database, opened at start-up only when it already exists, so libraries
+/// that never need the fallback never get a database file. `Err` when loading
+/// failed: writes are refused so a half-loaded view cannot overwrite rows the
+/// database still holds.
+type Database = Result<Option<Connection>, String>;
 
-impl Database {
-    fn connection(&mut self) -> Result<&Connection, String> {
-        if let Some(err) = &self.error {
-            return Err(err.clone());
-        }
-        if self.connection.is_none() {
-            let path = db_path().ok_or("No data directory available")?;
-            let connection =
-                Connection::open(&path).map_err(|err| format!("Failed to open {}: {err}", display_path(&path)))?;
-            prepare_schema(&connection)?;
-            self.connection = Some(connection);
-        }
-        Ok(self.connection.as_ref().expect("opened above"))
+fn connection(database: &mut Database) -> Result<&Connection, String> {
+    let slot = database.as_mut().map_err(|err| err.clone())?;
+    if slot.is_none() {
+        let path = db_path().ok_or("No data directory available")?;
+        let connection =
+            Connection::open(&path).map_err(|err| format!("Failed to open {}: {err}", display_path(&path)))?;
+        prepare_schema(&connection)?;
+        *slot = Some(connection);
     }
+    Ok(slot.as_ref().expect("opened above"))
 }
 
 /// What `modify` does with a row.
@@ -206,35 +186,19 @@ enum Change {
 
 fn write_row(connection: &Connection, key: &Path, change: &Change) -> rusqlite::Result<usize> {
     let stored = key.to_string_lossy();
-    let row = match change {
-        Change::Delete => return connection.execute("DELETE FROM instrument_tags WHERE path = ?1", [&stored]),
-        Change::Put(row) => row,
+    let Change::Put(row) = change else {
+        return connection.execute("DELETE FROM instrument_tags WHERE path = ?1", [&stored]);
     };
     let fields = &row.fields;
+    let values = "?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12";
     connection.execute(
-        "INSERT INTO instrument_tags (
-             path, instrument, tag_version, mtime_secs, size,
-             title, artist, bpm, key, genre, comment, user_owned
-         )
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
-         ON CONFLICT(path) DO UPDATE SET
-             instrument = excluded.instrument,
-             tag_version = excluded.tag_version,
-             mtime_secs = excluded.mtime_secs,
-             size = excluded.size,
-             title = excluded.title,
-             artist = excluded.artist,
-             bpm = excluded.bpm,
-             key = excluded.key,
-             genre = excluded.genre,
-             comment = excluded.comment,
-             user_owned = excluded.user_owned",
+        &format!("INSERT OR REPLACE INTO instrument_tags ({ROW_COLUMNS}) VALUES ({values})"),
         rusqlite::params![
             stored,
             fields.instrument,
             row.tag_version,
-            row.mtime_secs as i64,
-            row.size as i64,
+            row.stamp.0 as i64,
+            row.stamp.1 as i64,
             fields.title,
             fields.artist,
             fields.bpm,
@@ -252,15 +216,15 @@ struct TagStore {
 }
 
 fn open_store() -> TagStore {
-    let mut database = Database::default();
+    let mut database = Ok(None);
     let rows = match db_path() {
-        Some(path) if path.exists() => database.connection().and_then(load_rows),
+        Some(path) if path.exists() => connection(&mut database).and_then(load_rows),
         Some(_) => Ok(HashMap::new()),
         None => Err("No data directory available".to_string()),
     };
     let rows = rows.unwrap_or_else(|err| {
         eprintln!("tundra: failed to load tag store: {err}");
-        database.error = Some(err);
+        database = Err(err);
         HashMap::new()
     });
     TagStore {
@@ -279,7 +243,7 @@ fn stored_row(store: &TagStore, path: &Path) -> Option<Row> {
 
 /// The row for `path` if it still describes the file on disk.
 fn current_row(path: &Path) -> Option<Row> {
-    stored_row(&read(&STORE), path).filter(|row| stamp_matches(path, row))
+    stored_row(&read(&STORE), path).filter(|row| file_stamp(path) == Some(row.stamp))
 }
 
 /// Read-modify-write the row for `path`, holding the database lock throughout
@@ -294,7 +258,7 @@ fn modify(path: &Path, change: impl FnOnce(Option<Row>) -> Option<Change>) -> Re
         return Ok(());
     };
     let key = cache_key(path);
-    write_row(database.connection()?, &key, &change)
+    write_row(connection(&mut database)?, &key, &change)
         .map_err(|err| format!("Failed to save tag for {}: {err}", display_path(path)))?;
     let mut rows = write(&store.rows);
     match change {
@@ -306,10 +270,10 @@ fn modify(path: &Path, change: impl FnOnce(Option<Row>) -> Option<Change>) -> Re
 
 /// Like `modify`, starting from the row that matches the file's current stamp.
 fn update(path: &Path, change: impl FnOnce(&mut Row)) -> Result<(), String> {
-    let (mtime_secs, size) = file_stamp(path).unwrap_or_default();
+    let stamp = file_stamp(path).unwrap_or_default();
     modify(path, |row| {
-        let mut row = row.filter(|row| row.stamp() == (mtime_secs, size)).unwrap_or_default();
-        (row.mtime_secs, row.size) = (mtime_secs, size);
+        let mut row = row.filter(|row| row.stamp == stamp).unwrap_or_default();
+        row.stamp = stamp;
         change(&mut row);
         Some(Change::Put(row))
     })
@@ -317,17 +281,16 @@ fn update(path: &Path, change: impl FnOnce(&mut Row)) -> Result<(), String> {
 
 /// Instrument recorded for `path`, if the container could not hold one.
 pub fn instrument(path: &Path) -> Option<String> {
-    current_row(path)
-        .map(|row| row.fields.instrument)
-        .filter(|instrument| !instrument.is_empty())
+    row_instrument(current_row(path)?)
 }
 
 /// Instrument the classifier stored, which a newer classifier may replace.
 pub fn tundra_instrument(path: &Path) -> Option<String> {
-    current_row(path)
-        .filter(|row| !row.user_owned)
-        .map(|row| row.fields.instrument)
-        .filter(|instrument| !instrument.is_empty())
+    row_instrument(current_row(path).filter(|row| !row.user_owned)?)
+}
+
+fn row_instrument(row: Row) -> Option<String> {
+    Some(row.fields.instrument).filter(|instrument| !instrument.is_empty())
 }
 
 pub fn tag_version(path: &Path) -> Option<u32> {
@@ -335,9 +298,7 @@ pub fn tag_version(path: &Path) -> Option<u32> {
 }
 
 pub fn manual_fields(path: &Path) -> Option<ManualTagEdits> {
-    current_row(path)
-        .map(|row| row.fields)
-        .filter(|fields| !fields.is_empty())
+    Some(current_row(path)?.fields).filter(|fields| !fields.is_empty())
 }
 
 pub fn set_instrument(path: &Path, instrument: &str, tag_version: u32) -> Result<(), String> {
@@ -391,8 +352,8 @@ pub(crate) fn restamp(path: &Path, previous: Option<FileStamp>) {
         return;
     }
     let result = modify(path, |row| {
-        let mut row = row.filter(|row| row.stamp() == previous)?;
-        (row.mtime_secs, row.size) = current;
+        let mut row = row.filter(|row| row.stamp == previous)?;
+        row.stamp = current;
         Some(Change::Put(row))
     });
     if let Err(err) = result {
@@ -403,11 +364,6 @@ pub(crate) fn restamp(path: &Path, previous: Option<FileStamp>) {
 #[cfg(test)]
 thread_local! {
     static TEST_DB_PATH: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
-}
-
-#[cfg(test)]
-fn test_db_path() -> Option<PathBuf> {
-    TEST_DB_PATH.with(|slot| slot.borrow().clone())
 }
 
 /// Run `f` against an isolated SQLite sidecar database (tests only).
@@ -448,36 +404,9 @@ mod tests {
         let rows = load_rows(&connection).expect("rows");
         let auto = &rows[&cache_key(Path::new("c:/auto.wav"))];
         let manual = &rows[&cache_key(Path::new("c:/manual.wav"))];
-        assert_eq!((auto.tag_version, auto.stamp()), (0, (0, 0)));
+        assert_eq!((auto.tag_version, auto.stamp), (0, (0, 0)));
         assert!(!auto.user_owned);
         assert!(manual.user_owned);
-    }
-
-    #[test]
-    fn stamp_mismatch_or_missing_file_hides_sidecar() {
-        let scratch = ScratchDir::new("tag-store-stamp");
-        let audio = scratch.path().join("kick.wav");
-        std::fs::write(&audio, b"audio-v1").expect("write");
-        let (mtime_secs, size) = file_stamp(&audio).expect("stamp");
-        let row = Row {
-            mtime_secs,
-            size,
-            ..Row::default()
-        };
-        assert!(stamp_matches(&audio, &row));
-
-        std::fs::write(&audio, b"audio-v1-replaced").expect("replace");
-        assert!(
-            !stamp_matches(&audio, &row),
-            "recycled path with new contents must hide the old sidecar"
-        );
-        assert!(
-            !stamp_matches(&audio, &Row::default()),
-            "pre-stamp rows must not match a real file"
-        );
-
-        let _ = std::fs::remove_file(&audio);
-        assert!(!stamp_matches(&audio, &row));
     }
 
     #[test]
@@ -531,6 +460,8 @@ mod tests {
                 instrument(&audio).is_none(),
                 "stamp mismatch must hide stale sidecar row"
             );
+            std::fs::remove_file(&audio).expect("remove file");
+            assert!(instrument(&audio).is_none(), "missing file hides the row");
         });
     }
 

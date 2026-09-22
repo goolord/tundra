@@ -17,16 +17,12 @@ struct SavedPaths {
 
 impl SavedPaths {
     fn load(file: Option<PathBuf>, label: &'static str) -> Self {
-        let Some(path) = file else {
-            return Self {
-                label,
-                ..Self::default()
-            };
-        };
-        let (paths, writable) = load_user_data(&path, label);
+        let (paths, writable) = file
+            .as_deref()
+            .map_or((Vec::new(), true), |path| load_user_data(path, label));
         Self {
             paths,
-            file: Some(path),
+            file,
             label,
             read_only: !writable,
         }
@@ -63,8 +59,12 @@ pub struct AllowedDirectories(SavedPaths);
 impl AllowedDirectories {
     pub fn load() -> Self {
         let file = config_file("allowed_directories.bin");
-        if let Some(path) = &file {
-            migrate_settings_from_cache(path);
+        // Older builds kept the allowed directories in the cache directory.
+        if let Some(dest) = &file
+            && !dest.exists()
+            && let Some(src) = cache_file("allowed_directories.bin")
+        {
+            crate::app_data::migrate_file(&src, dest);
         }
         Self::load_from(file)
     }
@@ -133,29 +133,15 @@ impl FavoritesStore {
     /// Whether a row from a directory listing is starred. Listing paths are
     /// already resolved, so this skips the filesystem and is cheap per frame.
     pub fn contains_listed(&self, path: &Path) -> bool {
-        let key = crate::path_util::cache_key(path);
-        self.paths().contains(&key)
+        self.paths().contains(&crate::path_util::cache_key(path))
     }
 
     /// Stars or unstars `path`; true when it is now a favorite.
     pub fn toggle(&mut self, path: &Path) -> bool {
         let key = crate::path_util::favorite_lookup_key(path);
-        if let Some(index) = self.paths().iter().position(|stored| *stored == key) {
-            self.0.paths.remove(index);
-            false
-        } else {
-            self.0.insert(key)
-        }
-    }
-}
-
-/// Older builds kept the allowed directories in the cache directory.
-fn migrate_settings_from_cache(config_path: &Path) {
-    if config_path.exists() {
-        return;
-    }
-    if let Some(cache_path) = cache_file("allowed_directories.bin") {
-        crate::app_data::migrate_file(&cache_path, config_path);
+        let before = self.0.paths.len();
+        self.0.paths.retain(|stored| *stored != key);
+        before == self.0.paths.len() && self.0.insert(key)
     }
 }
 
@@ -205,7 +191,8 @@ mod tests {
     fn unreadable_settings_are_moved_aside_not_overwritten() {
         let dir = ScratchDir::new("settings-corrupt");
         let path = dir.path().join("allowed_directories.bin");
-        std::fs::write(&path, b"\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFFnot bincode").expect("corrupt");
+        let corrupt = b"\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFFnot bincode";
+        std::fs::write(&path, corrupt).expect("corrupt");
 
         let loaded = AllowedDirectories::load_from(Some(path.clone()));
         assert!(loaded.is_empty());
@@ -221,10 +208,7 @@ mod tests {
             .filter(|entry| entry.file_name().to_string_lossy().contains(".unreadable-"))
             .collect();
         assert_eq!(kept.len(), 1);
-        assert_eq!(
-            std::fs::read(kept[0].path()).expect("backup"),
-            b"\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFFnot bincode"
-        );
+        assert_eq!(std::fs::read(kept[0].path()).expect("backup"), corrupt);
     }
 
     #[test]
