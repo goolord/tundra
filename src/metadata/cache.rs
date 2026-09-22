@@ -37,19 +37,9 @@ impl MetadataLookup {
     }
 
     fn lookup_cached(&self, path: &Path) -> Option<&CachedMetadata> {
-        for key in crate::path_util::cache_lookup_keys(path) {
-            if let Some(cached) = self.new_entries.get(&key).or_else(|| self.cache.get(&key)) {
-                return Some(cached);
-            }
-        }
-        None
-    }
-
-    fn store_fields(&mut self, path: &Path, mtime_secs: u64, fields: TagFields) -> TagFields {
-        let fields_clone = fields.clone();
-        self.new_entries
-            .insert(crate::path_util::cache_key(path), CachedMetadata { mtime_secs, fields });
-        fields_clone
+        crate::path_util::cache_lookup_keys(path)
+            .into_iter()
+            .find_map(|key| self.new_entries.get(&key).or_else(|| self.cache.get(&key)))
     }
 
     /// Tags from the index only; an unindexed file reports nothing rather than being parsed.
@@ -59,33 +49,27 @@ impl MetadataLookup {
         self.lookup_cached(path).map(|entry| &entry.fields)
     }
 
+    /// Tags from the index while its mtime still matches (or the mtime is unreadable),
+    /// otherwise read from disk and remembered as a new entry.
     pub fn tag_fields(&mut self, path: &Path) -> TagFields {
-        let cached = self.lookup_cached(path).cloned();
-
-        if let Some(mtime_secs) = file_mtime_secs(path) {
-            if let Some(cached) = &cached
-                && cached.mtime_secs == mtime_secs
-            {
-                return cached.fields.clone();
-            }
-            let Some(fields) = read_tag_fields(path) else {
-                return TagFields::default();
-            };
-            return self.store_fields(path, mtime_secs, fields);
-        }
-
-        if !path.exists() {
+        let mtime = file_mtime_secs(path);
+        if mtime.is_none() && !path.exists() {
             return TagFields::default();
         }
-
-        if let Some(cached) = cached {
-            return cached.fields;
+        if let Some(cached) = self.lookup_cached(path)
+            && mtime.is_none_or(|mtime| mtime == cached.mtime_secs)
+        {
+            return cached.fields.clone();
         }
-
         let Some(fields) = read_tag_fields(path) else {
             return TagFields::default();
         };
-        self.store_fields(path, 0, fields)
+        let entry = CachedMetadata {
+            mtime_secs: mtime.unwrap_or(0),
+            fields: fields.clone(),
+        };
+        self.new_entries.insert(crate::path_util::cache_key(path), entry);
+        fields
     }
 }
 

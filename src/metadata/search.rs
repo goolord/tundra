@@ -68,9 +68,10 @@ fn matcher(case_sensitive: bool) -> SkimMatcherV2 {
 }
 
 /// Case folding applied once to both query terms and searched text.
-fn fold(text: &str, case_sensitive: bool) -> Cow<'_, str> {
+fn fold<'a>(text: impl Into<Cow<'a, str>>, case_sensitive: bool) -> Cow<'a, str> {
+    let text = text.into();
     if case_sensitive {
-        Cow::Borrowed(text)
+        text
     } else {
         Cow::Owned(text.to_lowercase())
     }
@@ -98,25 +99,34 @@ fn term_score(matcher: &SkimMatcherV2, text: &str, term: &str) -> i64 {
 /// A filename query, split and folded once per search instead of per path.
 struct FileQuery<'a> {
     matcher: &'a SkimMatcherV2,
-    query: &'a str,
+    /// The whole query, folded, for the exact and prefix stem bonuses.
+    query: String,
     terms: Vec<String>,
     case_sensitive: bool,
     filename_only: bool,
 }
 
-/// One path's searchable text, folded once.
+/// One path's searchable text, folded once. `full` is empty for filename-only queries.
 struct PathText<'a> {
     name: Cow<'a, str>,
     stem: Option<Cow<'a, str>>,
     full: Cow<'a, str>,
 }
 
+impl PathText<'_> {
+    fn name_fields(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(&*self.name)
+            .filter(|name| !name.is_empty())
+            .chain(self.stem.as_deref())
+    }
+}
+
 impl<'a> FileQuery<'a> {
-    fn new(matcher: &'a SkimMatcherV2, query: &'a str, case_sensitive: bool, filename_only: bool) -> Self {
+    fn new(matcher: &'a SkimMatcherV2, query: &str, case_sensitive: bool, filename_only: bool) -> Self {
         let query = query.trim();
         Self {
             matcher,
-            query,
+            query: fold(query, case_sensitive).into_owned(),
             terms: split_terms(query, case_sensitive),
             case_sensitive,
             filename_only,
@@ -124,28 +134,18 @@ impl<'a> FileQuery<'a> {
     }
 
     fn text<'p>(&self, path: &'p Path) -> PathText<'p> {
-        let fold_owned = |text: Cow<'p, str>| match text {
-            Cow::Borrowed(text) => fold(text, self.case_sensitive),
-            Cow::Owned(text) => Cow::Owned(fold(&text, self.case_sensitive).into_owned()),
-        };
         let name = path.file_name().map(|name| name.to_string_lossy());
         let stem = path.file_stem().map(|stem| stem.to_string_lossy());
         let stem = stem.filter(|stem| name.as_deref() != Some(&**stem));
         PathText {
-            name: fold_owned(name.unwrap_or_default()),
-            stem: stem.map(fold_owned),
+            name: fold(name.unwrap_or_default(), self.case_sensitive),
+            stem: stem.map(|stem| fold(stem, self.case_sensitive)),
             full: if self.filename_only {
                 Cow::Borrowed("")
             } else {
-                fold_owned(path.to_string_lossy())
+                fold(path.to_string_lossy(), self.case_sensitive)
             },
         }
-    }
-
-    fn name_fields<'t>(text: &'t PathText) -> impl Iterator<Item = &'t str> {
-        std::iter::once(&*text.name)
-            .filter(|name| !name.is_empty())
-            .chain(text.stem.as_deref())
     }
 
     /// Every term appears as a substring somewhere. Cheaper than scoring, used
@@ -153,8 +153,7 @@ impl<'a> FileQuery<'a> {
     fn has_substring_match(&self, text: &PathText) -> bool {
         !self.terms.is_empty()
             && self.terms.iter().all(|term| {
-                Self::name_fields(text).any(|field| field.contains(term.as_str()))
-                    || (!self.filename_only && text.full.contains(term.as_str()))
+                text.name_fields().any(|field| field.contains(term.as_str())) || text.full.contains(term.as_str())
             })
     }
 
@@ -166,11 +165,12 @@ impl<'a> FileQuery<'a> {
         let mut name_score = 0i64;
         let mut path_score = 0i64;
         for term in &self.terms {
-            let name_term = Self::name_fields(text)
+            let name_term = text
+                .name_fields()
                 .map(|field| term_score(self.matcher, field, term))
                 .max()
                 .unwrap_or(0);
-            let path_term = if !self.filename_only && text.full.contains(term.as_str()) {
+            let path_term = if text.full.contains(term.as_str()) {
                 CONTAINS_NAME_MATCH_SCORE + term.len() as i64
             } else {
                 0
@@ -184,7 +184,7 @@ impl<'a> FileQuery<'a> {
         (name_score, path_score)
     }
 
-    fn sort_score(&self, path: &Path, name_score: i64, path_score: i64) -> i64 {
+    fn sort_score(&self, path: &Path, text: &PathText, name_score: i64, path_score: i64) -> i64 {
         if !is_audio(path) {
             return if name_score > 0 {
                 name_score + DIRECT_FOLDER_BONUS
@@ -193,76 +193,46 @@ impl<'a> FileQuery<'a> {
             };
         }
         let base = if name_score > 0 { name_score } else { path_score };
-        let mut score = base + FILE_SEARCH_BONUS;
-        if let Some(stem) = path.file_stem().map(|stem| stem.to_string_lossy()) {
-            if text_eq(&stem, self.query, self.case_sensitive) {
-                score += EXACT_STEM_BONUS;
-            } else if text_starts_with(&stem, self.query, self.case_sensitive) {
-                score += PREFIX_STEM_BONUS;
-            }
-        }
-        score
+        // The stem is folded like the query, so a name that matched
+        // case-insensitively also earns its exact or prefix bonus.
+        let stem = text.stem.as_deref().unwrap_or(&text.name);
+        let bonus = if stem == self.query {
+            EXACT_STEM_BONUS
+        } else if stem.starts_with(self.query.as_str()) {
+            PREFIX_STEM_BONUS
+        } else {
+            0
+        };
+        base + FILE_SEARCH_BONUS + bonus
     }
 }
 
-// Both fold case the same way matching does, so a name that matched
-// case-insensitively also earns its exact or prefix bonus.
-fn text_eq(a: &str, b: &str, case_sensitive: bool) -> bool {
-    fold(a, case_sensitive) == fold(b, case_sensitive)
-}
+/// A tag filter term, then (for instrument filters) its aliases, each with its
+/// instrument group mask. Expanded once per search.
+struct FilterTerm(Vec<(String, u32)>);
 
-fn text_starts_with(haystack: &str, needle: &str, case_sensitive: bool) -> bool {
-    fold(haystack, case_sensitive).starts_with(&*fold(needle, case_sensitive))
-}
-
-/// A query term for instrument filters, with its alias expansion computed once.
-struct InstrumentTerm {
-    term: String,
-    groups: u32,
-    aliases: Vec<(String, u32)>,
-}
-
-impl InstrumentTerm {
-    fn new(term: String) -> Self {
-        let aliases = instrument_search_terms(&term)
-            .into_iter()
-            .map(|alias| {
-                let groups = instrument_group_mask(&alias);
-                (alias, groups)
-            })
-            .collect();
-        Self {
-            groups: instrument_group_mask(&term),
-            term,
-            aliases,
+impl FilterTerm {
+    fn new(term: String, field: TagField) -> Self {
+        if field != TagField::Instrument {
+            return Self(vec![(term, 0)]);
         }
+        let aliases = instrument_search_terms(&term);
+        let with_groups = |term: String| {
+            let groups = instrument_group_mask(&term);
+            (term, groups)
+        };
+        Self(std::iter::once(term).chain(aliases).map(with_groups).collect())
     }
 
+    /// A direct match, else a related instrument; the term itself first, then its best alias.
     fn score(&self, matcher: &SkimMatcherV2, value: &str, value_groups: u32) -> Option<i64> {
-        let direct = term_score(matcher, value, &self.term);
-        if direct > 0 {
-            return Some(direct);
-        }
-        if self.groups & value_groups != 0 {
-            return Some(RELATED_INSTRUMENT_SCORE + self.term.len() as i64);
-        }
-        self.aliases
-            .iter()
-            .filter_map(|(alias, groups)| {
-                let score = term_score(matcher, value, alias);
-                if score > 0 {
-                    Some(score)
-                } else {
-                    (groups & value_groups != 0).then(|| RELATED_INSTRUMENT_SCORE + alias.len() as i64)
-                }
-            })
-            .max()
+        let score = |(term, groups): &(String, u32)| match term_score(matcher, value, term) {
+            0 => (groups & value_groups != 0).then(|| RELATED_INSTRUMENT_SCORE + term.len() as i64),
+            direct => Some(direct),
+        };
+        let (term, aliases) = self.0.split_first()?;
+        score(term).or_else(|| aliases.iter().filter_map(score).max())
     }
-}
-
-enum FilterTerms {
-    Plain(Vec<String>),
-    Instrument(Vec<InstrumentTerm>),
 }
 
 /// Tag filters compiled for one search. Scores are memoized per distinct tag
@@ -270,8 +240,10 @@ enum FilterTerms {
 /// across thousands of files.
 struct TagQuery<'a> {
     matcher: &'a SkimMatcherV2,
-    filters: Vec<(TagField, FilterTerms, HashMap<String, Option<i64>>)>,
+    filters: Vec<(TagField, Vec<FilterTerm>, ScoreMemo)>,
 }
+
+type ScoreMemo = HashMap<String, Option<i64>>;
 
 impl<'a> TagQuery<'a> {
     fn new(matcher: &'a SkimMatcherV2, filters: &[TagFilter]) -> Self {
@@ -279,11 +251,10 @@ impl<'a> TagQuery<'a> {
             .iter()
             .map(|filter| {
                 let terms = split_terms(&filter.value, false);
-                let terms = if filter.field == TagField::Instrument {
-                    FilterTerms::Instrument(terms.into_iter().map(InstrumentTerm::new).collect())
-                } else {
-                    FilterTerms::Plain(terms)
-                };
+                let terms = terms
+                    .into_iter()
+                    .map(|term| FilterTerm::new(term, filter.field))
+                    .collect();
                 (filter.field, terms, HashMap::new())
             })
             .collect();
@@ -291,22 +262,19 @@ impl<'a> TagQuery<'a> {
     }
 
     /// Lowest per-term score, or `None` unless every term matches `value`.
-    fn value_score(matcher: &SkimMatcherV2, terms: &FilterTerms, value: &str) -> Option<i64> {
-        fn all_min(mut scores: impl Iterator<Item = Option<i64>>) -> Option<i64> {
-            scores.try_fold(i64::MAX, |min, score| score.map(|score| min.min(score)))
+    fn value_score(matcher: &SkimMatcherV2, field: TagField, terms: &[FilterTerm], value: &str) -> Option<i64> {
+        if terms.is_empty() {
+            return None;
         }
         let value = value.to_lowercase();
-        match terms {
-            FilterTerms::Plain(terms) if !terms.is_empty() => all_min(terms.iter().map(|term| {
-                let score = term_score(matcher, &value, term);
-                (score > 0).then_some(score)
-            })),
-            FilterTerms::Instrument(terms) if !terms.is_empty() => {
-                let groups = instrument_group_mask(&value);
-                all_min(terms.iter().map(|term| term.score(matcher, &value, groups)))
-            }
-            _ => None,
-        }
+        let groups = if field == TagField::Instrument {
+            instrument_group_mask(&value)
+        } else {
+            0
+        };
+        terms.iter().try_fold(i64::MAX, |min, term| {
+            term.score(matcher, &value, groups).map(|score| min.min(score))
+        })
     }
 
     /// Lowest score across filters, or `None` unless every filter matches.
@@ -320,7 +288,7 @@ impl<'a> TagQuery<'a> {
             let score = match memo.get(value) {
                 Some(score) => *score,
                 None => {
-                    let score = Self::value_score(self.matcher, terms, value);
+                    let score = Self::value_score(self.matcher, *field, terms, value);
                     memo.insert(value.to_string(), score);
                     score
                 }
@@ -348,29 +316,13 @@ impl<'a> TagQuery<'a> {
     }
 }
 
-#[derive(Eq, PartialEq)]
-struct SearchRank {
-    score: i64,
-    path: PathBuf,
-}
-
-impl Ord for SearchRank {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        other.score.cmp(&self.score).then_with(|| self.path.cmp(&other.path))
-    }
-}
-
-impl PartialOrd for SearchRank {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-fn into_result(mut matches: Vec<SearchRank>, lookup: MetadataLookup, limit: usize) -> SearchResult {
-    matches.sort_unstable();
+/// Best score first, then by path; at most `limit` results.
+fn into_result(mut matches: Vec<(i64, PathBuf)>, lookup: MetadataLookup, limit: usize) -> SearchResult {
+    matches
+        .sort_unstable_by(|(a_score, a_path), (b_score, b_path)| b_score.cmp(a_score).then_with(|| a_path.cmp(b_path)));
     matches.truncate(limit);
     SearchResult {
-        paths: matches.into_iter().map(|entry| entry.path).collect(),
+        paths: matches.into_iter().map(|(_, path)| path).collect(),
         new_metadata: lookup.into_new_entries(),
     }
 }
@@ -383,10 +335,7 @@ fn tag_matches(paths: &[PathBuf], tag_filters: &[TagFilter], mut lookup: Metadat
         .iter()
         .filter_map(|path| {
             let score = tags.score_path(path, &mut lookup, false);
-            (score > 0).then(|| SearchRank {
-                score,
-                path: path.clone(),
-            })
+            (score > 0).then(|| (score, path.clone()))
         })
         .collect();
     into_result(matches, lookup, usize::MAX)
@@ -420,7 +369,7 @@ fn file_matches(paths: &[PathBuf], query: &SearchQuery, mut lookup: MetadataLook
             continue;
         }
 
-        let file_score = file_query.sort_score(path, name_score, path_score);
+        let file_score = file_query.sort_score(path, &text, name_score, path_score);
         let score = if tag_active {
             let tag_score = tags.score_path(path, &mut lookup, true);
             if tag_score == 0 {
@@ -430,10 +379,7 @@ fn file_matches(paths: &[PathBuf], query: &SearchQuery, mut lookup: MetadataLook
         } else {
             file_score
         };
-        matches.push(SearchRank {
-            score,
-            path: path.clone(),
-        });
+        matches.push((score, path.clone()));
     }
 
     into_result(matches, lookup, FILE_SEARCH_MAX_RESULTS)
@@ -461,39 +407,39 @@ mod tests {
         TagQuery::new(&matcher, &[filter]).score(fields)
     }
 
-    fn file_search(paths: &[PathBuf], text: &str) -> Vec<PathBuf> {
+    fn file_search(paths: &[&str], text: &str) -> Vec<PathBuf> {
+        let paths: Vec<_> = paths.iter().map(PathBuf::from).collect();
         let query = SearchQuery {
             text,
             show_directories: true,
             ..SearchQuery::default()
         };
-        search(paths, &query, MetadataLookup::new(Arc::default())).paths
+        search(&paths, &query, MetadataLookup::new(Arc::default())).paths
     }
 
     #[test]
     fn file_search_requires_every_term_and_rejects_weak_fuzzy_matches() {
-        assert!(name_score("/Samples/Snare Drum 01.wav", "snare") > 0);
-        assert!(name_score("/Samples/Snare Drum 01.wav", "snare drum") > 0);
-        assert_eq!(name_score("/Samples/Snare Drum 01.wav", "snare kick"), 0);
-        assert_eq!(
-            name_score("/Samples/Synth Pad 01.wav", "snare"),
-            0,
-            "unrelated fuzzy matches should be rejected"
-        );
+        for (path, query, matches) in [
+            ("/Samples/Snare Drum 01.wav", "snare", true),
+            ("/Samples/Snare Drum 01.wav", "snare drum", true),
+            ("/Samples/Snare Drum 01.wav", "snare kick", false),
+            ("/Samples/Synth Pad 01.wav", "snare", false),
+            ("/samples/ÉCLAT Snare.wav", "éclat", true),
+        ] {
+            assert_eq!(name_score(path, query) > 0, matches, "{path} / {query}");
+        }
     }
 
     #[test]
     fn file_search_confident_cap_skips_fuzzy_only_matches() {
-        let mut paths: Vec<PathBuf> = (0..FILE_SEARCH_CONFIDENT_RESULT_CAP)
-            .map(|index| PathBuf::from(format!("/Samples/snare-{index:04}.wav")))
+        let names: Vec<_> = (0..FILE_SEARCH_CONFIDENT_RESULT_CAP)
+            .map(|index| format!("/Samples/snare-{index:04}.wav"))
+            .chain(["/Samples/01 Snare.wav".into(), "/Samples/Synth Pad 01.wav".into()])
             .collect();
-        paths.push(PathBuf::from("/Samples/01 Snare.wav"));
-        paths.push(PathBuf::from("/Samples/Synth Pad 01.wav"));
-
-        let found = file_search(&paths, "snare");
+        let found = file_search(&names.iter().map(String::as_str).collect::<Vec<_>>(), "snare");
         assert!(
             found.iter().any(|path| path.ends_with("01 Snare.wav")),
-            "substring matches should remain"
+            "substring matches remain"
         );
         assert!(
             !found.iter().any(|path| path.ends_with("Synth Pad 01.wav")),
@@ -502,13 +448,21 @@ mod tests {
     }
 
     #[test]
-    fn instrument_filter_uses_explicit_instrument() {
-        let fields = TagFields {
-            explicit_instrument: "Snare Drum".into(),
-            instrument: "Drums".into(),
-            ..TagFields::default()
-        };
-        assert!(tag_score(&fields, TagField::Instrument, "snare").is_some());
+    fn exact_and_prefix_stem_bonuses_fold_case_without_splitting_characters() {
+        assert_eq!(
+            file_search(&["/samples/ベースkick.wav"], "kick"),
+            [PathBuf::from("/samples/ベースkick.wav")]
+        );
+        let ranked = file_search(
+            &["/s/éa.wav", "/s/éclat extra.wav", "/s/ÉCLAT.wav", "/s/Kick 01.wav"],
+            "éclat",
+        );
+        assert_eq!(
+            ranked,
+            [PathBuf::from("/s/ÉCLAT.wav"), PathBuf::from("/s/éclat extra.wav")]
+        );
+        let ranked = file_search(&["/s/a kick.wav", "/s/Kick 01.wav"], "kick");
+        assert_eq!(ranked[0], PathBuf::from("/s/Kick 01.wav"), "prefix bonus");
     }
 
     #[test]
@@ -516,6 +470,8 @@ mod tests {
         let fields = TagFields {
             bpm: "120.00".into(),
             comment: "dark snare loop".into(),
+            explicit_instrument: "Snare Drum".into(),
+            instrument: "Drums".into(),
             ..TagFields::default()
         };
         assert!(
@@ -527,22 +483,10 @@ mod tests {
             tag_score(&fields, TagField::Comment, "snare kick").is_none(),
             "every term must match"
         );
-    }
-
-    #[test]
-    fn prefix_check_does_not_split_multibyte_characters() {
-        assert!(!text_starts_with("ベースkick", "kick", false));
-        assert!(!text_starts_with("éa", "e", false));
-        assert!(text_starts_with("Kick 01", "kick", false));
-        assert!(text_eq("ÉCLAT", "éclat", false));
-
-        let paths = vec![PathBuf::from("/samples/ベースkick.wav")];
-        assert_eq!(file_search(&paths, "kick"), paths);
-    }
-
-    #[test]
-    fn case_insensitive_search_folds_non_ascii_text() {
-        assert!(name_score("/samples/ÉCLAT Snare.wav", "éclat") > 0);
+        assert!(
+            tag_score(&fields, TagField::Instrument, "snare").is_some(),
+            "explicit instrument wins"
+        );
     }
 
     #[test]
