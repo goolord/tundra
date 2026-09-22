@@ -34,31 +34,25 @@ impl App {
                 .border(style::outline(palette.background.strong.color.scale_alpha(0.42), 0.0))
         });
 
-        let mut player = stack![self.player.view(self.current_file_tags())];
-        if self.drag_over {
-            player = player.push(
-                container(text("Drop audio file or folder").size(18))
-                    .center(Length::Fill)
-                    .style(|_theme| container::background(Color::from_rgba(0.08, 0.12, 0.18, 0.82))),
-            );
-        }
+        let drop_hint = self.drag_over.then(|| {
+            container(text("Drop audio file or folder").size(18))
+                .center(Length::Fill)
+                .style(|_theme| container::background(Color::from_rgba(0.08, 0.12, 0.18, 0.82)))
+        });
+        let player = stack![self.player.view(self.current_file_tags()), drop_hint];
 
         let resizing = self.sidebar_resize.is_some();
-        let mut workspace = stack![
-            row![
-                sidebar,
-                sidebar_resizer(resizing),
-                player.width(Length::Fill).height(Length::Fill)
-            ]
-            .height(Length::Fill)
-        ]
-        .width(Length::Fill)
-        .height(Length::Fill);
-        if resizing {
-            // Keeps the resize cursor, and blocks hover effects, while the pointer is off the handle.
-            workspace = workspace
-                .push(mouse_area(spacer(Length::Fill, Length::Fill)).interaction(mouse::Interaction::ResizingColumn));
-        }
+        // Keeps the resize cursor, and blocks hover effects, while the pointer is off the handle.
+        let resize_cover = resizing
+            .then(|| mouse_area(spacer(Length::Fill, Length::Fill)).interaction(mouse::Interaction::ResizingColumn));
+        let panes = row![
+            sidebar,
+            sidebar_resizer(resizing),
+            player.width(Length::Fill).height(Length::Fill)
+        ];
+        let workspace = stack![panes.height(Length::Fill), resize_cover]
+            .width(Length::Fill)
+            .height(Length::Fill);
 
         let modal = match self.modal {
             Modal::Settings => Some(settings_view(
@@ -119,18 +113,16 @@ fn sidebar_resizer(resizing: bool) -> Element<'static, Message> {
 /// Edges and corners that resize the window, since it has no OS frame.
 fn window_resize_frame(content: Element<'_, Message>) -> Element<'_, Message> {
     use mouse::Interaction::{ResizingDiagonallyDown, ResizingDiagonallyUp, ResizingHorizontally, ResizingVertically};
-    let edge = Length::Fixed(WINDOW_RESIZE_BORDER);
-    let handle = |width: Length,
-                  height: Length,
-                  direction: Direction,
-                  cursor: mouse::Interaction|
-     -> Element<'static, Message> {
-        mouse_area(spacer(width, height))
-            .on_press(WindowMsg::Resize(direction).into())
-            .interaction(cursor)
-            .into()
-    };
-    let fill = Length::Fill;
+    fn handle(
+        width: Length,
+        height: Length,
+        direction: Direction,
+        cursor: mouse::Interaction,
+    ) -> Element<'static, Message> {
+        let area = mouse_area(spacer(width, height)).interaction(cursor);
+        area.on_press(WindowMsg::Resize(direction).into()).into()
+    }
+    let (edge, fill) = (Length::Fixed(WINDOW_RESIZE_BORDER), Length::Fill);
 
     let edges = column![
         // No north edge handle: the title bar drags the window there instead.

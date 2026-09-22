@@ -423,13 +423,10 @@ impl App {
                 self.start_file_search()
             };
         }
-        if !input.contains(':') && tag_field_best_match(&input).is_some() {
-            return self.autocomplete_tag_field();
-        }
-        let parsed = if input.contains(':') {
-            parse_tag_filter(&input)
-        } else {
-            Err(TagParseError::UnknownField)
+        let parsed = match (input.contains(':'), tag_field_best_match(&input)) {
+            (true, _) => parse_tag_filter(&input),
+            (false, Some(_)) => return self.autocomplete_tag_field(),
+            (false, None) => Err(TagParseError::UnknownField),
         };
         match parsed {
             Ok(filter) => {

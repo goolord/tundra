@@ -902,20 +902,13 @@ mod tests {
         let mut state = state();
         state.select_directory(1, false, false);
         assert_eq!(state.selection.len(), 2);
+        // Ctrl+click on a fully selected folder clears it.
         state.select_directory(1, false, true);
-        assert_eq!(
-            state.selection.len(),
-            0,
-            "ctrl+click on a fully selected folder clears it"
-        );
-
+        assert_eq!(state.selection.len(), 0);
+        // Shift extends from the anchor through the folder's last file.
         state.select_file(key(0, 2), false, false);
         state.select_directory(1, true, false);
-        assert_eq!(
-            state.selection.len(),
-            3,
-            "shift extends from the anchor through the folder's last file"
-        );
+        assert_eq!(state.selection.len(), 3);
     }
 
     #[test]
@@ -923,17 +916,13 @@ mod tests {
         let mut state = state();
         let first = state.start_job();
         let second = state.start_job();
-        assert!(
-            first.cancel.load(Ordering::Relaxed),
-            "starting a job cancels the previous one"
-        );
+        assert!(first.cancel.load(Ordering::Relaxed), "a new job cancels the old");
         assert!(!state.finish_job(first.generation));
         assert!(state.finish_job(second.generation));
 
         let before_close = state.start_job();
         state.close();
         state.open();
-        let after_reopen = state.start_job();
-        assert_ne!(before_close.generation, after_reopen.generation);
+        assert_ne!(before_close.generation, state.start_job().generation);
     }
 }
