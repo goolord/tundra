@@ -54,7 +54,7 @@ The app follows iced's Elm-style loop: `update` changes state in response to a `
 ### Adding a UI feature
 
 1. Add a variant to the right enum in `message.rs` (or a new nested enum plus a line in the `nested!` macro).
-2. Handle it in the matching `app/*.rs` file. Long-running work goes through `run_blocking` so `update` stays fast.
+2. Handle it in the matching `app/*.rs` file. Long-running work goes through `background` so `update` stays fast.
 3. Draw it in the feature's view file, using `style::*` and `widgets::*` rather than inline `Style { .. }` literals.
 
 ## `metadata/`
@@ -87,7 +87,7 @@ The app follows iced's Elm-style loop: `update` changes state in response to a `
 - **UI:** iced `update`/`view`. `view` must not touch the filesystem; anything it shows is computed in `update` or read from in-memory caches.
 - **Audio worker (`playback/worker.rs`):** owns the output stream; one `rodio::Sink` per playback segment. Events carry a track id so stale ones are ignored.
 - **Peak builder:** one thread per loaded file, cancelled when another file loads.
-- **Searches, walks, indexing, tag writes, bulk jobs:** background threads via `run_blocking`, or iced's executor. Results come back as messages; searches and bulk jobs carry a generation number so a stale result is dropped. Cache saves are coalesced onto a background thread.
+- **Searches, walks, indexing, tag writes, bulk jobs:** background threads via `background`, or iced's executor. Results come back as messages; searches and bulk jobs carry a generation number so a stale result is dropped. Cache saves are coalesced onto a background thread.
 - **Classifier workers:** up to two Python processes, reaped after five idle minutes.
 
 ## File I/O and data safety
