@@ -6,7 +6,7 @@ use super::style;
 use super::waveform::WaveForm;
 use super::widgets::{FileMenuExtras, context_menu_style, file_context_menu, icon, spacer};
 use crate::metadata::TagField;
-use crate::playback::{PlaybackPosition, PlayerCommand, PlayerWorker, clamp_volume, probe_decoder};
+use crate::playback::{PlaybackPosition, PlayerCommand, PlayerEvent, PlayerWorker, clamp_volume, probe_decoder};
 use crate::waveform_peaks::{WaveformPeaks, spawn_peak_build};
 use iced::widget::scrollable::{Direction, Scrollbar};
 use iced::widget::slider::{self, Handle, HandleShape, Rail};
@@ -93,11 +93,14 @@ impl Player {
         worker.send(PlayerCommand::Stop);
         let info = probe_decoder(file_path)?;
         let peaks = Arc::new(Mutex::new(WaveformPeaks::empty()));
-        let mut waveform = WaveForm::new_pending(info.total_frames as usize, Arc::clone(&peaks));
-
         let position = PlaybackPosition::new(info.total_frames);
-        waveform.set_playback(Arc::clone(&position), Arc::clone(&self.controls.is_playing));
-        waveform.set_sample_rate(info.sample_rate);
+        let waveform = WaveForm::new(
+            info.total_frames as usize,
+            info.sample_rate,
+            Arc::clone(&peaks),
+            Arc::clone(&position),
+            Arc::clone(&self.controls.is_playing),
+        );
         self.controls.playback_position = Some(Arc::clone(&position));
         self.controls.track_duration = Some(info.total_frames as f64 / f64::from(info.sample_rate));
         self.controls.playback_progress = Some(0.0);
@@ -105,14 +108,13 @@ impl Player {
         self.waveform = Some(waveform);
 
         let id = self.track_id.fetch_add(1, Ordering::SeqCst) + 1;
-        let track_id = Arc::clone(&self.track_id);
-        let events = worker.clone();
+        let (track_id, events) = (Arc::clone(&self.track_id), worker.clone());
         spawn_peak_build(
             file_path.to_path_buf(),
             info.total_frames as usize,
             peaks,
             move || track_id.load(Ordering::SeqCst) != id,
-            move || events.emit(crate::playback::PlayerEvent::WaveformPeaksReady(id)),
+            move || events.emit(PlayerEvent::WaveformPeaksReady(id)),
         );
 
         worker.send(PlayerCommand::Load(file_path.to_path_buf(), position, id));
@@ -140,8 +142,7 @@ impl Player {
             return;
         };
         let Some(sample_count) = waveform.apply_peaks_ready() else {
-            waveform.invalidate_cache();
-            return;
+            return waveform.invalidate_cache();
         };
         if let Some(position) = &self.controls.playback_position {
             position.set_total_frames(sample_count as u64);
@@ -214,14 +215,12 @@ impl Player {
 
     /// Copies the audio thread's playhead into the time label.
     pub fn sync_playback_ui(&mut self) {
-        if self.controls.scrubbing {
-            return;
-        }
-        if let Some(progress) = self
-            .controls
-            .playback_position
-            .as_ref()
-            .map(|position| position.progress())
+        if !self.controls.scrubbing
+            && let Some(progress) = self
+                .controls
+                .playback_position
+                .as_ref()
+                .map(|position| position.progress())
         {
             self.set_progress(progress);
         }
@@ -230,11 +229,10 @@ impl Player {
     pub fn reset_on_error(&mut self) {
         self.send(PlayerCommand::Stop);
         self.controls.is_playing.store(false, Ordering::SeqCst);
-        if let Some(position) = &self.controls.playback_position {
+        if let Some(position) = self.controls.playback_position.take() {
             position.reset();
         }
         self.controls.playback_progress = None;
-        self.controls.playback_position = None;
         self.controls.track_duration = None;
         self.current_file = None;
         self.waveform = None;
@@ -270,17 +268,21 @@ impl Player {
             }
             None => spacer(Length::Fill, Length::Fill).into(),
         };
-        let track_name = self.current_file.as_deref().and_then(crate::path_util::file_name_lossy);
+        let track = self
+            .current_file
+            .as_deref()
+            .and_then(|path| Some((crate::path_util::file_name_lossy(path)?, path)));
 
-        container(column![
-            waveform_area,
-            self.controls.view(track_name, self.current_file.as_deref())
-        ])
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .center_x(Length::Fill)
-        .into()
+        container(column![waveform_area, self.controls.view(track)])
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center_x(Length::Fill)
+            .into()
     }
+}
+
+fn accent(theme: &Theme) -> Color {
+    theme.extended_palette().primary.base.color
 }
 
 fn waveform_toolbar(zoom: f32, tags: Vec<(TagField, String)>) -> Element<'static, Message> {
@@ -290,15 +292,10 @@ fn waveform_toolbar(zoom: f32, tags: Vec<(TagField, String)>) -> Element<'static
             .on_press(message.into())
             .style(|theme: &Theme, status| {
                 let palette = theme.extended_palette();
-                let accent = palette.primary.base.color;
+                let (accent, text_color) = (accent(theme), palette.background.base.text);
                 let idle_border = palette.background.strong.color.scale_alpha(0.35);
                 button::Style {
-                    text_color: style::by_status(
-                        status,
-                        style::text_alpha(theme, 0.82),
-                        palette.background.base.text,
-                        palette.background.base.text,
-                    ),
+                    text_color: style::by_status(status, style::text_alpha(theme, 0.82), text_color, text_color),
                     border: style::outline(
                         style::by_status(status, idle_border, accent.scale_alpha(0.35), idle_border),
                         6.0,
@@ -313,13 +310,15 @@ fn waveform_toolbar(zoom: f32, tags: Vec<(TagField, String)>) -> Element<'static
                 ))
             })
     };
-    let zoom_label = container(text(format!("Zoom {zoom:.1}×")).size(11).font(style::SEMIBOLD).style(
-        |theme: &Theme| text::Style {
-            color: Some(theme.extended_palette().primary.base.color.scale_alpha(0.92)),
-        },
-    ))
-    .padding([4, 8])
-    .style(|theme: &Theme| style::tinted(theme.extended_palette().primary.base.color, 0.14, 0.24, 6.0)(theme));
+    let zoom_label = text(format!("Zoom {zoom:.1}×"))
+        .size(11)
+        .font(style::SEMIBOLD)
+        .style(|theme: &Theme| text::Style {
+            color: Some(accent(theme).scale_alpha(0.92)),
+        });
+    let zoom_label = container(zoom_label)
+        .padding([4, 8])
+        .style(|theme: &Theme| style::tinted(accent(theme), 0.14, 0.24, 6.0)(theme));
 
     let mut bar = row![
         zoom_label,
@@ -343,30 +342,24 @@ fn waveform_toolbar(zoom: f32, tags: Vec<(TagField, String)>) -> Element<'static
 fn toolbar_tags(tags: Vec<(TagField, String)>) -> Element<'static, Message> {
     let chips = tags.into_iter().map(|(field, value)| {
         let accent = style::tag_field_color(field);
-        container(
-            row![
-                text(field.label())
-                    .size(9)
-                    .font(style::SEMIBOLD)
-                    .color(accent.scale_alpha(0.88)),
-                text(value).size(11).font(style::MEDIUM).style(style::faded_text(0.92)),
-            ]
-            .spacing(4)
-            .align_y(Alignment::Center),
-        )
-        .padding([3, 8])
-        .style(style::tinted(accent, 0.12, 0.28, 6.0))
-        .into()
+        let label = text(field.label())
+            .size(9)
+            .font(style::SEMIBOLD)
+            .color(accent.scale_alpha(0.88));
+        let value = text(value).size(11).font(style::MEDIUM).style(style::faded_text(0.92));
+        container(row![label, value].spacing(4).align_y(Alignment::Center))
+            .padding([3, 8])
+            .style(style::tinted(accent, 0.12, 0.28, 6.0))
+            .into()
     });
+    let strip = Row::with_children(chips)
+        .spacing(6)
+        .align_y(Alignment::Center)
+        .padding([0, 2]);
     container(
-        scrollable(
-            Row::with_children(chips)
-                .spacing(6)
-                .align_y(Alignment::Center)
-                .padding([0, 2]),
-        )
-        .direction(Direction::Horizontal(Scrollbar::new().width(3).scroller_width(3)))
-        .width(Length::Fill),
+        scrollable(strip)
+            .direction(Direction::Horizontal(Scrollbar::new().width(3).scroller_width(3)))
+            .width(Length::Fill),
     )
     .width(Length::Fill)
     .max_width(TOOLBAR_TAG_STRIP_MAX)
@@ -391,18 +384,29 @@ impl Controls {
         )
     }
 
-    fn view(&self, track_name: Option<String>, track_path: Option<&Path>) -> Element<'_, Message> {
-        let track_info: Element<'_, Message> = match (track_name, track_path) {
-            (Some(name), Some(path)) => {
+    fn view(&self, track: Option<(String, &Path)>) -> Element<'_, Message> {
+        let track_info: Element<'_, Message> = match track {
+            Some((name, path)) => {
                 let (current, total) = self.time_labels();
                 container(track_info_row(name, path.to_path_buf(), current, total))
                     .width(Length::FillPortion(2))
                     .into()
             }
-            _ => spacer(Length::Fill, Length::Shrink).into(),
+            None => spacer(Length::Fill, Length::Shrink).into(),
         };
+        let volume = row![
+            text("V").size(11).style(style::faded_text(0.62)),
+            Slider::new(0.0..=1.0_f32, self.volume, Message::VolumeChanged)
+                .step(0.01_f32)
+                .width(Length::Fixed(VOLUME_SLIDER_WIDTH))
+                .height(16.0)
+                .on_release(Message::VolumeCommit)
+                .style(volume_slider_style),
+        ]
+        .spacing(4)
+        .align_y(Alignment::Center);
         container(
-            row![track_info, self.volume_control(), self.transport_cluster()]
+            row![track_info, volume, self.transport_cluster()]
                 .spacing(8)
                 .align_y(Alignment::Center)
                 .width(Length::Fill),
@@ -417,12 +421,8 @@ impl Controls {
         let playing = Arc::clone(&self.is_playing);
         let is_playing = move || playing.load(Ordering::SeqCst);
         let looping = self.looping.load(Ordering::Relaxed);
-        let play = transport_button(
-            if is_playing() { "pause.svg" } else { "play.svg" },
-            Message::TogglePlaying,
-            true,
-            is_playing,
-        );
+        let play_icon = if is_playing() { "pause.svg" } else { "play.svg" };
+        let play = transport_button(play_icon, Message::TogglePlaying, true, is_playing);
         let stop = transport_button("stop.svg", Message::StopPlayback, false, || false);
         let repeat = transport_button("repeat.svg", Message::ToggleLoop, looping, move || looping);
 
@@ -436,21 +436,6 @@ impl Controls {
             })
             .into()
     }
-
-    fn volume_control(&self) -> Element<'_, Message> {
-        row![
-            text("V").size(11).style(style::faded_text(0.62)),
-            Slider::new(0.0..=1.0_f32, self.volume, Message::VolumeChanged)
-                .step(0.01_f32)
-                .width(Length::Fixed(VOLUME_SLIDER_WIDTH))
-                .height(16.0)
-                .on_release(Message::VolumeCommit)
-                .style(volume_slider_style),
-        ]
-        .spacing(4)
-        .align_y(Alignment::Center)
-        .into()
-    }
 }
 
 /// A round transport button. `primary` buttons use the accent color, and
@@ -462,13 +447,10 @@ fn transport_button(
     active: impl Fn() -> bool + Clone + 'static,
 ) -> Button<'static, Message> {
     let icon_active = active.clone();
-    let glyph = icon(icon_name, TRANSPORT_ICON, move |theme| {
-        let accent = theme.extended_palette().primary.base.color;
-        match (primary, icon_active()) {
-            (true, true) => Color::WHITE,
-            (true, false) => accent,
-            (false, _) => style::text_alpha(theme, 0.78),
-        }
+    let glyph = icon(icon_name, TRANSPORT_ICON, move |theme| match (primary, icon_active()) {
+        (true, true) => Color::WHITE,
+        (true, false) => accent(theme),
+        (false, _) => style::text_alpha(theme, 0.78),
     });
     button(glyph)
         .on_press(message)
@@ -476,32 +458,19 @@ fn transport_button(
         .height(Length::Fixed(TRANSPORT_BUTTON))
         .style(move |theme: &Theme, status| {
             let palette = theme.extended_palette();
-            let accent = palette.primary.base.color;
-            let strong = palette.background.strong.color;
+            let (accent, strong) = (accent(theme), palette.background.strong.color);
+            let idle = palette.background.weak.color.scale_alpha(0.35);
             let lit = primary && active();
-            let background = if primary {
-                style::by_status(
-                    status,
-                    if lit {
-                        accent
-                    } else {
-                        palette.background.weak.color.scale_alpha(0.35)
-                    },
-                    accent.scale_alpha(if lit { 0.92 } else { 0.22 }),
-                    accent.scale_alpha(0.78),
+            let (background, border_color) = if primary {
+                let hovered = accent.scale_alpha(if lit { 0.92 } else { 0.22 });
+                let idle = if lit { accent } else { idle };
+                (
+                    style::by_status(status, idle, hovered, accent.scale_alpha(0.78)),
+                    accent.scale_alpha(0.55),
                 )
             } else {
-                style::by_status(
-                    status,
-                    palette.background.weak.color.scale_alpha(0.35),
-                    strong.scale_alpha(0.28),
-                    strong.scale_alpha(0.42),
-                )
-            };
-            let border_color = if primary {
-                accent.scale_alpha(0.55)
-            } else {
-                strong.scale_alpha(0.35)
+                let background = style::by_status(status, idle, strong.scale_alpha(0.28), strong.scale_alpha(0.42));
+                (background, strong.scale_alpha(0.35))
             };
             button::Style {
                 text_color: palette.background.base.text,
@@ -513,27 +482,23 @@ fn transport_button(
 }
 
 fn track_info_row(name: String, path: PathBuf, current: String, total: String) -> Element<'static, Message> {
+    let time = |label: String, alpha| {
+        text(label)
+            .size(12)
+            .font(iced::Font::MONOSPACE)
+            .style(style::faded_text(alpha))
+    };
+    let separator = |glyph| text(glyph).size(11).style(style::faded_text(0.42));
     mouse_area(
         row![
-            icon("music-solid.svg", 14.0, |theme| theme
-                .extended_palette()
-                .primary
-                .base
-                .color
-                .scale_alpha(0.85)),
+            icon("music-solid.svg", 14.0, |theme| accent(theme).scale_alpha(0.85)),
             container(text(name).size(12).style(style::faded_text(0.72)))
                 .width(Length::Fill)
                 .clip(true),
-            text("·").size(11).style(style::faded_text(0.42)),
-            text(current)
-                .size(12)
-                .font(iced::Font::MONOSPACE)
-                .style(style::faded_text(0.62)),
-            text("/").size(11).style(style::faded_text(0.42)),
-            text(total)
-                .size(12)
-                .font(iced::Font::MONOSPACE)
-                .style(style::faded_text(0.52)),
+            separator("·"),
+            time(current, 0.62),
+            separator("/"),
+            time(total, 0.52),
         ]
         .spacing(6)
         .align_y(Alignment::Center),
@@ -548,7 +513,7 @@ fn track_info_row(name: String, path: PathBuf, current: String, total: String) -
 
 fn volume_slider_style(theme: &Theme, status: slider::Status) -> slider::Style {
     let palette = theme.extended_palette();
-    let accent = palette.primary.base.color;
+    let accent = accent(theme);
     let (fill, handle_radius) = match status {
         slider::Status::Active => (accent.scale_alpha(0.72), 5.0),
         slider::Status::Hovered => (accent.scale_alpha(0.92), 5.5),
@@ -584,41 +549,31 @@ pub fn format_duration(secs: f64) -> String {
 mod tests {
     use super::*;
 
-    fn player_with_position(total_frames: u64) -> (Player, Arc<PlaybackPosition>) {
+    /// A player at frame 900 of 1000, optionally with a worker nothing drains: that stands in for
+    /// the gap between releasing a scrub and the audio thread handling `Seek`.
+    fn seek_to_quarter(with_worker: bool) -> f64 {
         let mut player = Player::new(1.0, false);
-        let position = PlaybackPosition::new(total_frames);
+        let position = PlaybackPosition::new(1_000);
         player.controls.playback_position = Some(Arc::clone(&position));
         player.controls.playback_progress = Some(0.0);
-        (player, position)
-    }
-
-    #[test]
-    fn seek_moves_the_shared_position_before_the_audio_thread_runs() {
-        let (mut player, position) = player_with_position(1_000);
-        // Nothing drains the commands, so this stands in for the gap between releasing the
-        // scrub and the audio thread handling `Seek`.
         let (worker, _commands) = PlayerWorker::detached();
-        player.worker = Some(worker);
+        if with_worker {
+            player.worker = Some(worker);
+        }
         position.set_frame(900);
-
         player.seek(0.25);
-
-        assert!(
-            (position.progress() - 0.25).abs() < 1e-9,
-            "playhead should already read the seek target, got {}",
-            position.progress()
-        );
+        position.progress()
     }
 
     #[test]
-    fn seek_leaves_the_position_alone_until_a_worker_is_attached() {
-        let (mut player, position) = player_with_position(1_000);
-        position.set_frame(900);
-
-        player.seek(0.25);
-
+    fn seek_moves_the_shared_position_only_once_a_worker_is_attached() {
         assert_eq!(
-            position.progress(),
+            seek_to_quarter(true),
+            0.25,
+            "playhead should already read the seek target"
+        );
+        assert_eq!(
+            seek_to_quarter(false),
             0.9,
             "a queued seek must not advertise a frame playback never reached"
         );

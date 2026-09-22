@@ -1,7 +1,6 @@
 //! Audio output, independent of the UI: the audio thread (`worker`), the
 //! decoding source it plays (`stream`), and the shared playhead (`position`).
 
-mod callback;
 mod position;
 mod stream;
 mod worker;
