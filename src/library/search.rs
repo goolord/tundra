@@ -3,12 +3,11 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Duration;
 
 use super::cache::{Shared, lock_read};
 use crate::metadata::{
-    CachedMetadata, MetadataLookup, SearchQuery, SearchResult, TagFilter, index_paths, is_audio, search,
+    CachedMetadata, MetadataLookup, SearchQuery, SearchResult, TagFilter, is_audio, search, tag_only_search,
 };
 use crate::path_util::{cache_key, is_under, resolve_open_path};
 
@@ -22,8 +21,6 @@ pub struct SearchRequest {
     pub tag_filters: Vec<TagFilter>,
     pub case_sensitive: bool,
     pub show_directories: bool,
-    /// Tag filters and no file query: answered from the index where possible.
-    pub tag_only: bool,
     /// Restrict results to these favorite keys.
     pub favorites: Option<HashSet<PathBuf>>,
 }
@@ -58,24 +55,15 @@ pub struct SearchOutput {
 }
 
 pub async fn execute_file_search(request: SearchRequest) -> SearchOutput {
-    let SearchRequest {
-        debounce,
-        allowed_roots,
-        dir_cache,
-        metadata_cache,
-        file_query,
-        tag_filters,
-        case_sensitive,
-        show_directories,
-        tag_only,
-        favorites,
-    } = request;
-    async_io::Timer::after(debounce).await;
+    async_io::Timer::after(request.debounce).await;
+    let allowed_roots = &request.allowed_roots;
+    // Tag filters and no file query: answered from the index where possible.
+    let tag_only = tag_only_search(&request.file_query, &request.tag_filters);
 
     let mut paths = Vec::new();
     let mut missing_roots = Vec::new();
-    let listings = lock_read(&dir_cache);
-    for root in &allowed_roots {
+    let listings = lock_read(&request.dir_cache);
+    for root in allowed_roots {
         let (cached, found) = cached_paths_for_root(&listings, root);
         // Keep visited subtrees even when the root itself was never walked: tag-only
         // search can answer from them plus the index instead of walking the library.
@@ -86,7 +74,7 @@ pub async fn execute_file_search(request: SearchRequest) -> SearchOutput {
     }
     drop(listings);
 
-    let metadata_map = lock_read(&metadata_cache);
+    let metadata_map = lock_read(&request.metadata_cache);
 
     let mut walked_roots = HashMap::new();
     for root in missing_roots {
@@ -105,7 +93,7 @@ pub async fn execute_file_search(request: SearchRequest) -> SearchOutput {
     let mut seen = HashSet::new();
     paths.retain(|path| seen.insert(cache_key(path)));
 
-    if !tag_filters.is_empty() {
+    if !request.tag_filters.is_empty() {
         // Safety net for files a walk can no longer reach (renamed or temporarily offline
         // directories) but whose tags are still known. Every tag filter needs this, not just a
         // tag-only query, or adding a file query would drop the very files the tag filter just
@@ -122,24 +110,23 @@ pub async fn execute_file_search(request: SearchRequest) -> SearchOutput {
         }
     }
 
+    let mut lookup = MetadataLookup::new(metadata_map);
     if tag_only {
         paths.retain(|path| is_audio(path));
+        // Tag-only search answers from the index, except for roots just walked:
+        // those need indexing or a persisted listing would skip-walk forever with
+        // no tags. A filename query reads tags lazily for the paths it matches.
+        lookup.index(walked_roots.values().flatten());
     }
 
-    // Tag-only search answers from the index, except for roots just walked:
-    // those need indexing or a persisted listing would skip-walk forever with
-    // no tags. A filename query reads tags lazily for the paths it matches.
-    let indexed = if tag_only && !walked_roots.is_empty() {
-        let walked: Vec<PathBuf> = walked_roots.values().flatten().cloned().collect();
-        index_paths(&walked, Arc::clone(&metadata_map))
-    } else {
-        HashMap::new()
+    let query = SearchQuery {
+        text: &request.file_query,
+        tag_filters: &request.tag_filters,
+        case_sensitive: request.case_sensitive,
+        show_directories: request.show_directories,
     };
-    let lookup = MetadataLookup::with_new_entries(metadata_map, indexed);
-
-    let query = SearchQuery { text: &file_query, tag_filters: &tag_filters, case_sensitive, show_directories };
     let mut result = search(&paths, &query, lookup);
-    if let Some(favorites) = favorites {
+    if let Some(favorites) = &request.favorites {
         result.paths.retain(|path| favorites.contains(&crate::path_util::favorite_lookup_key(path)));
     }
     for path in &mut result.paths {

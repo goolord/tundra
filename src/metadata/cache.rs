@@ -22,14 +22,7 @@ pub struct MetadataLookup {
 
 impl MetadataLookup {
     pub fn new(cache: Arc<HashMap<PathBuf, CachedMetadata>>) -> Self {
-        Self::with_new_entries(cache, HashMap::new())
-    }
-
-    pub fn with_new_entries(
-        cache: Arc<HashMap<PathBuf, CachedMetadata>>,
-        new_entries: HashMap<PathBuf, CachedMetadata>,
-    ) -> Self {
-        Self { cache, new_entries }
+        Self { cache, new_entries: HashMap::new() }
     }
 
     pub fn into_new_entries(self) -> HashMap<PathBuf, CachedMetadata> {
@@ -45,7 +38,7 @@ impl MetadataLookup {
     /// Tags from the index only; an unindexed file reports nothing rather than being parsed.
     /// Search uses this because a tag filter spans the whole library, and opening every
     /// unindexed audio file to answer one query costs minutes. `index_paths` fills the index.
-    pub(crate) fn indexed_tag_fields(&self, path: &Path) -> Option<&TagFields> {
+    pub fn indexed_tag_fields(&self, path: &Path) -> Option<&TagFields> {
         self.lookup_cached(path).map(|entry| &entry.fields)
     }
 
@@ -68,18 +61,22 @@ impl MetadataLookup {
         self.new_entries.insert(crate::path_util::cache_key(path), entry);
         fields
     }
+
+    /// Brings every audio file in `paths` into the index.
+    pub fn index<'p>(&mut self, paths: impl IntoIterator<Item = &'p PathBuf>) {
+        for path in paths.into_iter().filter(|path| is_audio(path)) {
+            self.tag_fields(path);
+        }
+    }
 }
 
+/// The entries `paths` add to `cache`.
 pub fn index_paths(
     paths: &[PathBuf],
     cache: Arc<HashMap<PathBuf, CachedMetadata>>,
 ) -> HashMap<PathBuf, CachedMetadata> {
     let mut lookup = MetadataLookup::new(cache);
-    for path in paths {
-        if is_audio(path) {
-            lookup.tag_fields(path);
-        }
-    }
+    lookup.index(paths);
     lookup.into_new_entries()
 }
 

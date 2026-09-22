@@ -27,7 +27,7 @@ pub use fields::{
 };
 pub use hints::{instrument_hint_from_path, instruments_related};
 pub use read::{AUDIO_EXTENSIONS, instrument_tag, is_audio};
-pub use search::{FILE_SEARCH_MIN_QUERY_LEN, SearchQuery, SearchResult, file_search_active, search};
+pub use search::{FILE_SEARCH_MIN_QUERY_LEN, SearchQuery, SearchResult, file_search_active, search, tag_only_search};
 pub use write::{SavedTo, write_auto_tags, write_manual_tags};
 
 #[cfg(test)]

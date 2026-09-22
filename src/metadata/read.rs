@@ -10,29 +10,20 @@ use super::hints::artist_hint_from_path;
 const LEGACY_TUNDRA_AUTO_TAG_COMMENT: &str = "Automatically tagged by Tundra";
 /// Bump when auto-tag field layout or semantics change so older tags can upgrade.
 pub const TUNDRA_TAG_VERSION: u32 = 1;
-// Canonical tag keys per container. RIFF INFO has no instrument chunk, so WAV
-// uses IKEY (keywords), the only free-form field taggers reliably surface.
-pub(crate) const WAV_INSTRUMENT_KEY: &str = "IKEY";
-pub(crate) const WAV_ARTIST_KEY: &str = "IART";
-pub(crate) const WAV_COMMENT_KEY: &str = "ICMT";
-pub(crate) const WAV_TITLE_KEY: &str = "INAM";
-pub(crate) const WAV_GENRE_KEY: &str = "IGNR";
-// Vorbis comments (FLAC, OGG) and ID3v2 user text (MP3) both name the field
-// INSTRUMENT, which is what Mp3tag and similar taggers display.
-pub(crate) const VORBIS_INSTRUMENT_KEY: &str = "INSTRUMENT";
-pub(crate) const VORBIS_ARTIST_KEY: &str = "ARTIST";
-pub(crate) const VORBIS_COMMENT_KEY: &str = "COMMENT";
+// Instrument, artist, and comment keys per container, in `NativeTags` order.
+// RIFF INFO has no instrument chunk, so WAV uses IKEY (keywords), the only
+// free-form field taggers reliably surface. Vorbis comments (FLAC, OGG) and ID3v2
+// user text (MP3) both name the field INSTRUMENT, which Mp3tag and similar show.
+pub(crate) const WAV_NATIVE_KEYS: [&str; 3] = ["IKEY", "IART", "ICMT"];
+pub(crate) const VORBIS_NATIVE_KEYS: [&str; 3] = ["INSTRUMENT", "ARTIST", "COMMENT"];
 pub(crate) const ID3_INSTRUMENT_KEY: &str = "INSTRUMENT";
-/// Instrument, artist, and comment keys, in `NativeTags` order.
-pub(crate) const WAV_NATIVE_KEYS: [&str; 3] = [WAV_INSTRUMENT_KEY, WAV_ARTIST_KEY, WAV_COMMENT_KEY];
-pub(crate) const VORBIS_NATIVE_KEYS: [&str; 3] = [VORBIS_INSTRUMENT_KEY, VORBIS_ARTIST_KEY, VORBIS_COMMENT_KEY];
 
 /// Sets `value` from `source` unless it already holds something.
 fn push_field(value: &mut String, source: Option<impl AsRef<str>>) {
     if value.is_empty()
-        && let Some(text) = source.as_ref().map(|text| text.as_ref().trim()).filter(|text| !text.is_empty())
+        && let Some(text) = non_empty(source.as_ref().map(AsRef::as_ref))
     {
-        *value = text.to_owned();
+        *value = text;
     }
 }
 
@@ -64,18 +55,6 @@ fn marker_line_version(line: &str) -> Option<u32> {
 /// Version recorded in a Tundra marker comment, if any.
 pub(crate) fn parse_tundra_comment_version(comment: &str) -> Option<u32> {
     comment.lines().find_map(marker_line_version)
-}
-
-pub(crate) fn file_tundra_tag_version(path: &Path, comment: &str, native_instrument: &str) -> Option<u32> {
-    parse_tundra_comment_version(comment)
-        .or_else(|| native_instrument.trim().is_empty().then(|| crate::tag_store::tag_version(path)).flatten())
-}
-
-/// Tundra may replace tags it wrote; sidecar alone does not own native tags.
-pub(crate) fn tundra_tagged_file(path: &Path, comment: &str, native_instrument: &str) -> bool {
-    parse_tundra_comment_version(comment).is_some()
-        || instrument_from_marked_comment(comment).is_some()
-        || (native_instrument.trim().is_empty() && crate::tag_store::tundra_instrument(path).is_some())
 }
 
 /// The comment to write: lines Tundra wrote earlier are replaced by the current
@@ -212,6 +191,7 @@ fn riff_get(info: &lofty::iff::wav::RiffInfoList, key: &str) -> Option<String> {
 }
 
 /// Canonical native keys plus generic tags from one parse.
+#[derive(Default)]
 pub(crate) struct FileTags {
     pub native: NativeTags,
     pub generic: Vec<Tag>,
@@ -226,10 +206,12 @@ pub(crate) fn read_container_tags_as(path: &Path, container: Container) -> Optio
         Container::Wav => {
             let mut wav = lofty::iff::wav::WavFile::read_from(&mut file, options).ok()?;
             let info = wav.remove_riff_info();
-            let native =
-                NativeTags::from_keys(WAV_NATIVE_KEYS, |key| info.as_ref().and_then(|list| riff_get(list, key)));
-            let generic = tags([info.map(Tag::from), wav.remove_id3v2().map(Tag::from)]);
-            FileTags { native, generic }
+            FileTags {
+                native: NativeTags::from_keys(WAV_NATIVE_KEYS, |key| {
+                    info.as_ref().and_then(|list| riff_get(list, key))
+                }),
+                generic: tags([info.map(Tag::from), wav.remove_id3v2().map(Tag::from)]),
+            }
         }
         Container::Flac => {
             let mut flac = lofty::flac::FlacFile::read_from(&mut file, options).ok()?;
@@ -270,23 +252,21 @@ pub(crate) fn read_container_tags_as(path: &Path, container: Container) -> Optio
     })
 }
 
-fn read_container_tags(path: &Path) -> Option<FileTags> {
+/// Tags from the container the extension names; `None` when it cannot be parsed
+/// as one (and so cannot take a native write either).
+pub(crate) fn read_container_tags(path: &Path) -> Option<FileTags> {
     read_container_tags_as(path, Container::of(path)?)
 }
 
-/// Falls back to a generic probe when extension and container disagree
-/// (the instrument may then live in the sidecar).
-pub(crate) fn read_file_tags(path: &Path) -> Option<FileTags> {
-    if let Some(tags) = read_container_tags(path) {
-        return Some(tags);
-    }
+/// Generic tags from whatever lofty finds, for files whose extension and
+/// container disagree (the instrument may then live in the sidecar).
+pub(crate) fn probe_tags(path: &Path) -> Option<FileTags> {
     let tagged = lofty::probe::Probe::open(path).ok()?.options(tag_parse_options()).read().ok()?;
     Some(FileTags { native: NativeTags::default(), generic: tagged.tags().to_vec() })
 }
 
-/// Canonical instrument/artist/comment keys for the container.
-pub(crate) fn read_native_tags(path: &Path) -> Option<NativeTags> {
-    read_container_tags(path).map(|tags| tags.native)
+fn read_file_tags(path: &Path) -> Option<FileTags> {
+    read_container_tags(path).or_else(|| probe_tags(path))
 }
 
 fn explicit_instrument_from_tag(tag: &Tag) -> Option<String> {
@@ -304,16 +284,13 @@ fn explicit_instrument_from_tag(tag: &Tag) -> Option<String> {
         .or_else(|| tag.comment().and_then(|text| instrument_from_marked_comment(&text)))
 }
 
-/// Instrument from native key, legacy placements, then sidecar. Pass `tags` to skip re-parse.
-pub(crate) fn durable_instrument(path: &Path, native: &NativeTags, tags: Option<&[Tag]>) -> Option<String> {
-    if let Some(instrument) = &native.instrument {
-        return Some(instrument.clone());
-    }
-    let legacy = match tags {
-        Some(tags) => tags.iter().find_map(explicit_instrument_from_tag),
-        None => read_file_tags(path).and_then(|tags| tags.generic.iter().find_map(explicit_instrument_from_tag)),
-    };
-    legacy.or_else(|| crate::tag_store::instrument(path))
+/// Instrument from native key, legacy placements, then sidecar.
+pub(crate) fn durable_instrument(path: &Path, tags: &FileTags) -> Option<String> {
+    tags.native
+        .instrument
+        .clone()
+        .or_else(|| tags.generic.iter().find_map(explicit_instrument_from_tag))
+        .or_else(|| crate::tag_store::instrument(path))
 }
 
 /// Values saved in the sidecar win over the file's.
@@ -379,29 +356,32 @@ pub fn read_tag_fields(path: &Path) -> Option<TagFields> {
     if file_tags.is_none() && sidecar_instrument.is_none() && sidecar_manual.is_none() {
         return None;
     }
-    let (native, tags) = file_tags.map(|tags| (tags.native, tags.generic)).unwrap_or_default();
+    let file_tags = file_tags.unwrap_or_default();
 
-    let mut fields = generic_tag_fields(&tags);
-    match durable_instrument(path, &native, Some(&tags)) {
+    let mut fields = generic_tag_fields(&file_tags.generic);
+    match durable_instrument(path, &file_tags) {
         Some(instrument) => {
             fields.explicit_instrument = instrument.clone();
             fields.instrument = instrument;
         }
         // Loose placements older taggers used; searchable, but not the file's own instrument.
         None => {
-            for tag in &tags {
+            for tag in &file_tags.generic {
                 push_field(&mut fields.instrument, tag.get_string(ItemKey::ContentGroup));
                 push_field(&mut fields.instrument, tag.get_string(ItemKey::Description));
             }
         }
     }
-    fields.file_comment = native.comment.unwrap_or_default();
-    if !fields.file_comment.is_empty() {
-        fields.comment = fields.file_comment.clone();
-    }
-    fields.file_artist = native.artist.unwrap_or_default();
-    if !fields.file_artist.is_empty() {
-        fields.artist = fields.file_artist.clone();
+    // The container's canonical keys win over generic placements.
+    let native = file_tags.native;
+    for (file_value, value, native) in [
+        (&mut fields.file_comment, &mut fields.comment, native.comment),
+        (&mut fields.file_artist, &mut fields.artist, native.artist),
+    ] {
+        *file_value = native.unwrap_or_default();
+        if !file_value.is_empty() {
+            value.clone_from(file_value);
+        }
     }
     push_field(&mut fields.artist, artist_hint_from_path(path));
     if let Some(sidecar) = sidecar_manual {
@@ -414,6 +394,5 @@ pub fn instrument_tag(path: &Path) -> Option<String> {
     if !is_audio(path) {
         return None;
     }
-    let native = read_native_tags(path).unwrap_or_default();
-    durable_instrument(path, &native, None)
+    durable_instrument(path, &read_file_tags(path).unwrap_or_default())
 }
