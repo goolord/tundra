@@ -44,24 +44,46 @@ pub fn muted(theme: &Theme) -> Color {
     text_alpha(theme, 0.72)
 }
 
-pub fn muted_text(theme: &Theme) -> text::Style {
-    text::Style {
-        color: Some(muted(theme)),
+/// Text colored per theme.
+pub fn text_color(color: impl Fn(&Theme) -> Color) -> impl Fn(&Theme) -> text::Style {
+    move |theme| text::Style {
+        color: Some(color(theme)),
     }
+}
+
+pub fn muted_text(theme: &Theme) -> text::Style {
+    text_color(muted)(theme)
 }
 
 /// Text in the theme's body color at `alpha`.
 pub fn faded_text(alpha: f32) -> impl Fn(&Theme) -> text::Style {
-    move |theme| text::Style {
-        color: Some(text_alpha(theme, alpha)),
-    }
+    text_color(move |theme| text_alpha(theme, alpha))
 }
 
 /// Text in the theme's primary color.
 pub fn primary_text(theme: &Theme) -> text::Style {
-    text::Style {
-        color: Some(theme.extended_palette().primary.base.color),
+    text_color(|theme| theme.extended_palette().primary.base.color)(theme)
+}
+
+/// Body text when `highlight`, muted otherwise.
+pub fn highlight_text(highlight: bool) -> impl Fn(&Theme) -> text::Style {
+    text_color(move |theme| {
+        if highlight {
+            text_alpha(theme, 1.0)
+        } else {
+            muted(theme)
+        }
+    })
+}
+
+/// A button with one `background`, usually picked with [`by_status`].
+pub fn solid_button(text_color: Color, border: Border, background: Color) -> button::Style {
+    button::Style {
+        text_color,
+        border,
+        ..button::Style::default()
     }
+    .with_background(background)
 }
 
 /// Tints a monochrome SVG icon.
@@ -126,17 +148,17 @@ pub fn modal_button(primary: bool) -> impl Fn(&Theme, button::Status) -> button:
             palette.background.weak.color.scale_alpha(0.45)
         };
         let hovered = accent.scale_alpha(if primary { 0.92 } else { 0.16 });
-        let idle_text = status == button::Status::Active || status == button::Status::Disabled;
-        button::Style {
-            background: Some(by_status(status, idle, hovered, accent.scale_alpha(0.72)).into()),
-            text_color: if primary && idle_text {
-                Color::WHITE
-            } else {
-                palette.background.base.text
-            },
-            border: outline(palette.background.strong.color.scale_alpha(0.35), 6.0),
-            ..button::Style::default()
-        }
+        let text_color = if primary && by_status(status, true, false, false) {
+            Color::WHITE
+        } else {
+            palette.background.base.text
+        };
+        let border = outline(palette.background.strong.color.scale_alpha(0.35), 6.0);
+        solid_button(
+            text_color,
+            border,
+            by_status(status, idle, hovered, accent.scale_alpha(0.72)),
+        )
     }
 }
 

@@ -3,8 +3,8 @@
 use super::message::Message;
 use super::style;
 use iced::widget::svg::Handle;
-use iced::widget::{Button, Space, Svg, button, column, container, row, text};
-use iced::{Alignment, Color, Element, Length, Theme};
+use iced::widget::{Button, Column, Row, Space, Svg, button, column, container, row, text};
+use iced::{Alignment, Border, Color, Element, Length, Theme};
 
 mod embedded_resources {
     include!(concat!(env!("OUT_DIR"), "/embedded_resources.rs"));
@@ -58,6 +58,25 @@ pub fn modal_button<'a>(label: &'a str, message: Option<Message>, primary: bool)
         .style(style::modal_button(primary))
 }
 
+/// A modal's title and intro, the top of its body column.
+pub fn modal_heading<'a>(title: &'a str, intro: &'a str) -> Column<'a, Message> {
+    column![text(title).size(18), text(intro).size(13).width(Length::Fill)].spacing(12)
+}
+
+/// A modal's footer: `actions` on the left, `last` (close or confirm) on the right.
+pub fn modal_footer<'a>(
+    actions: impl IntoIterator<Item = Button<'a, Message>>,
+    last: Button<'a, Message>,
+) -> Element<'a, Message> {
+    Row::with_children(actions.into_iter().map(Element::from))
+        .push(spacer(Length::Fill, Length::Shrink))
+        .push(last.padding([6, 14]))
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .width(Length::Fill)
+        .into()
+}
+
 /// A label/value line in a modal.
 pub fn modal_info_row<'a>(label: &'a str, value: impl Into<std::borrow::Cow<'a, str>>) -> Element<'a, Message> {
     container(
@@ -85,16 +104,13 @@ fn context_menu_button(label: &str, message: Message) -> Element<'static, Messag
         .style(|theme: &Theme, status| {
             let palette = theme.extended_palette();
             let hover = palette.primary.weak.color;
-            button::Style {
-                text_color: palette.background.base.text,
-                ..button::Style::default()
-            }
-            .with_background(style::by_status(
+            let background = style::by_status(
                 status,
                 palette.background.base.color,
                 hover.scale_alpha(0.35),
                 hover.scale_alpha(0.55),
-            ))
+            );
+            style::solid_button(palette.background.base.text, Border::default(), background)
         })
         .on_press(message)
         .into()

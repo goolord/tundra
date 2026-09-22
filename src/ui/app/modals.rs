@@ -1,6 +1,6 @@
 //! The settings, auto-tag, and tag editor modals.
 
-use super::{App, Modal, pick_audio_file, pick_folder, run_blocking};
+use super::{App, Modal, background, pick_audio_file, pick_folder};
 use crate::auto_tag::{self, ClassifyError};
 use crate::library::AddDirectory;
 use crate::metadata::{auto_tag_field_status, instrument_tag, write_auto_tags, write_manual_tags};
@@ -31,9 +31,15 @@ impl App {
     /// The file an action may work on, or the reason it may not.
     fn tag_target(&self, target: Option<&PathBuf>) -> Result<PathBuf, &'static str> {
         let path = target.ok_or(SELECT_AUDIO_FIRST)?;
-        match self.allowed_audio_error(path) {
-            Some(err) => Err(err),
-            None => Ok(path.clone()),
+        self.allowed_audio_error(path).map_or_else(|| Ok(path.clone()), Err)
+    }
+
+    /// Re-runs the search when a tag write changed the index.
+    fn tags_written(&mut self, changed: bool) -> Task<Message> {
+        if changed {
+            self.refresh_search_if_active()
+        } else {
+            Task::none()
         }
     }
 
@@ -43,42 +49,37 @@ impl App {
                 if self.open_modal(Modal::Settings) {
                     self.settings_error = None;
                 }
-                Task::none()
             }
-            SettingsMsg::Close => self.close_settings(),
+            SettingsMsg::Close => return self.close_settings(),
             SettingsMsg::PickDirectory => {
                 let start_dir = self
                     .allowed_directories
                     .startup_directory()
                     .or_else(dirs::home_dir)
                     .unwrap_or_else(super::startup_directory);
-                Task::perform(pick_folder(start_dir), |picked| {
-                    SettingsMsg::DirectoryPicked(picked).into()
-                })
+                return pick_folder(start_dir, |picked| SettingsMsg::DirectoryPicked(picked).into());
             }
             SettingsMsg::DirectoryPicked(Some(path)) => match self.allowed_directories.add(&path) {
                 AddDirectory::Added(resolved) => {
                     self.allowed_directories.persist();
                     self.settings_error = None;
-                    if self.dir_cache.contains_key(&resolved) {
+                    return if self.dir_cache.contains_key(&resolved) {
                         self.refresh_search_if_active()
                     } else {
                         self.walk_task(resolved)
-                    }
+                    };
                 }
-                AddDirectory::Unresolved => {
-                    self.settings_error = Some("Could not resolve that directory.".into());
-                    Task::none()
-                }
-                AddDirectory::Duplicate => Task::none(),
+                AddDirectory::Unresolved => self.settings_error = Some("Could not resolve that directory.".into()),
+                AddDirectory::Duplicate => {}
             },
-            SettingsMsg::DirectoryPicked(None) => Task::none(),
+            SettingsMsg::DirectoryPicked(None) => {}
             SettingsMsg::RemoveDirectory(path) => {
                 self.allowed_directories.remove(&path);
                 self.allowed_directories.persist();
-                self.refresh_search_if_active()
+                return self.refresh_search_if_active();
             }
         }
+        Task::none()
     }
 
     fn close_settings(&mut self) -> Task<Message> {
@@ -111,6 +112,7 @@ impl App {
             }
             AutoTagMsg::OpenFor(path) => {
                 if self.open_modal(Modal::AutoTag) {
+                    self.auto_tag = AutoTagState::default();
                     self.set_auto_tag_target(path);
                 }
             }
@@ -122,14 +124,9 @@ impl App {
                     .as_deref()
                     .and_then(std::path::Path::parent)
                     .map_or_else(|| self.file_selector.current_dir.clone(), |dir| dir.to_path_buf());
-                return Task::perform(pick_audio_file(start_dir), |picked| {
-                    AutoTagMsg::FilePicked(picked).into()
-                });
+                return pick_audio_file(start_dir, |picked| AutoTagMsg::FilePicked(picked).into());
             }
-            AutoTagMsg::FilePicked(Some(path)) => match self.allowed_audio_error(&path) {
-                Some(err) => self.auto_tag.set_error(err),
-                None => self.auto_tag = AutoTagState::for_target(Some(path)),
-            },
+            AutoTagMsg::FilePicked(Some(path)) => self.set_auto_tag_target(path),
             AutoTagMsg::FilePicked(None) => {}
             AutoTagMsg::Run => return self.run_auto_tag(),
             AutoTagMsg::Completed(path, result) => {
@@ -146,23 +143,18 @@ impl App {
         Task::none()
     }
 
+    /// Retargets the modal at `path`, or shows why it cannot be tagged.
     fn set_auto_tag_target(&mut self, path: PathBuf) {
         match self.allowed_audio_error(&path) {
-            Some(err) => {
-                self.auto_tag = AutoTagState::default();
-                self.auto_tag.set_error(err);
-            }
+            Some(err) => self.auto_tag.set_error(err),
             None => self.auto_tag = AutoTagState::for_target(Some(path)),
         }
     }
 
     fn run_auto_tag(&mut self) -> Task<Message> {
-        let path = match self.tag_target(self.auto_tag.target.as_ref()) {
-            Ok(path) => path,
-            Err(err) => {
-                self.auto_tag.set_error(err);
-                return Task::none();
-            }
+        let target = self.tag_target(self.auto_tag.target.as_ref());
+        let Ok(path) = target.map_err(|err| self.auto_tag.set_error(err)) else {
+            return Task::none();
         };
         if let Some(existing) = instrument_tag(&path) {
             self.auto_tag.existing_instrument = Some(existing);
@@ -174,27 +166,20 @@ impl App {
         }
         self.auto_tag.begin_run();
         let classify_path = path.clone();
-        Task::perform(
-            run_blocking(move || auto_tag::classify_file(&classify_path)),
-            move |result| {
-                let result = result.unwrap_or_else(|()| {
-                    Err(ClassifyError::new(
-                        "Couldn't analyze this file.",
-                        "Classifier thread stopped unexpectedly.",
-                    ))
-                });
-                AutoTagMsg::Completed(path.clone(), result).into()
+        background(
+            move || auto_tag::classify_file(&classify_path),
+            || {
+                let details = "Classifier thread stopped unexpectedly.";
+                Err(ClassifyError::new("Couldn't analyze this file.", details))
             },
+            move |result| AutoTagMsg::Completed(path, result).into(),
         )
     }
 
     fn apply_auto_tag(&mut self) -> Task<Message> {
-        let path = match self.tag_target(self.auto_tag.target.as_ref()) {
-            Ok(path) => path,
-            Err(err) => {
-                self.auto_tag.set_error(err);
-                return Task::none();
-            }
+        let target = self.tag_target(self.auto_tag.target.as_ref());
+        let Ok(path) = target.map_err(|err| self.auto_tag.set_error(err)) else {
+            return Task::none();
         };
         let Some(status) = self.auto_tag.path_status.filter(|status| !status.is_complete()) else {
             self.auto_tag.set_error(AUTO_TAG_ALREADY_COMPLETE);
@@ -203,25 +188,21 @@ impl App {
         // A missing or outdated Tundra instrument needs a fresh detection;
         // re-stamping the old label would mark it current without checking.
         let instrument = if status.allows_instrument_work() {
-            match &self.auto_tag.result {
-                Some(result) => result.instrument.clone(),
-                None => {
-                    self.auto_tag.set_error("Detect an instrument before applying tags.");
-                    return Task::none();
-                }
-            }
+            let Some(result) = &self.auto_tag.result else {
+                self.auto_tag.set_error("Detect an instrument before applying tags.");
+                return Task::none();
+            };
+            result.instrument.clone()
         } else {
             instrument_tag(&path).unwrap_or_default()
         };
         self.auto_tag.applying = true;
         self.auto_tag.clear_error();
         let (write_path, write_instrument) = (path.clone(), instrument.clone());
-        Task::perform(
-            run_blocking(move || write_auto_tags(&write_path, &write_instrument)),
-            move |result| {
-                let result = result.unwrap_or_else(|()| Err("Applying tags stopped unexpectedly.".into()));
-                AutoTagMsg::Applied(path.clone(), instrument.clone(), result).into()
-            },
+        background(
+            move || write_auto_tags(&write_path, &write_instrument),
+            || Err("Applying tags stopped unexpectedly.".into()),
+            move |result| AutoTagMsg::Applied(path, instrument, result).into(),
         )
     }
 
@@ -232,9 +213,9 @@ impl App {
             let state = &mut self.auto_tag;
             state.applying = false;
             state.refresh_from_disk();
+            state.applied = result.is_ok();
             match result {
                 Ok(written) => {
-                    state.applied = true;
                     state.result = None;
                     state.status = match (written, instrument.is_empty()) {
                         (false, _) => AUTO_TAG_ALREADY_COMPLETE.into(),
@@ -242,27 +223,21 @@ impl App {
                         (true, false) => format!("Applied tags (instrument: {instrument})."),
                     };
                 }
-                Err(err) => {
-                    state.applied = false;
-                    state.set_error(err);
-                }
+                Err(err) => state.set_error(err),
             }
         }
-        if changed {
-            self.refresh_search_if_active()
-        } else {
-            Task::none()
-        }
+        self.tags_written(changed)
     }
 
     pub(super) fn update_tag_editor(&mut self, message: TagEditorMsg) -> Task<Message> {
         match message {
+            // Reopening a file whose save is still running shows that save rather
+            // than reloading tags it is about to replace.
+            TagEditorMsg::OpenFor(path) if self.tag_editor.saving && self.tag_editor.target.as_ref() == Some(&path) => {
+                self.modal = Modal::TagEditor;
+            }
             TagEditorMsg::OpenFor(path) => {
-                // Reopening a file whose save is still running shows that save rather
-                // than reloading tags it is about to replace.
-                if self.tag_editor.saving && self.tag_editor.target.as_ref() == Some(&path) {
-                    self.modal = Modal::TagEditor;
-                } else if self.open_modal(Modal::TagEditor) {
+                if self.open_modal(Modal::TagEditor) {
                     self.tag_editor = match self.allowed_audio_error(&path) {
                         Some(err) => {
                             let mut state = TagEditorState::default();
@@ -272,37 +247,27 @@ impl App {
                         None => TagEditorState::for_path(path.clone(), &self.metadata_cache.tag_fields_for(&path)),
                     };
                 }
-                Task::none()
             }
             TagEditorMsg::Close => {
                 self.modal = Modal::None;
                 if !self.tag_editor.saving {
                     self.tag_editor = TagEditorState::default();
                 }
-                Task::none()
             }
-            TagEditorMsg::Input(field, value) => {
-                self.tag_editor.set_field(field, value);
-                Task::none()
-            }
+            TagEditorMsg::Input(field, value) => self.tag_editor.set_field(field, value),
             TagEditorMsg::Save => {
-                let path = match self.tag_target(self.tag_editor.target.as_ref()) {
-                    Ok(path) => path,
-                    Err(err) => {
-                        self.tag_editor.set_error(err);
-                        return Task::none();
-                    }
+                let target = self.tag_target(self.tag_editor.target.as_ref());
+                let Ok(path) = target.map_err(|err| self.tag_editor.set_error(err)) else {
+                    return Task::none();
                 };
                 let edits = self.tag_editor.edits.clone();
                 self.tag_editor.begin_save();
                 let write_path = path.clone();
-                Task::perform(
-                    run_blocking(move || write_manual_tags(&write_path, &edits)),
-                    move |result| {
-                        let result = result.unwrap_or_else(|()| Err("Saving stopped unexpectedly.".into()));
-                        TagEditorMsg::Saved(path.clone(), result).into()
-                    },
-                )
+                return background(
+                    move || write_manual_tags(&write_path, &edits),
+                    || Err("Saving stopped unexpectedly.".into()),
+                    move |result| TagEditorMsg::Saved(path, result).into(),
+                );
             }
             TagEditorMsg::Saved(path, result) => {
                 // The file may have changed even if the editor moved on.
@@ -310,12 +275,9 @@ impl App {
                 if self.tag_editor.target.as_ref() == Some(&path) {
                     self.tag_editor.finish_save(result);
                 }
-                if changed {
-                    self.refresh_search_if_active()
-                } else {
-                    Task::none()
-                }
+                return self.tags_written(changed);
             }
         }
+        Task::none()
     }
 }

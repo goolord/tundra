@@ -35,29 +35,22 @@ fn global_event(event: Event, status: event::Status, _window: window::Id) -> Opt
 
 impl App {
     pub fn subscription(&self) -> Subscription<Message> {
-        let mut subscriptions = vec![
+        let waveform = self.player.waveform.as_ref();
+        let springing =
+            waveform.is_some_and(|waveform| waveform.view_state().overscroll_active() && !waveform.pan_active());
+        let (dragging, bulk_running) = (self.native_drag.is_active(), self.bulk_auto_tag.job.is_some());
+        let timers = [
+            // The waveform animates its own playhead; this only refreshes the time label.
+            (waveform.is_some() && self.player.is_playing()).then(|| every(250).map(|()| Message::PlaybackTick)),
+            dragging.then(|| every(16).map(|()| Message::FileDragTick)),
+            springing.then(|| every(16).map(|()| WaveformMsg::SpringTick.into())),
+            bulk_running.then(|| every(100).map(|()| BulkAutoTagMsg::ProgressTick.into())),
+        ];
+        let events = [
             event::listen_with(global_event),
             window::close_requests().map(|_| Message::Quit),
             window::resize_events().map(|_| WindowMsg::SyncMaximized.into()),
         ];
-        // The waveform animates its own playhead; this only refreshes the time label.
-        if self.player.waveform.is_some() && self.player.is_playing() {
-            subscriptions.push(every(250).map(|()| Message::PlaybackTick));
-        }
-        if self.native_drag.is_active() {
-            subscriptions.push(every(16).map(|()| Message::FileDragTick));
-        }
-        if self
-            .player
-            .waveform
-            .as_ref()
-            .is_some_and(|waveform| waveform.view_state().overscroll_active() && !waveform.pan_active())
-        {
-            subscriptions.push(every(16).map(|()| WaveformMsg::SpringTick.into()));
-        }
-        if self.bulk_auto_tag.job.is_some() {
-            subscriptions.push(every(100).map(|()| BulkAutoTagMsg::ProgressTick.into()));
-        }
-        Subscription::batch(subscriptions)
+        Subscription::batch(events.into_iter().chain(timers.into_iter().flatten()))
     }
 }

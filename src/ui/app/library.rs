@@ -27,19 +27,14 @@ fn focus(id: &'static str) -> Task<Message> {
 }
 
 impl App {
-    pub(super) fn select_file_row(&mut self, index: usize, shift: bool, control: bool) -> Task<Message> {
+    pub(super) fn select_file_row(&mut self, index: usize) -> Task<Message> {
+        let (shift, control) = self.click_modifiers();
         self.file_selector.filter_focus = FilterFocus::None;
         self.file_list_focused = true;
         self.file_selector.select_row(index, shift, control);
-        if shift || control {
-            return Task::none();
-        }
         match self.file_selector.file_list.get(index) {
-            Some(entry) => {
-                let path = entry.file_path.clone();
-                self.open_path(&path)
-            }
-            None => Task::none(),
+            Some(entry) if !shift && !control => self.open_path(&entry.file_path.clone()),
+            _ => Task::none(),
         }
     }
 
@@ -200,16 +195,7 @@ impl App {
         }
         self.favorites.toggle(path);
         self.favorites.persist();
-        self.refresh_after_favorites_change()
-    }
-
-    fn refresh_after_favorites_change(&mut self) -> Task<Message> {
-        if self.file_selector.search_active() {
-            self.start_file_search()
-        } else {
-            self.reset_file_list();
-            Task::none()
-        }
+        self.start_file_search()
     }
 
     /// Walk `dir` on a background thread unless a walk of it is already running.
@@ -336,7 +322,7 @@ impl App {
         self.search_abort = abort;
         Task::perform(
             Abortable::new(execute_file_search(request), registration),
-            move |result| FilterMsg::SearchCompleted { generation, result }.into(),
+            move |result| FilterMsg::SearchCompleted(generation, result).into(),
         )
     }
 
@@ -380,9 +366,9 @@ impl App {
             }
             FilterMsg::ToggleFavoritesOnly => {
                 self.file_selector.favorites_only = !self.file_selector.favorites_only;
-                self.refresh_after_favorites_change()
+                self.start_file_search()
             }
-            FilterMsg::SearchCompleted { generation, result } => {
+            FilterMsg::SearchCompleted(generation, result) => {
                 if generation == self.search_generation
                     && self.search_enabled()
                     && self.file_selector.search_active()
@@ -437,13 +423,10 @@ impl App {
                 self.start_file_search()
             };
         }
-        if !input.contains(':') && tag_field_best_match(&input).is_some() {
-            return self.autocomplete_tag_field();
-        }
-        let parsed = if input.contains(':') {
-            parse_tag_filter(&input)
-        } else {
-            Err(TagParseError::UnknownField)
+        let parsed = match (input.contains(':'), tag_field_best_match(&input)) {
+            (true, _) => parse_tag_filter(&input),
+            (false, Some(_)) => return self.autocomplete_tag_field(),
+            (false, None) => Err(TagParseError::UnknownField),
         };
         match parsed {
             Ok(filter) => {

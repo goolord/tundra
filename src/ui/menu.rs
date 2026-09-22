@@ -5,24 +5,23 @@ use super::style;
 use super::widgets::spacer;
 use iced::widget::{button, container, mouse_area, row, stack, text};
 use iced::{Alignment, Border, Color, Element, Length, Padding, Shadow, Theme, alignment};
-use iced_aw::menu::{self, Menu};
+use iced_aw::menu::{self, Item, Menu, MenuBar};
 use iced_aw::style::Status;
-use iced_aw::{menu_bar, menu_items};
 
 const TITLE_BAR_HEIGHT: f32 = 24.0;
 const WINDOW_BUTTON_WIDTH: f32 = 28.0;
 const MENU_DROPDOWN_PADDING: f32 = 4.0;
 
 pub fn window_title(active_file: Option<&str>) -> String {
-    match active_file {
-        Some(name) => format!("Tundra - {name}"),
-        None => "Tundra".into(),
-    }
+    active_file.map_or_else(|| "Tundra".into(), |name| format!("Tundra - {name}"))
 }
 
 pub fn title_bar(always_on_top: bool, active_file: Option<&str>) -> Element<'static, Message> {
     let fill = |content: Element<'static, Message>| container(content).width(Length::Fill).height(Length::Fill);
-    let blank_drag_area = || drag_area(spacer(Length::Fill, Length::Fill));
+    // Blank space behind the menus and window buttons still drags the window.
+    let over_drag_area = |content: Element<'static, Message>| {
+        fill(stack![drag_area(spacer(Length::Fill, Length::Fill)), content].into()).width(Length::FillPortion(1))
+    };
     let title = text(window_title(active_file))
         .size(11)
         .style(style::faded_text(0.55))
@@ -32,16 +31,9 @@ pub fn title_bar(always_on_top: bool, active_file: Option<&str>) -> Element<'sta
 
     container(
         row![
-            fill(stack![blank_drag_area(), fill(menu_bar_widget(always_on_top))].into()).width(Length::FillPortion(1)),
+            over_drag_area(fill(menu_bar_widget(always_on_top)).into()),
             fill(drag_area(fill(title.into()).align_y(Alignment::Center))).width(Length::FillPortion(2)),
-            fill(
-                stack![
-                    blank_drag_area(),
-                    fill(window_controls()).align_x(alignment::Horizontal::Right)
-                ]
-                .into()
-            )
-            .width(Length::FillPortion(1)),
+            over_drag_area(fill(window_controls()).align_x(alignment::Horizontal::Right).into()),
         ]
         .align_y(Alignment::Center)
         .width(Length::Fill)
@@ -90,12 +82,9 @@ fn window_button(label: &'static str, message: Message, close: bool) -> Element<
     .padding(Padding::ZERO)
     .on_press(message)
     .style(move |theme, status| {
-        let base = button::Style {
-            text_color: style::text_alpha(theme, 0.82),
-            ..button::Style::default()
-        };
+        let text_color = style::text_alpha(theme, 0.82);
         if !close {
-            return base.with_background(ghost_hover_fill(theme, status));
+            return style::solid_button(text_color, Border::default(), ghost_hover_fill(theme, status));
         }
         let red = style::by_status(
             status,
@@ -104,11 +93,11 @@ fn window_button(label: &'static str, message: Message, close: bool) -> Element<
             Color::from_rgb8(0x9a, 0x1f, 0x12),
         );
         let text_color = if red == Color::TRANSPARENT {
-            base.text_color
+            text_color
         } else {
             Color::WHITE
         };
-        button::Style { text_color, ..base }.with_background(red)
+        style::solid_button(text_color, Border::default(), red)
     })
     .into()
 }
@@ -123,41 +112,47 @@ fn ghost_hover_fill(theme: &Theme, status: button::Status) -> Color {
 }
 
 fn menu_bar_widget(always_on_top: bool) -> Element<'static, Message> {
-    let menu_tpl = |items| {
-        Menu::new(items)
+    let menu = |label: &'static str, items: Vec<button::Button<'static, Message>>| {
+        let items = Menu::new(items.into_iter().map(Item::new).collect())
             .width(220.0)
             .max_width(260.0)
             .padding(Padding::from([MENU_DROPDOWN_PADDING, 6.0]))
             .offset(MENU_DROPDOWN_PADDING)
-            .spacing(2.0)
+            .spacing(2.0);
+        Item::with_menu(menu_root(label), items)
     };
+    let file = [
+        ("Open File…", Message::OpenFile),
+        ("Open Folder…", Message::OpenFolder),
+        ("Go to Home", Message::GoHome),
+        ("Refresh", Message::RefreshDirectory),
+        ("Settings…", SettingsMsg::Open.into()),
+        ("Auto Tag (untagged)…", AutoTagMsg::Open.into()),
+        ("Bulk Auto Tag…", BulkAutoTagMsg::Open.into()),
+        ("Invalidate Cache", Message::InvalidateDircache),
+        ("Quit", Message::Quit),
+    ];
+    let on_top_mark = text(if always_on_top { "✓" } else { " " })
+        .size(13)
+        .width(Length::Fixed(12.0))
+        .align_x(alignment::Horizontal::Center);
+    let on_top = menu_button(
+        row![on_top_mark, text("Always On Top").size(13).width(Length::Fill)]
+            .spacing(6)
+            .align_y(Alignment::Center),
+        Message::SetAlwaysOnTop(!always_on_top),
+    );
 
-    menu_bar!(
-        (
-            menu_root("File"),
-            menu_tpl(menu_items!(
-                (menu_item("Open File…", Message::OpenFile)),
-                (menu_item("Open Folder…", Message::OpenFolder)),
-                (menu_item("Go to Home", Message::GoHome)),
-                (menu_item("Refresh", Message::RefreshDirectory)),
-                (menu_item("Settings…", SettingsMsg::Open.into())),
-                (menu_item("Auto Tag (untagged)…", AutoTagMsg::Open.into())),
-                (menu_item("Bulk Auto Tag…", BulkAutoTagMsg::Open.into())),
-                (menu_item("Invalidate Cache", Message::InvalidateDircache)),
-                (menu_item("Quit", Message::Quit)),
-            ))
+    MenuBar::new(vec![
+        menu(
+            "File",
+            file.into_iter()
+                .map(|(label, message)| menu_item(label, message))
+                .collect(),
         ),
-        (
-            menu_root("View"),
-            menu_tpl(menu_items!(
-                (menu_toggle_item("Always On Top", always_on_top, Message::SetAlwaysOnTop(!always_on_top))),
-            ))
-        ),
-        (
-            menu_root("Help"),
-            menu_tpl(menu_items!((menu_item("About Tundra", Message::About)),))
-        ),
-    )
+        menu("View", vec![on_top]),
+        menu("Help", vec![menu_item("About Tundra", Message::About)]),
+    ])
     .height(Length::Fill)
     .padding(Padding::from([0.0, 2.0]))
     .spacing(0.0)
@@ -182,20 +177,11 @@ fn menu_bar_style(theme: &Theme, _status: Status) -> iced_aw::style::menu_bar::S
 }
 
 fn flat_button_style(theme: &Theme, status: button::Status) -> button::Style {
-    button::Style {
-        text_color: theme.extended_palette().background.base.text,
-        ..button::Style::default()
-    }
-    .with_background(ghost_hover_fill(theme, status))
-}
-
-fn menu_toggle_item(label: &'static str, checked: bool, message: Message) -> button::Button<'static, Message> {
-    let mark = text(if checked { "✓" } else { " " })
-        .size(13)
-        .width(Length::Fixed(12.0))
-        .align_x(alignment::Horizontal::Center);
-    let label = text(label).size(13).width(Length::Fill);
-    menu_button(row![mark, label].spacing(6).align_y(Alignment::Center), message)
+    style::solid_button(
+        theme.extended_palette().background.base.text,
+        Border::default(),
+        ghost_hover_fill(theme, status),
+    )
 }
 
 fn menu_item(label: &'static str, message: Message) -> button::Button<'static, Message> {
