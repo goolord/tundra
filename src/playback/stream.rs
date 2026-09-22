@@ -8,10 +8,18 @@ use rodio::{Decoder, Source};
 
 use super::position::PlaybackPosition;
 
+/// Opens `path` for decoding, checking it has a usable channel count and sample rate.
 fn open_decoder(path: &Path) -> Result<Decoder<BufReader<File>>, String> {
-    let file =
-        File::open(path).map_err(|err| format!("Cannot open {}: {err}", crate::path_util::display_path(path)))?;
-    Decoder::try_from(file).map_err(|err| format!("Cannot decode {}: {err}", crate::path_util::display_path(path)))
+    let display = crate::path_util::display_path(path);
+    let file = File::open(path).map_err(|err| format!("Cannot open {display}: {err}"))?;
+    let decoder = Decoder::try_from(file).map_err(|err| format!("Cannot decode {display}: {err}"))?;
+    if decoder.channels() == 0 {
+        return Err("Audio file has no channels".into());
+    }
+    if decoder.sample_rate() == 0 {
+        return Err("Audio file has an invalid sample rate".into());
+    }
+    Ok(decoder)
 }
 
 pub struct StreamInfo {
@@ -22,12 +30,6 @@ pub struct StreamInfo {
 pub fn probe_decoder(path: &Path) -> Result<StreamInfo, String> {
     let decoder = open_decoder(path)?;
     let sample_rate = decoder.sample_rate();
-    if decoder.channels() == 0 {
-        return Err("Audio file has no channels".into());
-    }
-    if sample_rate == 0 {
-        return Err("Audio file has an invalid sample rate".into());
-    }
     let total_frames = decoder.total_duration().map_or(0, |duration| frames_from_duration(duration, sample_rate));
     Ok(StreamInfo { sample_rate, total_frames })
 }
@@ -36,29 +38,30 @@ fn frames_from_duration(duration: Duration, sample_rate: u32) -> u64 {
     (duration.as_secs_f64() * f64::from(sample_rate)).round().max(0.0) as u64
 }
 
-/// A decoded file that keeps the shared playhead at the frame it is playing.
+/// A decoded file that keeps the shared playhead at the frame it is playing, and calls
+/// `on_end` when it runs out. Dropping it first (with its sink) means `on_end` never runs.
 pub struct StreamSource {
     decoder: Decoder<BufReader<File>>,
     channels: usize,
-    sample_rate: u32,
     /// Where the decoder was seeked to. `sample_index` counts from this source's first sample,
     /// so reported frames have to be biased by it or a seeked stream reports itself as playing
     /// from the top of the file.
     start_frame: u64,
     sample_index: usize,
     position: Arc<PlaybackPosition>,
+    on_end: Option<Box<dyn FnOnce() + Send>>,
 }
 
 impl StreamSource {
     /// Opens `path` at `progress` (0 to 1) of the track.
-    pub fn open(path: &Path, progress: f64, position: Arc<PlaybackPosition>) -> Result<Self, String> {
+    pub fn open(
+        path: &Path,
+        progress: f64,
+        position: Arc<PlaybackPosition>,
+        on_end: Box<dyn FnOnce() + Send>,
+    ) -> Result<Self, String> {
         let mut decoder = open_decoder(path)?;
-        let channels = decoder.channels() as usize;
-        let sample_rate = decoder.sample_rate();
-        if channels == 0 || sample_rate == 0 {
-            return Err(format!("{} has invalid audio layout", crate::path_util::display_path(path)));
-        }
-
+        let (channels, sample_rate) = (decoder.channels() as usize, decoder.sample_rate());
         let progress = progress.clamp(0.0, 1.0);
         let total_frames = position.total_frames();
         let target = match decoder.total_duration() {
@@ -75,7 +78,7 @@ impl StreamSource {
         };
         position.set_frame(start_frame);
 
-        Ok(Self { decoder, channels, sample_rate, start_frame, sample_index: 0, position })
+        Ok(Self { decoder, channels, start_frame, sample_index: 0, position, on_end: Some(on_end) })
     }
 }
 
@@ -83,7 +86,12 @@ impl Iterator for StreamSource {
     type Item = f32;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let sample = self.decoder.next()?;
+        let Some(sample) = self.decoder.next() else {
+            if let Some(on_end) = self.on_end.take() {
+                on_end();
+            }
+            return None;
+        };
         if self.sample_index.is_multiple_of(self.channels) {
             let frame = self.start_frame + (self.sample_index / self.channels) as u64;
             self.position.set_frame(frame);
@@ -103,7 +111,7 @@ impl Source for StreamSource {
     }
 
     fn sample_rate(&self) -> u32 {
-        self.sample_rate
+        self.decoder.sample_rate()
     }
 
     fn total_duration(&self) -> Option<Duration> {
@@ -132,7 +140,8 @@ mod tests {
     fn seeked_stream_reports_frames_from_the_seek_point() {
         let info = probe_decoder(&asset("wav")).expect("probe tone.wav");
         let position = PlaybackPosition::new(info.total_frames);
-        let mut source = StreamSource::open(&asset("wav"), 0.5, Arc::clone(&position)).expect("open seeked stream");
+        let mut source =
+            StreamSource::open(&asset("wav"), 0.5, Arc::clone(&position), Box::new(|| ())).expect("open seeked stream");
         assert!(source.start_frame > 0, "test needs a decoder that can actually seek");
 
         // Pulling samples must advance from the seek point, not replay the file's frame

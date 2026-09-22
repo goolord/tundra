@@ -6,11 +6,10 @@ use super::stream::StreamSource;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use rodio::buffer::SamplesBuffer;
 use rodio::source::UniformSourceIterator;
-use rodio::{OutputStream, Sink, Source};
+use rodio::{OutputStream, Sink};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 
 pub fn clamp_volume(volume: f32) -> f32 {
     if volume.is_finite() { volume.clamp(0.0, 1.0) } else { 1.0 }
@@ -34,7 +33,8 @@ pub enum PlayerCommand {
 #[derive(Debug, Clone)]
 pub enum PlayerEvent {
     Ended(u64),
-    WaveformPeaksReady(u64),
+    /// A track's peaks are built; the waveform only needs redrawing.
+    WaveformPeaksReady,
     DeviceUnavailable,
     FileFailed(u64, String),
 }
@@ -96,14 +96,6 @@ impl PlayerWorker {
     pub fn emit(&self, event: PlayerEvent) {
         let _ = self.events.unbounded_send(event);
     }
-
-    /// A handle with no thread behind it; commands wait in the returned receiver.
-    #[cfg(test)]
-    pub fn detached() -> (Self, UnboundedReceiver<PlayerCommand>) {
-        let (commands, command_receiver) = unbounded();
-        let (events, _) = unbounded();
-        (Self { commands, events }, command_receiver)
-    }
 }
 
 /// The loaded track on the audio thread.
@@ -155,7 +147,10 @@ impl AudioWorker {
         if channels > 0 && sample_rate > 0 {
             sink.append(SamplesBuffer::new(channels, sample_rate, vec![0.0; usize::from(channels)]));
         }
-        match StreamSource::open(&track.path, self.offset, Arc::clone(&track.position)) {
+        self.segment += 1;
+        let (id, segment, handle) = (track.id, self.segment, self.handle.clone());
+        let on_end = Box::new(move || handle.send(PlayerCommand::Ended(id, segment)));
+        match StreamSource::open(&track.path, self.offset, Arc::clone(&track.position), on_end) {
             Ok(source) => sink.append(UniformSourceIterator::new(source, channels, sample_rate)),
             Err(err) => {
                 self.set_playing(false);
@@ -163,13 +158,6 @@ impl AudioWorker {
                 return;
             }
         }
-
-        self.segment += 1;
-        let (id, segment, handle) = (track.id, self.segment, self.handle.clone());
-        sink.append(Callback {
-            callback: Box::new(move || handle.send(PlayerCommand::Ended(id, segment))),
-            sample_rate,
-        });
         self.sink = Some(sink);
         self.set_playing(play);
     }
@@ -177,7 +165,6 @@ impl AudioWorker {
     fn run_command(&mut self, command: PlayerCommand) {
         match command {
             PlayerCommand::Load(path, position, id) => {
-                position.reset();
                 self.track = Some(Track { path, position, id });
                 self.start(0.0, false);
             }
@@ -207,22 +194,16 @@ impl AudioWorker {
                 self.sink = None;
                 self.offset = 0.0;
                 if let Some(track) = &self.track {
-                    track.position.reset();
+                    track.position.set_frame(0);
                 }
                 self.set_playing(false);
             }
-            PlayerCommand::Seek(progress, resume) => {
-                if let Some(track) = &self.track {
-                    track.position.seek_to(progress);
-                }
-                self.start(progress, resume);
-            }
+            PlayerCommand::Seek(progress, resume) => self.start(progress, resume),
             PlayerCommand::Ended(id, segment) => {
-                let Some(track) = self.track.as_ref().filter(|track| track.id == id && segment == self.segment) else {
+                if segment != self.segment || self.track.as_ref().is_none_or(|track| track.id != id) {
                     return;
-                };
+                }
                 if self.looping.load(Ordering::Acquire) {
-                    track.position.reset();
                     self.start(0.0, true);
                 } else {
                     self.sink = None;
@@ -237,42 +218,6 @@ impl AudioWorker {
                 }
             }
         }
-    }
-}
-
-/// A silent, empty source that runs `callback` when the sink reaches it.
-///
-/// rodio's `EmptyCallback` reports a fixed sample rate; this one reports the
-/// output device's, so the sink's queue never switches rates for it.
-struct Callback {
-    callback: Box<dyn Send + Fn()>,
-    sample_rate: u32,
-}
-
-impl Iterator for Callback {
-    type Item = f32;
-
-    fn next(&mut self) -> Option<f32> {
-        (self.callback)();
-        None
-    }
-}
-
-impl Source for Callback {
-    fn current_span_len(&self) -> Option<usize> {
-        None
-    }
-
-    fn channels(&self) -> u16 {
-        1
-    }
-
-    fn sample_rate(&self) -> u32 {
-        self.sample_rate
-    }
-
-    fn total_duration(&self) -> Option<Duration> {
-        Some(Duration::ZERO)
     }
 }
 

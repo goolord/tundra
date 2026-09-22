@@ -116,23 +116,23 @@ fn decode_peaks(path: &Path, sample_count: Option<usize>, cancelled: &dyn Fn() -
     })
 }
 
-/// Build peaks on a background thread. `cancelled` is polled while decoding so
-/// skipping through files does not stack up full decodes of each one.
+/// Build peaks on a background thread, then store them and call `on_complete` with them.
+/// `cancelled` is polled while decoding so skipping through files does not stack up full
+/// decodes of each one.
 pub fn spawn_peak_build(
     path: PathBuf,
     sample_count_hint: usize,
     peaks: Arc<Mutex<WaveformPeaks>>,
     cancelled: impl Fn() -> bool + Send + 'static,
-    on_complete: impl FnOnce() + Send + 'static,
+    on_complete: impl FnOnce(&WaveformPeaks) + Send + 'static,
 ) {
     std::thread::spawn(move || {
-        let Some(built) = build_peaks(&path, sample_count_hint, &cancelled) else {
-            return;
-        };
-        if let Ok(mut shared) = peaks.lock() {
+        if let Some(built) = build_peaks(&path, sample_count_hint, &cancelled)
+            && let Ok(mut shared) = peaks.lock()
+        {
             *shared = built;
+            on_complete(&shared);
         }
-        on_complete();
     });
 }
 

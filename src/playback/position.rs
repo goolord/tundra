@@ -41,10 +41,6 @@ impl PlaybackPosition {
     pub fn seek_to(&self, progress: f64) {
         self.set_frame((progress.clamp(0.0, 1.0) * self.total_frames() as f64).round() as u64);
     }
-
-    pub fn reset(&self) {
-        self.frame.store(0, Ordering::Release);
-    }
 }
 
 #[cfg(test)]

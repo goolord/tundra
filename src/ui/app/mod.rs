@@ -223,7 +223,7 @@ impl App {
             Message::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers;
                 if let Some(waveform) = &mut self.player.waveform {
-                    waveform.set_modifiers(modifiers);
+                    waveform.modifiers = modifiers;
                 }
             }
             Message::OpenPath(path) => {
@@ -334,14 +334,11 @@ impl App {
                 self.show_error("Audio output unavailable. Check your sound device.".into());
             }
             PlayerEvent::Ended(id) if self.player.is_current_track(id) => self.player.on_ended(),
-            PlayerEvent::WaveformPeaksReady(id) if self.player.is_current_track(id) => {
-                self.player.on_waveform_peaks_ready();
-            }
             PlayerEvent::FileFailed(id, err) if self.player.is_current_track(id) => {
                 self.show_error(format!("Couldn't play this file. {err}"));
             }
-            // Events for a track that has since been replaced.
-            PlayerEvent::Ended(_) | PlayerEvent::WaveformPeaksReady(_) | PlayerEvent::FileFailed(..) => {}
+            // New peaks only need the redraw every update brings; the rest are for replaced tracks.
+            PlayerEvent::Ended(_) | PlayerEvent::WaveformPeaksReady | PlayerEvent::FileFailed(..) => {}
         }
     }
 
@@ -360,13 +357,13 @@ impl App {
             WaveformMsg::ViewChanged(view) => self.edit_waveform_view(|current, _| *current = view),
             WaveformMsg::PanStarted => {
                 if let Some(waveform) = &mut self.player.waveform {
-                    waveform.set_pan_active(true);
+                    waveform.pan_active = true;
                 }
             }
             WaveformMsg::PanEnded(view) => {
                 if let Some(waveform) = &mut self.player.waveform {
-                    waveform.set_pan_active(false);
-                    waveform.set_view(view);
+                    waveform.pan_active = false;
+                    waveform.view = view;
                 }
             }
             WaveformMsg::SpringTick => self.edit_waveform_view(|view, _| {
@@ -382,9 +379,8 @@ impl App {
     /// Changes the loaded waveform's zoom and pan; `change` also gets its sample count.
     fn edit_waveform_view(&mut self, change: impl FnOnce(&mut WaveFormView, usize)) {
         if let Some(waveform) = &mut self.player.waveform {
-            let mut view = waveform.view_state();
-            change(&mut view, waveform.sample_count());
-            waveform.set_view(view);
+            let sample_count = waveform.sample_count();
+            change(&mut waveform.view, sample_count);
         }
     }
 
@@ -393,8 +389,8 @@ impl App {
         let scrubbing = progress.is_some();
         self.player.controls.scrubbing = scrubbing;
         if let Some(waveform) = &mut self.player.waveform {
-            waveform.set_ui_scrubbing(scrubbing);
-            waveform.set_scrub_progress(progress);
+            waveform.ui_scrubbing.set(scrubbing);
+            waveform.scrub_progress = progress;
         }
     }
 
