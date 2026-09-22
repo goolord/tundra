@@ -1,12 +1,10 @@
 use std::path::Path;
 
-use super::read::is_audio;
-
 use super::fields::TagFields;
 use super::hints::artist_hint_from_path;
 use super::read::{
     NativeTags, TUNDRA_TAG_VERSION, durable_instrument, file_tundra_tag_version, instrument_from_marked_comment,
-    parse_tundra_comment_version, read_native_tags, tundra_tagged_file,
+    is_audio, parse_tundra_comment_version, read_native_tags, tundra_tagged_file,
 };
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -32,7 +30,7 @@ impl AutoTagFieldStatus {
         !self.needs_any() && !self.can_retag_instrument
     }
 
-    pub fn from_parts(
+    fn from_parts(
         path: &Path,
         explicit_instrument: &str,
         native_instrument: &str,
@@ -91,13 +89,11 @@ pub fn auto_tag_field_status(path: &Path) -> Option<AutoTagFieldStatus> {
 /// instrument and whether it can hold tags.
 pub fn auto_tag_field_status_from_fields(path: &Path, fields: &TagFields) -> AutoTagFieldStatus {
     let native = read_native_tags(path);
+    let native_instrument = native.as_ref().and_then(|tags| tags.instrument.as_deref());
     AutoTagFieldStatus::from_parts(
         path,
         &fields.explicit_instrument,
-        native
-            .as_ref()
-            .and_then(|tags| tags.instrument.as_deref())
-            .unwrap_or(""),
+        native_instrument.unwrap_or_default(),
         &fields.file_artist,
         &fields.file_comment,
         native.is_some(),

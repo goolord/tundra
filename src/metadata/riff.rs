@@ -4,13 +4,15 @@
 //! model (`smpl`, `cue `, `inst`, ACID, iXML, …) survive byte-for-byte.
 
 use std::ops::Range;
+use std::path::Path;
 
 use lofty::config::WriteOptions;
 use lofty::id3::v2::Id3v2Tag;
 use lofty::tag::TagExt;
 
-use super::read::{WAV_ARTIST_KEY, WAV_COMMENT_KEY, WAV_GENRE_KEY, WAV_INSTRUMENT_KEY, WAV_TITLE_KEY};
+use super::read::{WAV_GENRE_KEY, WAV_NATIVE_KEYS, WAV_TITLE_KEY};
 use super::write::{TagEdit, apply_id3_edit};
+use crate::path_util::path_io_error;
 
 pub(crate) type ChunkId = [u8; 4];
 
@@ -38,9 +40,12 @@ impl Endian {
 
 pub(crate) type Chunks = Vec<(ChunkId, Vec<u8>)>;
 
-/// Chunks in `bytes` in order, each as its id and body range. Yields `Err(id)`
+/// Chunks in `bytes` in order, each as its id and body range. Yields an error
 /// for a chunk whose size runs past the end, and nothing after it.
-fn scan_chunks(bytes: &[u8], endian: Endian) -> impl Iterator<Item = Result<(ChunkId, Range<usize>), ChunkId>> + '_ {
+pub(crate) fn scan_chunks(
+    bytes: &[u8],
+    endian: Endian,
+) -> impl Iterator<Item = Result<(ChunkId, Range<usize>), String>> + '_ {
     let mut offset = Some(0usize);
     std::iter::from_fn(move || {
         let at = offset.filter(|at| at + 8 <= bytes.len())?;
@@ -49,7 +54,7 @@ fn scan_chunks(bytes: &[u8], endian: Endian) -> impl Iterator<Item = Result<(Chu
         let start = at + 8;
         let Some(end) = start.checked_add(size).filter(|end| *end <= bytes.len()) else {
             offset = None;
-            return Some(Err(id));
+            return Some(Err(format!("Truncated {} chunk", String::from_utf8_lossy(&id))));
         };
         // Odd-sized chunks are followed by a pad byte.
         offset = Some(end + size % 2);
@@ -57,28 +62,21 @@ fn scan_chunks(bytes: &[u8], endian: Endian) -> impl Iterator<Item = Result<(Chu
     })
 }
 
-/// Chunk ids and body ranges inside `bytes`, which start right after a 12-byte
-/// form header. Fails rather than guessing on a size that runs past the end, so
-/// a damaged file is never rewritten.
-pub(crate) fn chunk_ranges(bytes: &[u8], endian: Endian) -> Result<Vec<(ChunkId, Range<usize>)>, String> {
-    let chunks: Vec<_> = scan_chunks(bytes, endian)
-        .collect::<Result<_, _>>()
-        .map_err(|id| format!("Truncated {} chunk", String::from_utf8_lossy(&id)))?;
-    let end = chunks.last().map_or(0, |(_, range)| range.end + range.len() % 2);
-    if bytes.get(end..).is_some_and(|rest| rest.iter().any(|byte| *byte != 0)) {
-        return Err("Unexpected trailing bytes after the last chunk".into());
-    }
-    Ok(chunks)
-}
-
-/// The form type and chunks of an IFF file starting with `magic` (`RIFF` or `FORM`).
+/// The form type and chunks of an IFF file starting with `magic` (`RIFF` or
+/// `FORM`). Fails rather than guessing on a size that runs past the end or on
+/// trailing data, so a damaged file is never rewritten.
 fn parse_form(bytes: &[u8], magic: &[u8; 4], endian: Endian) -> Result<(ChunkId, Chunks), String> {
     if bytes.len() < 12 || &bytes[0..4] != magic {
         return Err(format!("Not a {} file", String::from_utf8_lossy(magic)));
     }
     let form_type: ChunkId = bytes[8..12].try_into().expect("4-byte slice");
     let body = &bytes[12..];
-    let chunks = chunk_ranges(body, endian)?
+    let ranges: Vec<_> = scan_chunks(body, endian).collect::<Result<_, _>>()?;
+    let end = ranges.last().map_or(0, |(_, range)| range.end + range.len() % 2);
+    if body.get(end..).is_some_and(|rest| rest.iter().any(|byte| *byte != 0)) {
+        return Err("Unexpected trailing bytes after the last chunk".into());
+    }
+    let chunks = ranges
         .into_iter()
         .map(|(id, range)| (id, body[range].to_vec()))
         .collect();
@@ -143,17 +141,15 @@ fn info_field_id(key: &str) -> ChunkId {
     id
 }
 
-type InfoFields = Chunks;
-
 /// The fields of a `LIST INFO` body, keeping whatever parsed before any damage.
-fn parse_info_fields(bytes: &[u8]) -> InfoFields {
+fn parse_info_fields(bytes: &[u8]) -> Chunks {
     scan_chunks(bytes, Endian::Little)
         .map_while(Result::ok)
         .map(|(id, range)| (id, bytes[range].to_vec()))
         .collect()
 }
 
-fn set_info_field(fields: &mut InfoFields, key: &str, value: &str) {
+fn set_info_field(fields: &mut Chunks, key: &str, value: &str) {
     let id = info_field_id(key);
     let value = value.trim();
     if value.is_empty() {
@@ -168,27 +164,9 @@ fn set_info_field(fields: &mut InfoFields, key: &str, value: &str) {
     }
 }
 
-fn apply_info_edit(fields: &mut InfoFields, edit: &TagEdit) {
-    for (key, value) in [
-        (WAV_INSTRUMENT_KEY, &edit.native.instrument),
-        (WAV_ARTIST_KEY, &edit.native.artist),
-        (WAV_COMMENT_KEY, &edit.native.comment),
-    ] {
-        if let Some(value) = value {
-            set_info_field(fields, key, value);
-        }
-    }
-    if let Some(manual) = edit.manual {
-        set_info_field(fields, WAV_TITLE_KEY, &manual.title);
-        set_info_field(fields, WAV_GENRE_KEY, &manual.genre);
-    }
-}
-
 /// Replace `LIST INFO` (and the `id3 ` chunk when BPM/key or an existing ID3
 /// tag need it) in the WAV at `path`, keeping every other chunk as-is.
-pub(crate) fn write_wav_tags(path: &std::path::Path, edit: &TagEdit) -> Result<(), String> {
-    use crate::path_util::path_io_error;
-
+pub(crate) fn write_wav_tags(path: &Path, edit: &TagEdit) -> Result<(), String> {
     let bytes = std::fs::read(path).map_err(|err| path_io_error("read", path, err))?;
     let mut chunks = parse_riff_wave_chunks(&bytes)?;
 
@@ -196,7 +174,9 @@ pub(crate) fn write_wav_tags(path: &std::path::Path, edit: &TagEdit) -> Result<(
     let mut fields = info_index
         .map(|index| parse_info_fields(&chunks[index].1[4..]))
         .unwrap_or_default();
-    apply_info_edit(&mut fields, edit);
+    for (key, value) in edit.keyed(WAV_NATIVE_KEYS, &[WAV_TITLE_KEY, WAV_GENRE_KEY]) {
+        set_info_field(&mut fields, key, value);
+    }
     let info = (!fields.is_empty()).then(|| {
         let mut body = Vec::from(*b"INFO");
         encode_chunks(&fields, Endian::Little, &mut body);
@@ -233,14 +213,11 @@ pub(crate) fn write_wav_tags(path: &std::path::Path, edit: &TagEdit) -> Result<(
     std::fs::write(path, encode_riff_wave(&chunks)).map_err(|err| path_io_error("write tags to", path, err))
 }
 
-fn replace_chunk(chunks: &mut Vec<(ChunkId, Vec<u8>)>, index: Option<usize>, chunk: Option<(ChunkId, Vec<u8>)>) {
+fn replace_chunk(chunks: &mut Chunks, index: Option<usize>, chunk: Option<(ChunkId, Vec<u8>)>) {
     match (index, chunk) {
         (Some(index), Some(chunk)) => chunks[index] = chunk,
-        (Some(index), None) => {
-            chunks.remove(index);
-        }
-        (None, Some(chunk)) => chunks.push(chunk),
-        (None, None) => {}
+        (Some(index), None) => drop(chunks.remove(index)),
+        (None, chunk) => chunks.extend(chunk),
     }
 }
 
@@ -258,9 +235,7 @@ fn read_wav_id3(bytes: &[u8]) -> Result<Id3v2Tag, String> {
 /// Move tag chunks ahead of `SSND`. Chunk order is free in AIFF, but some
 /// decoders (symphonia included) read sound data to end of file, so tags
 /// appended after `SSND` play as a click.
-pub(crate) fn move_aiff_tags_before_sound(path: &std::path::Path) -> Result<(), String> {
-    use crate::path_util::path_io_error;
-
+pub(crate) fn move_aiff_tags_before_sound(path: &Path) -> Result<(), String> {
     let bytes = std::fs::read(path).map_err(|err| path_io_error("read", path, err))?;
     let (form_type, chunks) = parse_form(&bytes, b"FORM", Endian::Big)?;
     let Some(sound) = chunks.iter().position(|(id, _)| id == b"SSND") else {

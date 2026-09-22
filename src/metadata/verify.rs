@@ -6,7 +6,7 @@ use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use super::read::{Container, generic_tag_fields, read_container_tags_as};
-use super::riff::{Endian, is_aiff_tag_chunk, is_wav_tag_chunk};
+use super::riff::{ChunkId, Endian, is_aiff_tag_chunk, is_wav_tag_chunk, scan_chunks};
 use super::write::TagEdit;
 
 pub(crate) fn verify_staged_write(
@@ -27,49 +27,42 @@ pub(crate) fn verify_staged_write(
 }
 
 fn verify_read_back(original: &Path, staged: &Path, container: Container, edit: &TagEdit) -> Result<(), String> {
-    let tags = read_container_tags_as(staged, container).ok_or_else(|| {
-        format!(
-            "Refused to save tags to {}: the tagged copy could not be read back",
-            original.display()
-        )
-    })?;
+    let refuse = |why: &str| format!("Refused to save tags to {}: {why}", original.display());
+    let tags =
+        read_container_tags_as(staged, container).ok_or_else(|| refuse("the tagged copy could not be read back"))?;
     let generic = generic_tag_fields(&tags.generic);
     let native = &tags.native;
 
-    let mut expected: Vec<(&str, &str, String)> = Vec::new();
-    for (label, wanted, found) in [
+    let native_checks = [
         ("instrument", &edit.native.instrument, &native.instrument),
         ("artist", &edit.native.artist, &native.artist),
         ("comment", &edit.native.comment, &native.comment),
-    ] {
-        if let Some(wanted) = wanted {
-            expected.push((label, wanted.as_str(), found.clone().unwrap_or_default()));
-        }
-    }
-    if let Some(manual) = edit.manual {
-        for (label, wanted, found) in [
-            ("title", &manual.title, &generic.title),
-            ("genre", &manual.genre, &generic.genre),
-            ("BPM", &manual.bpm, &generic.bpm),
-            ("key", &manual.key, &generic.key),
-        ] {
-            // Clearing is best-effort: a tag type Tundra does not manage (ID3v1,
-            // APE) may still carry an old value.
-            if !wanted.trim().is_empty() {
-                expected.push((label, wanted.as_str(), found.clone()));
-            }
-        }
-    }
+    ]
+    .into_iter()
+    .filter_map(|(label, wanted, found)| Some((label, wanted.as_deref()?, found.as_deref().unwrap_or_default())));
+    // Clearing is best-effort: a tag type Tundra does not manage (ID3v1, APE)
+    // may still carry an old value.
+    let manual_checks = edit
+        .manual
+        .into_iter()
+        .flat_map(|manual| {
+            [
+                ("title", &manual.title, &generic.title),
+                ("genre", &manual.genre, &generic.genre),
+                ("BPM", &manual.bpm, &generic.bpm),
+                ("key", &manual.key, &generic.key),
+            ]
+        })
+        .filter(|(_, wanted, _)| !wanted.trim().is_empty())
+        .map(|(label, wanted, found)| (label, wanted.as_str(), found.as_str()));
 
-    for (label, wanted, found) in expected {
-        if wanted.trim() != found.trim() {
-            return Err(format!(
-                "Refused to save tags to {}: {label} did not read back as written",
-                original.display()
-            ));
-        }
+    match native_checks
+        .chain(manual_checks)
+        .find(|(_, wanted, found)| wanted.trim() != found.trim())
+    {
+        Some((label, ..)) => Err(refuse(&format!("{label} did not read back as written"))),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 /// Hash of everything in the file that is not a tag.
@@ -80,10 +73,8 @@ fn audio_fingerprint(path: &Path, container: Container) -> Result<u64, String> {
     let mut reader = BufReader::with_capacity(1 << 16, file);
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     match container {
-        Container::Wav => hash_iff(&mut reader, &mut hasher, Endian::Little, |id, head| {
-            !is_wav_tag_chunk(id, head)
-        }),
-        Container::Aiff => hash_iff(&mut reader, &mut hasher, Endian::Big, |id, _| !is_aiff_tag_chunk(id)),
+        Container::Wav => hash_iff(&mut reader, &mut hasher, Endian::Little, is_wav_tag_chunk),
+        Container::Aiff => hash_iff(&mut reader, &mut hasher, Endian::Big, |id, _| is_aiff_tag_chunk(id)),
         Container::Flac => hash_flac(&mut reader, &mut hasher),
         Container::Mp3 => hash_mpeg(&mut reader, &mut hasher, len),
         Container::Ogg => hash_ogg_properties(path, &mut hasher),
@@ -96,48 +87,42 @@ fn io_err(err: std::io::Error) -> String {
     err.to_string()
 }
 
-fn hash_range<R: Read>(reader: &mut R, hasher: &mut impl Hasher, len: u64) -> Result<(), String> {
-    let mut remaining = len;
+/// Hashes the next `len` bytes, or everything left when `len` is `None`.
+fn hash_range<R: Read>(reader: &mut R, hasher: &mut impl Hasher, len: Option<u64>) -> Result<(), String> {
+    let mut remaining = len.unwrap_or(u64::MAX);
     let mut buf = [0u8; 1 << 16];
     while remaining > 0 {
         let want = remaining.min(buf.len() as u64) as usize;
-        reader.read_exact(&mut buf[..want]).map_err(io_err)?;
-        hasher.write(&buf[..want]);
-        remaining -= want as u64;
+        let read = reader.read(&mut buf[..want]).map_err(io_err)?;
+        if read == 0 {
+            return match len {
+                Some(_) => Err("Unexpected end of file".into()),
+                None => Ok(()),
+            };
+        }
+        hasher.write(&buf[..read]);
+        remaining -= read as u64;
     }
     Ok(())
 }
 
-/// Hash every chunk `keep` accepts, streaming bodies instead of loading the
-/// file. The first four body bytes are passed to `keep` so `LIST` types can be
-/// told apart.
-fn hash_iff<R: Read + Seek>(
-    reader: &mut R,
+/// Hash every chunk that is not a tag. The tag write itself holds the whole
+/// file in memory, so reading it in here raises no peak.
+fn hash_iff(
+    reader: &mut impl Read,
     hasher: &mut impl Hasher,
     endian: Endian,
-    keep: impl Fn(&[u8; 4], &[u8]) -> bool,
+    is_tag: impl Fn(&ChunkId, &[u8]) -> bool,
 ) -> Result<(), String> {
-    let end = reader.seek(SeekFrom::End(0)).map_err(io_err)?;
-    let mut offset = 12u64;
-    while offset + 8 <= end {
-        reader.seek(SeekFrom::Start(offset)).map_err(io_err)?;
-        let mut header = [0u8; 8];
-        reader.read_exact(&mut header).map_err(io_err)?;
-        let id: [u8; 4] = header[..4].try_into().expect("4-byte slice");
-        let size = u64::from(endian.read_u32(header[4..].try_into().expect("4-byte slice")));
-        let body_start = offset + 8;
-        if body_start + size > end {
-            return Err(format!("Truncated {} chunk", String::from_utf8_lossy(&id)));
-        }
-        let head_len = size.min(4) as usize;
-        let mut head = [0u8; 4];
-        reader.read_exact(&mut head[..head_len]).map_err(io_err)?;
-        if keep(&id, &head[..head_len]) {
+    let mut bytes = Vec::new();
+    reader.read_to_end(&mut bytes).map_err(io_err)?;
+    let body = bytes.get(12..).unwrap_or_default();
+    for chunk in scan_chunks(body, endian) {
+        let (id, range) = chunk?;
+        if !is_tag(&id, &body[range.clone()]) {
             hasher.write(&id);
-            hasher.write(&head[..head_len]);
-            hash_range(reader, hasher, size - head_len as u64)?;
+            hasher.write(&body[range]);
         }
-        offset = body_start + size + size % 2;
     }
     Ok(())
 }
@@ -156,7 +141,7 @@ fn hash_flac<R: Read + Seek>(reader: &mut R, hasher: &mut impl Hasher) -> Result
         let block_type = header[0] & 0x7F;
         let len = u32::from_be_bytes([0, header[1], header[2], header[3]]) as u64;
         if block_type == 0 {
-            hash_range(reader, hasher, len)?;
+            hash_range(reader, hasher, Some(len))?;
         } else {
             reader.seek(SeekFrom::Current(len as i64)).map_err(io_err)?;
         }
@@ -164,8 +149,7 @@ fn hash_flac<R: Read + Seek>(reader: &mut R, hasher: &mut impl Hasher) -> Result
             break;
         }
     }
-    std::io::copy(reader, &mut HashWriter(hasher)).map_err(io_err)?;
-    Ok(())
+    hash_range(reader, hasher, None)
 }
 
 /// Frames between any leading ID3v2 tags and trailing APE/ID3v1 tags.
@@ -206,7 +190,7 @@ fn hash_mpeg<R: Read + Seek>(reader: &mut R, hasher: &mut impl Hasher, len: u64)
     }
 
     reader.seek(SeekFrom::Start(start)).map_err(io_err)?;
-    hash_range(reader, hasher, end.saturating_sub(start))
+    hash_range(reader, hasher, Some(end.saturating_sub(start)))
 }
 
 /// Ogg pages are renumbered when the comment header grows, so bytes cannot be
@@ -225,23 +209,10 @@ fn hash_ogg_properties(path: &Path, hasher: &mut impl Hasher) -> Result<(), Stri
     Ok(())
 }
 
-struct HashWriter<'a, H: Hasher>(&'a mut H);
-
-impl<H: Hasher> std::io::Write for HashWriter<'_, H> {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.write(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_fixtures::ScratchDir;
+    use crate::test_fixtures::{ScratchDir, copy_asset};
 
     #[test]
     fn rejects_a_copy_whose_audio_changed() {
@@ -252,12 +223,8 @@ mod tests {
             ("aiff", Container::Aiff),
         ] {
             let dir = ScratchDir::new(&format!("verify-{ext}"));
-            let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("tests/assets")
-                .join(format!("tone.{ext}"));
-            let original = dir.path().join(format!("tone.{ext}"));
+            let original = copy_asset(dir.path(), "tone", ext);
             let staged = dir.path().join(format!("staged.{ext}"));
-            std::fs::copy(&fixture, &original).expect("original");
             let mut bytes = std::fs::read(&original).expect("bytes");
             let index = bytes.len() - 64;
             bytes[index] ^= 0xFF;

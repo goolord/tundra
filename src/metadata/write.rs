@@ -19,21 +19,15 @@ use lofty::id3::v2::{Frame, FrameId, Id3v2Tag, TextInformationFrame};
 use lofty::ogg::tag::VorbisComments;
 use lofty::tag::Accessor;
 
-use super::read::is_audio;
 use crate::path_util::{FileStamp, open_file, path_io_error};
 
 use super::auto_tag::{NativeInspection, inspect_native};
 use super::fields::ManualTagEdits;
 use super::hints::artist_hint_from_path;
 use super::read::{
-    Container, ID3_INSTRUMENT_KEY, NativeTags, TUNDRA_TAG_VERSION, VORBIS_ARTIST_KEY, VORBIS_COMMENT_KEY,
-    VORBIS_INSTRUMENT_KEY, non_empty, tundra_comment, write_parse_options,
+    Container, ID3_INSTRUMENT_KEY, NativeTags, TUNDRA_TAG_VERSION, VORBIS_NATIVE_KEYS, is_audio, non_empty,
+    tundra_comment, write_parse_options,
 };
-
-const VORBIS_TITLE_KEY: &str = "TITLE";
-const VORBIS_GENRE_KEY: &str = "GENRE";
-const VORBIS_BPM_KEY: &str = "BPM";
-const VORBIS_KEY_KEY: &str = "INITIALKEY";
 
 /// One tag write.
 ///
@@ -47,8 +41,21 @@ pub(crate) struct TagEdit<'a> {
 }
 
 impl TagEdit<'_> {
-    fn is_empty(&self) -> bool {
-        self.native.is_empty() && self.manual.is_none()
+    /// `(key, value)` pairs for a tag that names instrument, artist, and comment
+    /// `native_keys`, and title, genre, BPM, key `manual_keys` (as many as it has).
+    pub(crate) fn keyed<'k>(&self, native_keys: [&'k str; 3], manual_keys: &[&'k str]) -> Vec<(&'k str, &str)> {
+        let native = [&self.native.instrument, &self.native.artist, &self.native.comment];
+        let native = native_keys.into_iter().zip(native);
+        let manual = self
+            .manual
+            .map(|edits| [&edits.title, &edits.genre, &edits.bpm, &edits.key]);
+        let manual = manual
+            .into_iter()
+            .flat_map(|values| manual_keys.iter().copied().zip(values));
+        native
+            .filter_map(|(key, value)| Some((key, value.as_deref()?)))
+            .chain(manual.map(|(key, value)| (key, value.as_str())))
+            .collect()
     }
 }
 
@@ -61,20 +68,8 @@ fn set_vorbis(vorbis: &mut VorbisComments, key: &str, value: &str) {
 }
 
 fn apply_vorbis_edit(vorbis: &mut VorbisComments, edit: &TagEdit) {
-    for (key, value) in [
-        (VORBIS_INSTRUMENT_KEY, &edit.native.instrument),
-        (VORBIS_ARTIST_KEY, &edit.native.artist),
-        (VORBIS_COMMENT_KEY, &edit.native.comment),
-    ] {
-        if let Some(value) = value {
-            set_vorbis(vorbis, key, value);
-        }
-    }
-    if let Some(manual) = edit.manual {
-        set_vorbis(vorbis, VORBIS_TITLE_KEY, &manual.title);
-        set_vorbis(vorbis, VORBIS_GENRE_KEY, &manual.genre);
-        set_vorbis(vorbis, VORBIS_BPM_KEY, &manual.bpm);
-        set_vorbis(vorbis, VORBIS_KEY_KEY, &manual.key);
+    for (key, value) in edit.keyed(VORBIS_NATIVE_KEYS, &["TITLE", "GENRE", "BPM", "INITIALKEY"]) {
+        set_vorbis(vorbis, key, value);
     }
 }
 
@@ -102,10 +97,14 @@ pub(crate) fn apply_id3_edit(id3: &mut Id3v2Tag, edit: &TagEdit) {
         id3.set_comment(comment.trim().to_string());
     }
     if let Some(manual) = edit.manual {
-        set_id3_text(id3, "TIT2", &manual.title);
-        set_id3_text(id3, "TCON", &manual.genre);
-        set_id3_text(id3, "TBPM", &manual.bpm);
-        set_id3_text(id3, "TKEY", &manual.key);
+        for (id, value) in [
+            ("TIT2", &manual.title),
+            ("TCON", &manual.genre),
+            ("TBPM", &manual.bpm),
+            ("TKEY", &manual.key),
+        ] {
+            set_id3_text(id3, id, value);
+        }
     }
 }
 
@@ -169,7 +168,7 @@ fn apply_tag_edit(staged: &Path, container: Container, edit: &TagEdit) -> Result
 
 /// Write `edit` into the file at `path` (see the module docs for the steps).
 pub(crate) fn write_tags(path: &Path, edit: &TagEdit) -> Result<(), String> {
-    if edit.is_empty() {
+    if edit.native.is_empty() && edit.manual.is_none() {
         return Ok(());
     }
     let target = write_target(path);
@@ -263,11 +262,9 @@ pub(crate) fn stage_and_replace(path: &Path, edit: impl FnOnce(&Path) -> Result<
 }
 
 fn require_audio(path: &Path) -> Result<(), String> {
-    if is_audio(path) {
-        Ok(())
-    } else {
-        Err(format!("Not an audio file: {}", path.display()))
-    }
+    is_audio(path)
+        .then_some(())
+        .ok_or_else(|| format!("Not an audio file: {}", path.display()))
 }
 
 /// Fields for the sidecar when the container refuses the write. An empty

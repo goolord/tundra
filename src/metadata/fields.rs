@@ -30,66 +30,47 @@ impl TagField {
         TagField::Label,
     ];
 
-    pub fn as_str(self) -> &'static str {
+    /// Search key and display label.
+    fn names(self) -> (&'static str, &'static str) {
         match self {
-            TagField::Title => "title",
-            TagField::Artist => "artist",
-            TagField::Album => "album",
-            TagField::Genre => "genre",
-            TagField::Comment => "comment",
-            TagField::AlbumArtist => "albumartist",
-            TagField::Composer => "composer",
-            TagField::Label => "label",
-            TagField::Bpm => "bpm",
-            TagField::Key => "key",
-            TagField::Instrument => "instrument",
+            TagField::Title => ("title", "Title"),
+            TagField::Artist => ("artist", "Artist"),
+            TagField::Album => ("album", "Album"),
+            TagField::Genre => ("genre", "Genre"),
+            TagField::Comment => ("comment", "Comment"),
+            TagField::AlbumArtist => ("albumartist", "Album artist"),
+            TagField::Composer => ("composer", "Composer"),
+            TagField::Label => ("label", "Label"),
+            TagField::Bpm => ("bpm", "BPM"),
+            TagField::Key => ("key", "Key"),
+            TagField::Instrument => ("instrument", "Instrument"),
         }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        self.names().0
     }
 
     pub fn label(self) -> &'static str {
-        match self {
-            TagField::Title => "Title",
-            TagField::Artist => "Artist",
-            TagField::Album => "Album",
-            TagField::Genre => "Genre",
-            TagField::Comment => "Comment",
-            TagField::AlbumArtist => "Album artist",
-            TagField::Composer => "Composer",
-            TagField::Label => "Label",
-            TagField::Bpm => "BPM",
-            TagField::Key => "Key",
-            TagField::Instrument => "Instrument",
-        }
+        self.names().1
     }
 
-    pub fn parse(key: &str) -> Option<Self> {
-        match key.trim().to_ascii_lowercase().as_str() {
-            "title" | "track" | "name" => Some(TagField::Title),
-            "artist" | "trackartist" => Some(TagField::Artist),
-            "album" => Some(TagField::Album),
-            "genre" => Some(TagField::Genre),
-            "comment" => Some(TagField::Comment),
-            "albumartist" | "album_artist" => Some(TagField::AlbumArtist),
-            "composer" => Some(TagField::Composer),
-            "label" => Some(TagField::Label),
-            "bpm" | "tempo" => Some(TagField::Bpm),
-            "key" | "initialkey" | "initial_key" => Some(TagField::Key),
-            "instrument" | "inst" => Some(TagField::Instrument),
-            _ => None,
-        }
+    fn parse(key: &str) -> Option<Self> {
+        let key = key.trim().to_ascii_lowercase();
+        let key = match key.as_str() {
+            "track" | "name" => "title",
+            "trackartist" => "artist",
+            "album_artist" => "albumartist",
+            "tempo" => "bpm",
+            "initialkey" | "initial_key" => "key",
+            "inst" => "instrument",
+            other => other,
+        };
+        Self::ALL.into_iter().find(|field| field.as_str() == key)
     }
 
-    fn matches_query(self, needle: &str) -> bool {
-        if needle.is_empty() {
-            return true;
-        }
-        self.match_score(needle) >= 700
-    }
-
+    /// How well `needle` (lowercase, non-empty) names this field; 700 and up is a match.
     fn match_score(self, needle: &str) -> i32 {
-        if needle.is_empty() {
-            return 0;
-        }
         let key = self.as_str();
         let label = self.label().to_ascii_lowercase();
         if key == needle {
@@ -100,10 +81,6 @@ impl TagField {
             800
         } else if label.starts_with(needle) {
             700
-        } else if key.contains(needle) {
-            400
-        } else if label.contains(needle) {
-            300
         } else {
             0
         }
@@ -179,39 +156,28 @@ impl std::fmt::Display for TagParseError {
     }
 }
 
-fn parse_tag_value(raw: &str) -> Result<String, TagParseError> {
-    let raw = raw.trim();
-    if raw.is_empty() {
-        return Err(TagParseError::EmptyValue);
-    }
-
-    if let Some(rest) = raw.strip_prefix('"') {
-        let end = rest.find('"').ok_or(TagParseError::UnclosedQuote)?;
-        let value = rest[..end].trim();
-        if value.is_empty() {
-            return Err(TagParseError::EmptyValue);
-        }
-        return Ok(value.to_owned());
-    }
-
-    Ok(raw.to_owned())
-}
-
 pub fn parse_tag_filter(input: &str) -> Result<TagFilter, TagParseError> {
     let input = input.trim();
     if input.is_empty() {
         return Err(TagParseError::EmptyValue);
     }
-    let Some((key, value)) = input.split_once(':') else {
-        return Err(TagParseError::MissingSeparator);
+    let (key, value) = input.split_once(':').ok_or(TagParseError::MissingSeparator)?;
+    let field = TagField::parse(key).ok_or(TagParseError::UnknownField)?;
+    let value = value.trim();
+    let value = match value.strip_prefix('"') {
+        Some(rest) => rest[..rest.find('"').ok_or(TagParseError::UnclosedQuote)?].trim(),
+        None => value,
     };
-    let Some(field) = TagField::parse(key) else {
-        return Err(TagParseError::UnknownField);
-    };
-    let value = parse_tag_value(value)?;
-    Ok(TagFilter { field, value })
+    if value.is_empty() {
+        return Err(TagParseError::EmptyValue);
+    }
+    Ok(TagFilter {
+        field,
+        value: value.to_owned(),
+    })
 }
 
+/// Fields whose key or label starts with what was typed (all of them when nothing was).
 pub fn tag_field_suggestions(input: &str) -> Vec<TagField> {
     if input.contains(':') {
         return Vec::new();
@@ -219,26 +185,19 @@ pub fn tag_field_suggestions(input: &str) -> Vec<TagField> {
     let needle = input.trim().to_ascii_lowercase();
     TagField::ALL
         .into_iter()
-        .filter(|field| field.matches_query(&needle))
+        .filter(|field| needle.is_empty() || field.match_score(&needle) >= 700)
         .collect()
 }
 
+/// The best suggestion; ties go to the alphabetically first label.
 pub fn tag_field_best_match(input: &str) -> Option<TagField> {
-    if input.contains(':') {
-        return None;
-    }
     let needle = input.trim().to_ascii_lowercase();
     if needle.is_empty() {
         return None;
     }
-    TagField::ALL
-        .iter()
-        .filter(|field| field.matches_query(&needle))
-        .max_by(|a, b| match a.match_score(&needle).cmp(&b.match_score(&needle)) {
-            std::cmp::Ordering::Equal => b.label().cmp(a.label()),
-            other => other,
-        })
-        .copied()
+    tag_field_suggestions(input)
+        .into_iter()
+        .max_by_key(|field| (field.match_score(&needle), std::cmp::Reverse(field.label())))
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -263,16 +222,16 @@ impl ManualTagEdits {
         TagField::Comment,
     ];
 
-    pub fn from_tag_fields(fields: &TagFields) -> Self {
-        Self {
-            instrument: fields.field_value(TagField::Instrument).to_string(),
-            artist: fields.artist.clone(),
-            title: fields.title.clone(),
-            bpm: fields.bpm.clone(),
-            key: fields.key.clone(),
-            genre: fields.genre.clone(),
-            comment: fields.comment.clone(),
+    fn from_fn(value: impl Fn(TagField) -> String) -> Self {
+        let mut edits = Self::default();
+        for field in Self::EDITOR_FIELDS {
+            edits.set_field(field, value(field));
         }
+        edits
+    }
+
+    pub fn from_tag_fields(fields: &TagFields) -> Self {
+        Self::from_fn(|field| fields.field_value(field).to_string())
     }
 
     pub fn field_value(&self, field: TagField) -> &str {
@@ -310,10 +269,6 @@ impl ManualTagEdits {
 
     /// Every field with surrounding whitespace removed.
     pub fn trimmed(&self) -> Self {
-        let mut trimmed = Self::default();
-        for field in Self::EDITOR_FIELDS {
-            trimmed.set_field(field, self.field_value(field).trim().to_string());
-        }
-        trimmed
+        Self::from_fn(|field| self.field_value(field).trim().to_string())
     }
 }
