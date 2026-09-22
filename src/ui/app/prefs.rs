@@ -11,57 +11,59 @@ const DEFAULT_SIDEBAR_WIDTH: f32 = 280.0;
 pub const MIN_SIDEBAR_WIDTH: f32 = 160.0;
 pub const MAX_SIDEBAR_WIDTH: f32 = 720.0;
 
-fn load<T: DeserializeOwned>(name: &str) -> Option<T> {
-    cache_file(name).and_then(|path| read_bincode(&path))
+/// One value stored in its own cache file.
+pub struct Pref<T: 'static> {
+    file: &'static str,
+    label: &'static str,
+    default: T,
+    /// Applied on load and save; turns a bad stored value into a valid one.
+    clean: fn(T) -> T,
 }
 
-fn save<T: Serialize>(name: &str, value: &T, label: &str) {
-    if let Some(path) = cache_file(name) {
-        write_bincode(&path, value, label);
+impl<T: Copy + Serialize + DeserializeOwned> Pref<T> {
+    pub fn load(&self) -> T {
+        cache_file(self.file)
+            .and_then(|path| read_bincode(&path))
+            .map_or(self.default, self.clean)
+    }
+
+    pub fn save(&self, value: T) {
+        if let Some(path) = cache_file(self.file) {
+            write_bincode(&path, &(self.clean)(value), self.label);
+        }
     }
 }
 
-pub fn load_sidebar_width() -> f32 {
-    load::<f32>("sidebar_width.bin")
-        .filter(|width| width.is_finite())
-        .map_or(DEFAULT_SIDEBAR_WIDTH, |width| {
+pub const SIDEBAR_WIDTH: Pref<f32> = Pref {
+    file: "sidebar_width.bin",
+    label: "sidebar width",
+    default: DEFAULT_SIDEBAR_WIDTH,
+    clean: |width| {
+        if width.is_finite() {
             width.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH)
-        })
-}
-
-pub fn persist_sidebar_width(width: f32) {
-    save(
-        "sidebar_width.bin",
-        &width.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH),
-        "sidebar width",
-    );
-}
-
-pub fn load_volume() -> f32 {
-    load::<f32>("volume.bin")
-        .filter(|volume| volume.is_finite())
-        .map_or(1.0, clamp_volume)
-}
-
-pub fn persist_volume(volume: f32) {
-    save("volume.bin", &clamp_volume(volume), "volume");
-}
-
-pub fn load_looping() -> bool {
-    load("looping.bin").unwrap_or(false)
-}
-
-pub fn persist_looping(looping: bool) {
-    save("looping.bin", &looping, "loop");
-}
-
-pub fn load_always_on_top() -> bool {
-    load("always_on_top.bin").unwrap_or(false)
-}
-
-pub fn persist_always_on_top(always_on_top: bool) {
-    save("always_on_top.bin", &always_on_top, "always on top");
-}
+        } else {
+            DEFAULT_SIDEBAR_WIDTH
+        }
+    },
+};
+pub const VOLUME: Pref<f32> = Pref {
+    file: "volume.bin",
+    label: "volume",
+    default: 1.0,
+    clean: |volume| if volume.is_finite() { clamp_volume(volume) } else { 1.0 },
+};
+pub const LOOPING: Pref<bool> = Pref {
+    file: "looping.bin",
+    label: "loop",
+    default: false,
+    clean: |looping| looping,
+};
+pub const ALWAYS_ON_TOP: Pref<bool> = Pref {
+    file: "always_on_top.bin",
+    label: "always on top",
+    default: false,
+    clean: |always_on_top| always_on_top,
+};
 
 pub fn window_level(always_on_top: bool) -> window::Level {
     if always_on_top {
@@ -89,5 +91,12 @@ mod tests {
     fn window_level_follows_flag() {
         assert_eq!(window_level(true), window::Level::AlwaysOnTop);
         assert_eq!(window_level(false), window::Level::Normal);
+    }
+
+    #[test]
+    fn bad_stored_values_are_cleaned() {
+        assert_eq!((SIDEBAR_WIDTH.clean)(f32::NAN), DEFAULT_SIDEBAR_WIDTH);
+        assert_eq!((SIDEBAR_WIDTH.clean)(10_000.0), MAX_SIDEBAR_WIDTH);
+        assert_eq!((VOLUME.clean)(f32::INFINITY), 1.0);
     }
 }

@@ -30,12 +30,8 @@ pub enum Message {
     FileHovered(PathBuf),
     FilesHoverLeft,
 
-    // File list and navigation (`app/library.rs`).
-    FileListSelect {
-        index: usize,
-        shift: bool,
-        control: bool,
-    },
+    // File list and navigation (`app/library.rs`). Clicks read Shift/Ctrl from the app's modifiers.
+    FileListSelect(usize),
     FileListScrolled(Viewport),
     FileListScrollbarPress {
         track_y: f32,
@@ -117,10 +113,8 @@ pub enum FilterMsg {
     ToggleCaseSensitive,
     ToggleShowDirectories,
     ToggleFavoritesOnly,
-    SearchCompleted {
-        generation: u64,
-        result: Result<SearchOutput, Aborted>,
-    },
+    /// The search generation it ran for, and its result.
+    SearchCompleted(u64, Result<SearchOutput, Aborted>),
 }
 
 #[derive(Debug, Clone)]
@@ -188,6 +182,7 @@ pub enum TagEditorMsg {
     Saved(PathBuf, Result<SavedTo, String>),
 }
 
+/// Completions carry the generation of the job that produced them.
 #[derive(Debug, Clone)]
 pub enum BulkAutoTagMsg {
     Open,
@@ -196,38 +191,19 @@ pub enum BulkAutoTagMsg {
     DirectoryPicked(Option<PathBuf>),
     RunScan,
     ProgressTick,
-    ScanCompleted {
-        generation: u64,
-        result: Result<BulkScanSummary, ScanError>,
-    },
-    SetFileAccepted {
-        key: BulkFileKey,
-        accepted: bool,
-    },
-    SelectFile {
-        key: BulkFileKey,
-        shift: bool,
-        control: bool,
-    },
-    SelectDirectory {
-        dir_idx: usize,
-        shift: bool,
-        control: bool,
-    },
+    ScanCompleted(u64, Result<BulkScanSummary, ScanError>),
+    SetFileAccepted(BulkFileKey, bool),
+    SelectFile(BulkFileKey),
+    SelectDirectory(usize),
     SelectAll,
     ClearSelection,
-    CheckSelected,
-    UncheckSelected,
-    AcceptAll,
-    RejectAll,
+    /// Check (true) or uncheck the selected files.
+    CheckSelected(bool),
+    CheckAll(bool),
     ToggleDirectoryExpanded(usize),
-    ExpandAllDirectories,
-    CollapseAllDirectories,
+    ExpandAll(bool),
     Apply,
-    ApplyCompleted {
-        generation: u64,
-        summary: BulkApplySummary,
-    },
+    ApplyCompleted(u64, BulkApplySummary),
 }
 
 macro_rules! nested {

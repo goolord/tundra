@@ -3,11 +3,11 @@
 use super::message::{AutoTagMsg, Message};
 use super::settings::{AUTO_TAG_ALREADY_COMPLETE, AUTO_TAG_INSTRUMENT_PRESENT, NO_AUDIO_SELECTED};
 use super::style;
-use super::widgets::{modal_button, modal_info_row, modal_shell, spacer};
+use super::widgets::{modal_button, modal_footer, modal_heading, modal_info_row, modal_shell};
 use crate::auto_tag::{ClassificationResult, ClassifyError};
 use crate::metadata::AutoTagFieldStatus;
-use iced::widget::{Column, button, column, container, row, text};
-use iced::{Alignment, Color, Element, Length, Theme};
+use iced::widget::{button, column, container, text};
+use iced::{Color, Element, Length, Theme};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Default)]
@@ -82,12 +82,8 @@ fn muted(content: &str) -> Element<'_, Message> {
 }
 
 fn details_disclosure(state: &AutoTagState) -> Element<'_, Message> {
-    let label = if state.details_open {
-        "Technical details ▼"
-    } else {
-        "Technical details ▶"
-    };
-    let toggle = button(text(label).size(12))
+    let arrow = if state.details_open { "▼" } else { "▶" };
+    let toggle = button(text(format!("Technical details {arrow}")).size(12))
         .padding(0)
         .on_press(AutoTagMsg::ToggleDetails.into())
         .style(|theme: &Theme, status| {
@@ -95,8 +91,6 @@ fn details_disclosure(state: &AutoTagState) -> Element<'_, Message> {
             let accent = palette.primary.base.color;
             button::Style {
                 text_color: style::by_status(status, palette.background.base.text, accent, accent.scale_alpha(0.85)),
-                background: None,
-                border: iced::Border::default(),
                 ..button::Style::default()
             }
         });
@@ -104,20 +98,18 @@ fn details_disclosure(state: &AutoTagState) -> Element<'_, Message> {
         return toggle.into();
     }
 
-    let mut details = Column::new().spacing(6).width(Length::Fill);
-    if let Some(result) = &state.result {
-        details = details
-            .push(modal_info_row("Tier", result.tier.to_string()))
-            .push(modal_info_row("Pipeline", &result.summary));
-        if let Some(zcr) = result.zcr {
-            details = details.push(modal_info_row("ZCR", format!("{zcr:.4}")));
-        }
-    }
-    if let Some(error_details) = &state.error_details {
-        details = details.push(muted(error_details));
-    }
-    details = details.push(muted("Setup: cargo xtask setup"));
-
+    let result = state.result.as_ref();
+    let details = column![
+        result.map(|result| modal_info_row("Tier", result.tier.to_string())),
+        result.map(|result| modal_info_row("Pipeline", &result.summary)),
+        result
+            .and_then(|result| result.zcr)
+            .map(|zcr| modal_info_row("ZCR", format!("{zcr:.4}"))),
+        state.error_details.as_deref().map(muted),
+        muted("Setup: cargo xtask setup"),
+    ]
+    .spacing(6)
+    .width(Length::Fill);
     column![
         toggle,
         container(details.padding([8, 10]))
@@ -137,28 +129,25 @@ pub fn auto_tag_view(state: &AutoTagState) -> Element<'_, Message> {
     let can_retag = status.is_some_and(|status| status.can_retag_instrument);
     let colored = |message: String, color: Color| text(message).size(12).color(color);
 
-    let mut body = column![
-        text("Auto Tag").size(18),
-        text("Fill missing tags, or replace instrument labels Tundra wrote earlier. Other metadata is left alone.")
-            .size(13)
-            .width(Length::Fill),
-        modal_info_row(
-            "File",
-            state.target.as_deref().map_or_else(
-                || NO_AUDIO_SELECTED.to_string(),
-                |path| crate::path_util::truncate_path(path, 56)
-            ),
+    let mut body = modal_heading(
+        "Auto Tag",
+        "Fill missing tags, or replace instrument labels Tundra wrote earlier. Other metadata is left alone.",
+    )
+    .push(modal_info_row(
+        "File",
+        state.target.as_deref().map_or_else(
+            || NO_AUDIO_SELECTED.to_string(),
+            |path| crate::path_util::truncate_path(path, 56),
         ),
-        modal_info_row(
-            "Current tag",
-            state
-                .existing_instrument
-                .as_deref()
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or("(none)"),
-        ),
-    ]
-    .spacing(12);
+    ))
+    .push(modal_info_row(
+        "Current tag",
+        state
+            .existing_instrument
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("(none)"),
+    ));
 
     let status_warning = if allows_instrument_work {
         can_retag.then_some("This file has an older Tundra tag. Detect again to upgrade it.")
@@ -167,9 +156,11 @@ pub fn auto_tag_view(state: &AutoTagState) -> Element<'_, Message> {
     } else {
         Some(AUTO_TAG_ALREADY_COMPLETE)
     };
-    if let Some(warning) = status_warning.filter(|_| has_target) {
-        body = body.push(colored(warning.into(), style::WARN));
-    }
+    body = body.push(
+        status_warning
+            .filter(|_| has_target)
+            .map(|warning| colored(warning.into(), style::WARN)),
+    );
 
     if state.running {
         body = body.push(text("Analyzing…").size(12).width(Length::Fill));
@@ -183,19 +174,13 @@ pub fn auto_tag_view(state: &AutoTagState) -> Element<'_, Message> {
         };
         body = body.push(colored(message, style::OK));
     } else if let Some(result) = &state.result {
-        body = body.push(modal_info_row("Suggested", &result.instrument));
-        if let Some(confidence) = result.confidence {
-            body = body.push(modal_info_row(
-                "Confidence",
-                crate::auto_tag::confidence_percent(Some(confidence)),
-            ));
-        }
+        body = body.push(modal_info_row("Suggested", &result.instrument)).push(
+            result
+                .confidence
+                .map(|confidence| modal_info_row("Confidence", crate::auto_tag::confidence_percent(Some(confidence)))),
+        );
     } else if !state.status.is_empty() {
         body = body.push(text(&state.status).size(12));
-    }
-
-    if state.result.is_some() || state.error_details.is_some() {
-        body = body.push(details_disclosure(state));
     }
 
     let can_run = has_target && allows_instrument_work && !state.running;
@@ -206,31 +191,21 @@ pub fn auto_tag_view(state: &AutoTagState) -> Element<'_, Message> {
         && !state.applied
         && (!allows_instrument_work || state.result.is_some());
 
-    if can_apply {
-        body = body.push(
+    let body = body
+        .push((state.result.is_some() || state.error_details.is_some()).then(|| details_disclosure(state)))
+        .push(can_apply.then(|| {
             text("Apply writes missing tags permanently. There is no undo. Files with other metadata keep their existing values.")
                 .size(11)
                 .color(style::WARN)
-                .width(Length::Fill),
-        );
-    }
-
-    body = body.push(
-        row![
-            modal_button(
-                "Choose file…",
-                (!state.running).then(|| AutoTagMsg::PickFile.into()),
-                false
-            ),
-            modal_button("Detect instrument", can_run.then(|| AutoTagMsg::Run.into()), false),
-            modal_button("Apply tag", can_apply.then(|| AutoTagMsg::Apply.into()), true),
-            spacer(Length::Fill, Length::Shrink),
-            modal_button("Close", Some(AutoTagMsg::Close.into()), false).padding([6, 14]),
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center)
-        .width(Length::Fill),
-    );
-
+                .width(Length::Fill)
+        }))
+        .push(modal_footer(
+            [
+                modal_button("Choose file…", (!state.running).then(|| AutoTagMsg::PickFile.into()), false),
+                modal_button("Detect instrument", can_run.then(|| AutoTagMsg::Run.into()), false),
+                modal_button("Apply tag", can_apply.then(|| AutoTagMsg::Apply.into()), true),
+            ],
+            modal_button("Close", Some(AutoTagMsg::Close.into()), false),
+        ));
     modal_shell(body.padding(18), 560.0).into()
 }

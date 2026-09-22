@@ -3,9 +3,9 @@
 use super::message::{Message, TagEditorMsg};
 use super::settings::NO_AUDIO_SELECTED;
 use super::style;
-use super::widgets::{modal_button, modal_info_row, modal_shell, spacer};
+use super::widgets::{modal_button, modal_footer, modal_heading, modal_info_row, modal_shell};
 use crate::metadata::{ManualTagEdits, SavedTo, TagField, TagFields};
-use iced::widget::{column, row, text, text_input};
+use iced::widget::{row, text, text_input};
 use iced::{Alignment, Element, Length};
 use std::path::PathBuf;
 
@@ -36,15 +36,17 @@ impl TagEditorState {
     pub fn finish_save(&mut self, result: Result<SavedTo, String>) {
         self.saving = false;
         match result {
-            Ok(saved) => {
-                self.error = None;
-                self.status = Some(match saved {
-                    SavedTo::File => "Tags saved.".into(),
-                    SavedTo::Sidecar(reason) => format!("Saved in Tundra only; the file was left unchanged. {reason}"),
-                });
+            Ok(SavedTo::File) => self.set_status("Tags saved.".into()),
+            Ok(SavedTo::Sidecar(reason)) => {
+                self.set_status(format!("Saved in Tundra only; the file was left unchanged. {reason}"));
             }
             Err(err) => self.set_error(err),
         }
+    }
+
+    fn set_status(&mut self, status: String) {
+        self.error = None;
+        self.status = Some(status);
     }
 
     pub fn set_error(&mut self, message: impl Into<String>) {
@@ -64,49 +66,37 @@ pub fn tag_editor_view(state: &TagEditorState) -> Element<'_, Message> {
         || NO_AUDIO_SELECTED.to_string(),
         |path| crate::path_util::truncate_path(path, 56),
     );
-
-    let mut body = column![
-        text("Edit Tags").size(18),
-        text("Edit metadata directly. Blank instrument, artist, or comment leaves those unchanged; other empty fields clear stored values.")
-            .size(13)
-            .width(Length::Fill),
-        modal_info_row("File", target_label),
-    ]
-    .spacing(12);
-
-    for field in ManualTagEdits::EDITOR_FIELDS {
-        body = body.push(
-            row![
-                text(field.label())
-                    .size(11)
-                    .width(Length::Fixed(88.0))
-                    .style(style::faded_text(0.65)),
-                text_input("", state.edits.field_value(field))
-                    .on_input(move |input| TagEditorMsg::Input(field, input).into())
-                    .padding([6, 8])
-                    .width(Length::Fill),
-            ]
-            .spacing(8)
-            .align_y(Alignment::Center),
-        );
-    }
-
-    if let Some(error) = &state.error {
-        body = body.push(text(error).size(12).color(style::ERROR));
-    } else if let Some(status) = &state.status {
-        body = body.push(text(status).size(12).style(style::primary_text));
-    }
-
-    body = body.push(
+    let fields = ManualTagEdits::EDITOR_FIELDS.into_iter().map(|field| {
         row![
-            modal_button("Cancel", Some(TagEditorMsg::Close.into()), false),
-            spacer(Length::Fill, Length::Shrink),
-            modal_button("Save", (!state.saving).then(|| TagEditorMsg::Save.into()), true).padding([6, 14]),
+            text(field.label())
+                .size(11)
+                .width(Length::Fixed(88.0))
+                .style(style::faded_text(0.65)),
+            text_input("", state.edits.field_value(field))
+                .on_input(move |input| TagEditorMsg::Input(field, input).into())
+                .padding([6, 8])
+                .width(Length::Fill),
         ]
         .spacing(8)
         .align_y(Alignment::Center)
-        .width(Length::Fill),
-    );
+        .into()
+    });
+    let feedback = match (&state.error, &state.status) {
+        (Some(error), _) => Some(text(error).size(12).color(style::ERROR)),
+        (None, Some(status)) => Some(text(status).size(12).style(style::primary_text)),
+        (None, None) => None,
+    };
 
+    let body = modal_heading(
+        "Edit Tags",
+        "Edit metadata directly. Blank instrument, artist, or comment leaves those unchanged; other empty fields clear stored values.",
+    )
+    .push(modal_info_row("File", target_label))
+    .extend(fields)
+    .push(feedback)
+    .push(modal_footer(
+        [modal_button("Cancel", Some(TagEditorMsg::Close.into()), false)],
+        modal_button("Save", (!state.saving).then(|| TagEditorMsg::Save.into()), true),
+    ));
     modal_shell(body.padding(18), 560.0).into()
 }

@@ -60,25 +60,21 @@ impl App {
                 .push(mouse_area(spacer(Length::Fill, Length::Fill)).interaction(mouse::Interaction::ResizingColumn));
         }
 
-        let workspace: Element<'_, Message> = if self.modal == Modal::Settings {
-            let roots = self.allowed_directories.roots();
-            with_dim_overlay(
-                workspace.into(),
-                settings_view(roots, self.settings_first_run, self.settings_error.as_deref()),
-            )
-        } else if self.bulk_auto_tag.is_open() {
-            with_dim_overlay(
-                workspace.into(),
-                bulk_auto_tag_view(&self.bulk_auto_tag, self.modifiers),
-            )
-        } else if self.modal == Modal::TagEditor {
-            with_dim_overlay(workspace.into(), tag_editor_view(&self.tag_editor))
-        } else if self.modal == Modal::AutoTag {
-            with_dim_overlay(workspace.into(), auto_tag_view(&self.auto_tag))
-        } else if let Some(dialog) = &self.dialog {
-            with_dialog(workspace.into(), dialog)
-        } else {
-            workspace.into()
+        let modal = match self.modal {
+            Modal::Settings => Some(settings_view(
+                self.allowed_directories.roots(),
+                self.settings_first_run,
+                self.settings_error.as_deref(),
+            )),
+            _ if self.bulk_auto_tag.is_open() => Some(bulk_auto_tag_view(&self.bulk_auto_tag)),
+            Modal::TagEditor => Some(tag_editor_view(&self.tag_editor)),
+            Modal::AutoTag => Some(auto_tag_view(&self.auto_tag)),
+            Modal::None => None,
+        };
+        let workspace = match (modal, &self.dialog) {
+            (Some(modal), _) => with_dim_overlay(workspace.into(), modal),
+            (None, Some(dialog)) => with_dialog(workspace.into(), dialog),
+            (None, None) => workspace.into(),
         };
 
         let layout = column![

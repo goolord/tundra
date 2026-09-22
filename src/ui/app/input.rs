@@ -5,7 +5,7 @@
 use super::prefs::{self, MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH, on_window};
 use super::{App, Modal};
 use crate::ui::FILE_DRAG_THRESHOLD;
-use crate::ui::file_selector::{FILE_LIST_SCROLL_ID, FilterFocus};
+use crate::ui::file_selector::{FILE_LIST_SCROLL_ID, FilterFocus, TAG_SEARCH_INPUT_ID};
 use crate::ui::message::{FilterMsg, Message, WindowMsg};
 use iced::keyboard::key::Named;
 use iced::keyboard::{Key, Modifiers};
@@ -63,27 +63,12 @@ pub(super) struct ScrollbarDrag {
     grab_offset: f32,
 }
 
-/// Explains a failed drag-out and how to drag from the file manager instead.
-pub(super) fn drag_out_notice(intro: &str) -> String {
-    let gesture = if cfg!(target_os = "macos") {
-        "Control-click or use a two-finger click"
-    } else {
-        "Right-click"
-    };
-    format!(
-        "{intro} {gesture} the file and choose \"{}\", then drag it from there.",
-        crate::platform::file_manager_label()
-    )
-}
-
 fn scroll_file_list_to(offset: f32) -> Task<Message> {
-    operation::scroll_to(
-        Id::new(FILE_LIST_SCROLL_ID),
-        AbsoluteOffset {
-            x: Some(0.0),
-            y: Some(offset),
-        },
-    )
+    let offset = AbsoluteOffset {
+        x: Some(0.0),
+        y: Some(offset),
+    };
+    operation::scroll_to(Id::new(FILE_LIST_SCROLL_ID), offset)
 }
 
 impl App {
@@ -124,7 +109,7 @@ impl App {
     pub(super) fn mouse_released(&mut self) -> Task<Message> {
         let resized = self.sidebar_resize.take().is_some();
         if resized {
-            prefs::persist_sidebar_width(self.sidebar_width);
+            prefs::SIDEBAR_WIDTH.save(self.sidebar_width);
         }
         let scrolled = self.file_list_scrollbar_drag.take().is_some();
         self.finish_scrub(self.last_scrub_progress);
@@ -137,10 +122,11 @@ impl App {
     /// Unmodified key presses no widget used.
     pub(super) fn key_pressed(&mut self, key: Key, modifiers: Modifiers) -> Task<Message> {
         let command = modifiers.control() || modifiers.logo() || modifiers.alt();
+        let shift = modifiers.shift();
         let space = key == Key::Named(Named::Space);
         let focus = self.file_selector.filter_focus;
 
-        if space && !command && !modifiers.shift() && self.transport_keys_enabled() {
+        if space && !command && !shift && self.transport_keys_enabled() {
             self.player.toggle_playing();
         }
         if !space && !command && self.waveform_hovered {
@@ -153,16 +139,16 @@ impl App {
         }
         // Tab completes a tag field name, or else walks file search -> tag search -> file list.
         if focus == FilterFocus::TagSearch && self.file_selector.tag_search_can_autocomplete() {
-            if command || modifiers.shift() {
-                return Task::none();
-            }
-            return self.autocomplete_tag_field();
+            return if command || shift {
+                Task::none()
+            } else {
+                self.autocomplete_tag_field()
+            };
         }
         if command {
             return Task::none();
         }
-        let shift = modifiers.shift();
-        operation::is_focused(Id::new(crate::ui::file_selector::TAG_SEARCH_INPUT_ID)).map(move |on_tag| {
+        operation::is_focused(Id::new(TAG_SEARCH_INPUT_ID)).map(move |on_tag| {
             let message = match (on_tag, shift) {
                 (false, false) => FilterMsg::TagSearchFocused(true),
                 (true, false) => FilterMsg::TagSearchFocused(false),
@@ -184,7 +170,7 @@ impl App {
             && (focus != FilterFocus::TagSearch || self.file_list_focused)
     }
 
-    pub(super) fn press_file(&mut self, path: PathBuf, from_file_list: bool) -> Task<Message> {
+    pub(super) fn press_file(&mut self, path: PathBuf, from_file_list: bool) {
         if from_file_list {
             self.file_selector.filter_focus = FilterFocus::None;
             self.file_list_focused = true;
@@ -196,7 +182,6 @@ impl App {
         } else {
             FileDrag::file(path, from_file_list)
         });
-        Task::none()
     }
 
     fn move_file_drag(&mut self, point: Point) -> Task<Message> {
@@ -234,17 +219,16 @@ impl App {
     }
 
     fn release_file_drag(&mut self) -> Task<Message> {
-        let native_active = self.native_drag.is_active();
         let click_to_open = match &self.file_drag {
             Some(FileDrag::File {
                 path,
                 stage: DragStage::Pressed,
                 open_on_click: true,
                 ..
-            }) if !native_active => Some(path.clone()),
+            }) if !self.native_drag.is_active() => Some(path.clone()),
             _ => None,
         };
-        if native_active {
+        if self.native_drag.is_active() {
             self.native_drag.update(true, true);
         }
         if !self.native_drag.is_active() {
@@ -254,14 +238,27 @@ impl App {
     }
 
     /// Advances an X11 drag-out, which is driven by polling.
-    pub(super) fn tick_native_drag(&mut self) -> Task<Message> {
+    pub(super) fn tick_native_drag(&mut self) {
         if self.native_drag.is_active() {
             self.native_drag.update(true, false);
             if !self.native_drag.is_active() {
                 self.file_drag = None;
             }
         }
-        Task::none()
+    }
+
+    /// Ends the drag and explains how to drag from the file manager instead.
+    pub(super) fn drag_failed(&mut self, intro: &str) {
+        let gesture = if cfg!(target_os = "macos") {
+            "Control-click or use a two-finger click"
+        } else {
+            "Right-click"
+        };
+        let manager = crate::platform::file_manager_label();
+        self.show_notice(format!(
+            "{intro} {gesture} the file and choose \"{manager}\", then drag it from there."
+        ));
+        self.file_drag = None;
     }
 
     pub(super) fn drag_window_ready(&mut self, window_id: Option<u32>) -> Task<Message> {
@@ -277,8 +274,7 @@ impl App {
         };
         self.drag_ready = init.is_ok();
         if let Err(intro) = init {
-            self.show_notice(drag_out_notice(&intro));
-            self.file_drag = None;
+            self.drag_failed(&intro);
             return Task::none();
         }
         match &mut self.file_drag {
@@ -295,8 +291,7 @@ impl App {
         let canonical = match crate::path_util::canonical_path(&path) {
             Ok(path) => path,
             Err(err) => {
-                self.show_notice(drag_out_notice(&format!("Cannot drag {}: {err}.", path.display())));
-                self.file_drag = None;
+                self.drag_failed(&format!("Cannot drag {}: {err}.", path.display()));
                 return Task::none();
             }
         };
@@ -314,8 +309,7 @@ impl App {
         #[cfg(all(unix, not(target_os = "macos")))]
         {
             if let Err(err) = self.native_drag.start(canonical) {
-                self.show_notice(drag_out_notice(&format!("Drag failed: {err}.")));
-                self.file_drag = None;
+                self.drag_failed(&format!("Drag failed: {err}."));
             }
             Task::none()
         }
@@ -339,25 +333,17 @@ impl App {
         let sync_maximized =
             |id: window::Id| window::is_maximized(id).map(|maximized| WindowMsg::MaximizedChanged(maximized).into());
         match message {
-            WindowMsg::TitleBarPress => {
-                self.title_bar_press = Some(self.last_cursor);
-                Task::none()
-            }
-            WindowMsg::TitleBarRelease => {
-                self.title_bar_press = None;
-                Task::none()
-            }
-            WindowMsg::Minimize => on_window(|id| window::minimize(id, true)),
+            WindowMsg::TitleBarPress => self.title_bar_press = Some(self.last_cursor),
+            WindowMsg::TitleBarRelease => self.title_bar_press = None,
+            WindowMsg::Minimize => return on_window(|id| window::minimize(id, true)),
             WindowMsg::ToggleMaximize => {
                 self.title_bar_press = None;
-                on_window(move |id| window::toggle_maximize(id).chain(sync_maximized(id)))
+                return on_window(move |id| window::toggle_maximize(id).chain(sync_maximized(id)));
             }
-            WindowMsg::MaximizedChanged(maximized) => {
-                self.window_maximized = maximized;
-                Task::none()
-            }
-            WindowMsg::SyncMaximized => on_window(sync_maximized),
-            WindowMsg::Resize(direction) => on_window(move |id| window::drag_resize(id, direction)),
+            WindowMsg::MaximizedChanged(maximized) => self.window_maximized = maximized,
+            WindowMsg::SyncMaximized => return on_window(sync_maximized),
+            WindowMsg::Resize(direction) => return on_window(move |id| window::drag_resize(id, direction)),
         }
+        Task::none()
     }
 }

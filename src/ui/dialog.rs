@@ -15,24 +15,12 @@ pub struct Dialog {
 }
 
 impl Dialog {
-    fn titled(title: &str, body: String) -> Self {
+    pub fn new(title: &str, body: String) -> Self {
         Self {
             title: title.into(),
             body,
             rows: Vec::new(),
         }
-    }
-
-    pub fn about(body: String) -> Self {
-        Self::titled("About Tundra", body)
-    }
-
-    pub fn notice(body: String) -> Self {
-        Self::titled("Notice", body)
-    }
-
-    pub fn error(body: String) -> Self {
-        Self::titled("Error", body)
     }
 
     pub fn waveform_help() -> Self {
@@ -47,26 +35,21 @@ impl Dialog {
                 ("+ / −", "Zoom"),
                 ("Left / Right", "Pan"),
             ],
-            ..Self::titled("Waveform controls", "Hover the waveform for +/− and arrow keys.".into())
+            ..Self::new("Waveform controls", "Hover the waveform for +/− and arrow keys.".into())
         }
     }
 
     fn view(&self) -> Element<'_, Message> {
-        let mut body = column![text(&self.title).size(18)]
-            .spacing(12)
-            .padding(16)
-            .width(Length::Fixed(440.0));
-        if !self.body.is_empty() {
-            body = body.push(text(&self.body).size(14).width(Length::Fill));
-        }
-        if !self.rows.is_empty() {
-            body = body.push(table(&self.rows));
-        }
-        body = body.push(row![
-            spacer(Length::Fill, Length::Shrink),
-            button(text("OK")).on_press(Message::DismissDialog),
-        ]);
-        opaque(container(body).style(style::card(8.0)))
+        let body = column![
+            text(&self.title).size(18),
+            (!self.body.is_empty()).then(|| text(&self.body).size(14).width(Length::Fill)),
+            (!self.rows.is_empty()).then(|| table(&self.rows)),
+            row![
+                spacer(Length::Fill, Length::Shrink),
+                button(text("OK")).on_press(Message::DismissDialog),
+            ],
+        ];
+        opaque(container(body.spacing(12).padding(16).width(Length::Fixed(440.0))).style(style::card(8.0)))
     }
 }
 
