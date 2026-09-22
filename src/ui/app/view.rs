@@ -21,18 +21,15 @@ const WINDOW_RESIZE_BORDER: f32 = 8.0;
 
 impl App {
     pub fn view(&self) -> Element<'_, Message> {
-        let sidebar = container(
-            self.file_selector
-                .view(self.search_enabled(), &self.favorites, self.modifiers),
-        )
-        .width(Length::Fixed(self.sidebar_width))
-        .height(Length::Fill)
-        .style(|theme: &Theme| {
-            let palette = theme.extended_palette();
-            let base = palette.background.base.color;
-            container::background(Color::from_rgb(base.r * 0.56, base.g * 0.56, base.b * 0.58))
-                .border(style::outline(palette.background.strong.color.scale_alpha(0.42), 0.0))
-        });
+        let sidebar = container(self.file_selector.view(self.search_enabled(), &self.favorites, self.modifiers))
+            .width(Length::Fixed(self.sidebar_width))
+            .height(Length::Fill)
+            .style(|theme: &Theme| {
+                let palette = theme.extended_palette();
+                let base = palette.background.base.color;
+                container::background(Color::from_rgb(base.r * 0.56, base.g * 0.56, base.b * 0.58))
+                    .border(style::outline(palette.background.strong.color.scale_alpha(0.42), 0.0))
+            });
 
         let drop_hint = self.drag_over.then(|| {
             container(text("Drop audio file or folder").size(18))
@@ -45,14 +42,8 @@ impl App {
         // Keeps the resize cursor, and blocks hover effects, while the pointer is off the handle.
         let resize_cover = resizing
             .then(|| mouse_area(spacer(Length::Fill, Length::Fill)).interaction(mouse::Interaction::ResizingColumn));
-        let panes = row![
-            sidebar,
-            sidebar_resizer(resizing),
-            player.width(Length::Fill).height(Length::Fill)
-        ];
-        let workspace = stack![panes.height(Length::Fill), resize_cover]
-            .width(Length::Fill)
-            .height(Length::Fill);
+        let panes = row![sidebar, sidebar_resizer(resizing), player.width(Length::Fill).height(Length::Fill)];
+        let workspace = stack![panes.height(Length::Fill), resize_cover].width(Length::Fill).height(Length::Fill);
 
         let modal = match self.modal {
             Modal::Settings => Some(settings_view(
@@ -71,35 +62,18 @@ impl App {
             (None, None) => workspace.into(),
         };
 
-        let layout = column![
-            title_bar(self.always_on_top, self.current_file_name().as_deref()),
-            workspace
-        ]
-        .width(Length::Fill)
-        .height(Length::Fill);
-        if self.window_maximized {
-            layout.into()
-        } else {
-            window_resize_frame(layout.into())
-        }
+        let layout = column![title_bar(self.always_on_top, self.current_file_name().as_deref()), workspace]
+            .width(Length::Fill)
+            .height(Length::Fill);
+        if self.window_maximized { layout.into() } else { window_resize_frame(layout.into()) }
     }
 }
 
 /// The draggable line between the sidebar and the player.
 fn sidebar_resizer(resizing: bool) -> Element<'static, Message> {
-    let gutter = || {
-        spacer(
-            Length::Fixed((SIDEBAR_RESIZER_HIT_WIDTH - SIDEBAR_RESIZER_LINE_WIDTH) / 2.0),
-            Length::Fill,
-        )
-    };
+    let gutter = || spacer(Length::Fixed((SIDEBAR_RESIZER_HIT_WIDTH - SIDEBAR_RESIZER_LINE_WIDTH) / 2.0), Length::Fill);
     let line = bar(Length::Fixed(SIDEBAR_RESIZER_LINE_WIDTH), Length::Fill, move |theme| {
-        theme
-            .extended_palette()
-            .background
-            .strong
-            .color
-            .scale_alpha(if resizing { 0.85 } else { 0.45 })
+        theme.extended_palette().background.strong.color.scale_alpha(if resizing { 0.85 } else { 0.45 })
     });
     let hit_area = mouse_area(spacer(Length::Fixed(SIDEBAR_RESIZER_HIT_WIDTH), Length::Fill))
         .interaction(mouse::Interaction::ResizingColumn)
@@ -145,11 +119,5 @@ fn window_resize_frame(content: Element<'_, Message>) -> Element<'_, Message> {
         ]
         .height(edge),
     ];
-    stack![
-        container(content).width(fill).height(fill),
-        edges.width(fill).height(fill)
-    ]
-    .width(fill)
-    .height(fill)
-    .into()
+    stack![container(content).width(fill).height(fill), edges.width(fill).height(fill)].width(fill).height(fill).into()
 }

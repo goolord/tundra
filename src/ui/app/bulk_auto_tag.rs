@@ -31,10 +31,7 @@ impl App {
                 }
             }
             BulkAutoTagMsg::PickDirectory => {
-                let start_dir = state
-                    .root
-                    .clone()
-                    .unwrap_or_else(|| self.file_selector.current_dir.clone());
+                let start_dir = state.root.clone().unwrap_or_else(|| self.file_selector.current_dir.clone());
                 return pick_folder(start_dir, |picked| BulkAutoTagMsg::DirectoryPicked(picked).into());
             }
             BulkAutoTagMsg::DirectoryPicked(Some(dir)) => {

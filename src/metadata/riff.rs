@@ -76,10 +76,7 @@ fn parse_form(bytes: &[u8], magic: &[u8; 4], endian: Endian) -> Result<(ChunkId,
     if body.get(end..).is_some_and(|rest| rest.iter().any(|byte| *byte != 0)) {
         return Err("Unexpected trailing bytes after the last chunk".into());
     }
-    let chunks = ranges
-        .into_iter()
-        .map(|(id, range)| (id, body[range].to_vec()))
-        .collect();
+    let chunks = ranges.into_iter().map(|(id, range)| (id, body[range].to_vec())).collect();
     Ok((form_type, chunks))
 }
 
@@ -143,10 +140,7 @@ fn info_field_id(key: &str) -> ChunkId {
 
 /// The fields of a `LIST INFO` body, keeping whatever parsed before any damage.
 fn parse_info_fields(bytes: &[u8]) -> Chunks {
-    scan_chunks(bytes, Endian::Little)
-        .map_while(Result::ok)
-        .map(|(id, range)| (id, bytes[range].to_vec()))
-        .collect()
+    scan_chunks(bytes, Endian::Little).map_while(Result::ok).map(|(id, range)| (id, bytes[range].to_vec())).collect()
 }
 
 fn set_info_field(fields: &mut Chunks, key: &str, value: &str) {
@@ -171,9 +165,7 @@ pub(crate) fn write_wav_tags(path: &Path, edit: &TagEdit) -> Result<(), String> 
     let mut chunks = parse_riff_wave_chunks(&bytes)?;
 
     let info_index = chunks.iter().position(|(id, data)| is_info_list(id, data));
-    let mut fields = info_index
-        .map(|index| parse_info_fields(&chunks[index].1[4..]))
-        .unwrap_or_default();
+    let mut fields = info_index.map(|index| parse_info_fields(&chunks[index].1[4..])).unwrap_or_default();
     for (key, value) in edit.keyed(WAV_NATIVE_KEYS, &[WAV_TITLE_KEY, WAV_GENRE_KEY]) {
         set_info_field(&mut fields, key, value);
     }
@@ -188,9 +180,7 @@ pub(crate) fn write_wav_tags(path: &Path, edit: &TagEdit) -> Result<(), String> 
     // what Mp3tag, foobar2000, and most DAWs read from WAV. Title and genre are
     // mirrored there when a chunk already exists so readers see one value.
     let id3_index = chunks.iter().position(|(id, _)| is_id3_chunk(id));
-    let needs_id3 = edit
-        .manual
-        .is_some_and(|manual| !manual.bpm.trim().is_empty() || !manual.key.trim().is_empty());
+    let needs_id3 = edit.manual.is_some_and(|manual| !manual.bpm.trim().is_empty() || !manual.key.trim().is_empty());
     // Instrument-only writes leave an existing ID3 chunk byte-for-byte alone.
     if needs_id3 || (id3_index.is_some() && edit.manual.is_some()) {
         let mut id3 = match id3_index {
@@ -247,12 +237,7 @@ pub(crate) fn move_aiff_tags_before_sound(path: &Path) -> Result<(), String> {
 
     let (tags, rest): (Vec<_>, Vec<_>) = chunks.into_iter().partition(|(id, _)| is_aiff_tag_chunk(id));
     let sound = rest.iter().position(|(id, _)| id == b"SSND").expect("SSND kept");
-    let ordered: Vec<_> = rest[..sound]
-        .iter()
-        .chain(&tags)
-        .chain(&rest[sound..])
-        .cloned()
-        .collect();
+    let ordered: Vec<_> = rest[..sound].iter().chain(&tags).chain(&rest[sound..]).cloned().collect();
 
     std::fs::write(path, encode_form(b"FORM", &form_type, &ordered, Endian::Big))
         .map_err(|err| path_io_error("write tags to", path, err))

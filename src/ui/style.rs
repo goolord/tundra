@@ -16,14 +16,8 @@ pub const WARN: Color = Color::from_rgb(0.88, 0.78, 0.52);
 pub const OK: Color = Color::from_rgb(0.62, 0.88, 0.68);
 pub const MUTED_ICON: Color = Color::from_rgb8(0x52, 0x56, 0x5c);
 
-pub const MEDIUM: Font = Font {
-    weight: Weight::Medium,
-    ..Font::DEFAULT
-};
-pub const SEMIBOLD: Font = Font {
-    weight: Weight::Semibold,
-    ..Font::DEFAULT
-};
+pub const MEDIUM: Font = Font { weight: Weight::Medium, ..Font::DEFAULT };
+pub const SEMIBOLD: Font = Font { weight: Weight::Semibold, ..Font::DEFAULT };
 
 /// Picks a value by button state. Disabled buttons look idle.
 pub fn by_status<T>(status: button::Status, idle: T, hovered: T, pressed: T) -> T {
@@ -46,9 +40,7 @@ pub fn muted(theme: &Theme) -> Color {
 
 /// Text colored per theme.
 pub fn text_color(color: impl Fn(&Theme) -> Color) -> impl Fn(&Theme) -> text::Style {
-    move |theme| text::Style {
-        color: Some(color(theme)),
-    }
+    move |theme| text::Style { color: Some(color(theme)) }
 }
 
 pub fn muted_text(theme: &Theme) -> text::Style {
@@ -67,30 +59,17 @@ pub fn primary_text(theme: &Theme) -> text::Style {
 
 /// Body text when `highlight`, muted otherwise.
 pub fn highlight_text(highlight: bool) -> impl Fn(&Theme) -> text::Style {
-    text_color(move |theme| {
-        if highlight {
-            text_alpha(theme, 1.0)
-        } else {
-            muted(theme)
-        }
-    })
+    text_color(move |theme| if highlight { text_alpha(theme, 1.0) } else { muted(theme) })
 }
 
 /// A button with one `background`, usually picked with [`by_status`].
 pub fn solid_button(text_color: Color, border: Border, background: Color) -> button::Style {
-    button::Style {
-        text_color,
-        border,
-        ..button::Style::default()
-    }
-    .with_background(background)
+    button::Style { text_color, border, ..button::Style::default() }.with_background(background)
 }
 
 /// Tints a monochrome SVG icon.
 pub fn icon_color(color: impl Fn(&Theme) -> Color) -> impl Fn(&Theme, svg::Status) -> svg::Style {
-    move |theme, _status| svg::Style {
-        color: Some(color(theme)),
-    }
+    move |theme, _status| svg::Style { color: Some(color(theme)) }
 }
 
 /// Theme background at `fill` alpha with a strong-color outline at `border` alpha.
@@ -106,9 +85,7 @@ pub fn panel(fill: f32, border: f32, radius: f32) -> impl Fn(&Theme) -> containe
 /// A chip or banner filled and outlined with one `tone`.
 pub fn tinted(tone: Color, fill: f32, border: f32, radius: f32) -> impl Fn(&Theme) -> container::Style {
     move |_theme| {
-        container::Style::default()
-            .background(tone.scale_alpha(fill))
-            .border(outline(tone.scale_alpha(border), radius))
+        container::Style::default().background(tone.scale_alpha(fill)).border(outline(tone.scale_alpha(border), radius))
     }
 }
 
@@ -119,11 +96,7 @@ pub fn outline(color: Color, radius: f32) -> Border {
 
 /// The drop shadow under floating surfaces.
 pub fn drop_shadow(color: Color, offset_y: f32, blur_radius: f32) -> Shadow {
-    Shadow {
-        color,
-        offset: Vector::new(0.0, offset_y),
-        blur_radius,
-    }
+    Shadow { color, offset: Vector::new(0.0, offset_y), blur_radius }
 }
 
 /// Floating card behind modals and dialogs.
@@ -142,23 +115,12 @@ pub fn modal_button(primary: bool) -> impl Fn(&Theme, button::Status) -> button:
     move |theme, status| {
         let palette = theme.extended_palette();
         let accent = palette.primary.base.color;
-        let idle = if primary {
-            accent.scale_alpha(0.82)
-        } else {
-            palette.background.weak.color.scale_alpha(0.45)
-        };
+        let idle = if primary { accent.scale_alpha(0.82) } else { palette.background.weak.color.scale_alpha(0.45) };
         let hovered = accent.scale_alpha(if primary { 0.92 } else { 0.16 });
-        let text_color = if primary && by_status(status, true, false, false) {
-            Color::WHITE
-        } else {
-            palette.background.base.text
-        };
+        let text_color =
+            if primary && by_status(status, true, false, false) { Color::WHITE } else { palette.background.base.text };
         let border = outline(palette.background.strong.color.scale_alpha(0.35), 6.0);
-        solid_button(
-            text_color,
-            border,
-            by_status(status, idle, hovered, accent.scale_alpha(0.72)),
-        )
+        solid_button(text_color, border, by_status(status, idle, hovered, accent.scale_alpha(0.72)))
     }
 }
 

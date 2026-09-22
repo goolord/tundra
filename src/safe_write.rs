@@ -45,9 +45,7 @@ fn parse_write_sidecar(name: &str) -> Option<(&str, SidecarKind, Option<u32>)> {
         (TAG_BAK_SUFFIX, SidecarKind::Bak),
         (TAG_TMP_SUFFIX, SidecarKind::Tmp),
     ];
-    let (dest, kind, pid) = match fixed
-        .into_iter()
-        .find_map(|(suffix, kind)| Some((name.strip_suffix(suffix)?, kind)))
+    let (dest, kind, pid) = match fixed.into_iter().find_map(|(suffix, kind)| Some((name.strip_suffix(suffix)?, kind)))
     {
         Some((dest, kind)) => (dest, kind, None),
         None => {
@@ -64,9 +62,7 @@ fn parse_write_sidecar(name: &str) -> Option<(&str, SidecarKind, Option<u32>)> {
 }
 
 fn is_write_sidecar(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| parse_write_sidecar(name).is_some())
+    path.file_name().and_then(|name| name.to_str()).is_some_and(|name| parse_write_sidecar(name).is_some())
 }
 
 fn pid_is_alive(pid: u32) -> bool {
@@ -79,10 +75,8 @@ fn pid_is_alive(pid: u32) -> bool {
     #[cfg(windows)]
     let alive = win::pid_is_alive(pid);
     #[cfg(target_os = "macos")]
-    let alive = std::process::Command::new("kill")
-        .args(["-0", &pid.to_string()])
-        .status()
-        .is_ok_and(|status| status.success());
+    let alive =
+        std::process::Command::new("kill").args(["-0", &pid.to_string()]).status().is_ok_and(|status| status.success());
     #[cfg(not(any(windows, target_os = "macos")))]
     let alive = Path::new(&format!("/proc/{pid}")).exists();
     alive
@@ -164,19 +158,12 @@ pub fn ensure_writable(path: &Path) -> io::Result<()> {
 
 /// Flush file data/metadata to disk before atomic replace.
 pub fn sync_file(path: &Path) -> io::Result<()> {
-    std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(path)?
-        .sync_all()
+    std::fs::OpenOptions::new().read(true).write(true).open(path)?.sync_all()
 }
 
 /// Flush the directory entry, so a completed rename survives power loss.
 pub fn sync_parent_dir(path: &Path) -> io::Result<()> {
-    let parent = path
-        .parent()
-        .filter(|dir| !dir.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
+    let parent = path.parent().filter(|dir| !dir.as_os_str().is_empty()).unwrap_or(Path::new("."));
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(windows)]
@@ -359,10 +346,8 @@ mod tests {
                 ],
             ),
         ];
-        let name = |name: &str| {
-            name.replace("LIVE", &std::process::id().to_string())
-                .replace("DEAD", &DEAD_PID.to_string())
-        };
+        let name =
+            |name: &str| name.replace("LIVE", &std::process::id().to_string()).replace("DEAD", &DEAD_PID.to_string());
         for (case, files) in cases {
             let dir = ScratchDir::new("reclaim");
             for (file, before, _) in files {
@@ -434,10 +419,7 @@ mod tests {
         assert_eq!(fs::read(&dest).unwrap(), b"stable");
         let dir_dest = dir.path().join("settings");
         fs::create_dir(&dir_dest).unwrap();
-        assert!(
-            write_atomic(&dir_dest, b"partial").is_err(),
-            "replacing a directory must fail"
-        );
+        assert!(write_atomic(&dir_dest, b"partial").is_err(), "replacing a directory must fail");
         assert!(dir_dest.is_dir());
         assert_eq!(dir.sidecar_count(), 0);
     }

@@ -18,11 +18,7 @@ const PACKAGE_DOCS: [&str; 3] = ["LICENSE", "EULA.md", "README.md"];
 /// Bundled models: file name, SHA-256, and download URL. `yamnet.onnx` has no
 /// URL: it is built from Google's YAMNet Keras weights by `tools/yamnet/convert.py`.
 const MODELS: [(&str, &str, Option<&str>); 2] = [
-    (
-        "yamnet.onnx",
-        "ca1d489ec98848d73e8e7816003c72c960148f1e985fdb2b0cab0d2b10e250a4",
-        None,
-    ),
+    ("yamnet.onnx", "ca1d489ec98848d73e8e7816003c72c960148f1e985fdb2b0cab0d2b10e250a4", None),
     (
         "yamnet_class_map.csv",
         "cdf24d193e196d9e95912a2667051ae203e92a2ba09449218ccb40ef787c6df2",
@@ -134,11 +130,7 @@ struct SetupBeforeBuild {
 
 impl SetupBeforeBuild {
     fn run(&self) -> Result<()> {
-        if self.no_setup {
-            Ok(())
-        } else {
-            setup(false, self.skip_dl)
-        }
+        if self.no_setup { Ok(()) } else { setup(false, self.skip_dl) }
     }
 }
 
@@ -163,12 +155,7 @@ fn main() -> Result<()> {
         Commands::Setup { skip_lfs, skip_dl } => setup(skip_lfs, skip_dl),
         Commands::Models => download_models(),
         Commands::Classifiers { skip_dl } => setup_classifiers(skip_dl),
-        Commands::Build {
-            release,
-            target,
-            cross,
-            setup,
-        } => {
+        Commands::Build { release, target, cross, setup } => {
             setup.run()?;
             cargo_build(release, target.as_deref(), cross)
         }
@@ -191,10 +178,7 @@ fn main() -> Result<()> {
 }
 
 fn project_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("xtask crate should live in project root")
-        .to_path_buf()
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().expect("xtask crate should live in project root").to_path_buf()
 }
 
 /// `v` + the app's version from the root Cargo.toml.
@@ -223,10 +207,7 @@ fn git_lfs_pull() -> Result<()> {
         return Ok(());
     }
     let mut version = Command::new("git");
-    version
-        .args(["lfs", "version"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+    version.args(["lfs", "version"]).stdout(Stdio::null()).stderr(Stdio::null());
     if !version.status().is_ok_and(|status| status.success()) {
         eprintln!("warning: git-lfs not installed; SVG resources and models may be missing");
         return Ok(());
@@ -260,10 +241,7 @@ fn part_path(dest: &Path) -> PathBuf {
 /// SHA-256 matches.
 fn fetch_verified(url: &str, sha256: &str, dest: &Path) -> Result<()> {
     let part = part_path(dest);
-    let response = ureq::get(url)
-        .timeout(MODEL_DOWNLOAD_TIMEOUT)
-        .call()
-        .with_context(|| format!("GET {url}"))?;
+    let response = ureq::get(url).timeout(MODEL_DOWNLOAD_TIMEOUT).call().with_context(|| format!("GET {url}"))?;
     let mut file = std::fs::File::create(&part)?;
     std::io::copy(&mut response.into_reader(), &mut file).with_context(|| format!("write {}", part.display()))?;
     drop(file);
@@ -334,16 +312,10 @@ fn verify_models() -> Result<()> {
 
 fn setup_classifiers(skip_dl: bool) -> Result<()> {
     let scripts = project_root().join("scripts");
-    ensure!(
-        scripts.join("pyproject.toml").is_file(),
-        "missing scripts/pyproject.toml"
-    );
-    run(Command::new("uv")
-        .args(["python", "install", python_version()])
-        .current_dir(&scripts))?;
+    ensure!(scripts.join("pyproject.toml").is_file(), "missing scripts/pyproject.toml");
+    run(Command::new("uv").args(["python", "install", python_version()]).current_dir(&scripts))?;
     let mut sync = Command::new("uv");
-    sync.args(["sync", "--locked", "--python", python_version()])
-        .current_dir(&scripts);
+    sync.args(["sync", "--locked", "--python", python_version()]).current_dir(&scripts);
     if skip_dl {
         println!("classifiers: skipping the ONNX runtime (--skip-dl)");
     } else {
@@ -367,10 +339,7 @@ fn host_triple() -> Result<&'static str> {
 fn needs_cross(target: &str) -> Result<bool> {
     let host = host_triple()?;
     let darwin = target.contains("darwin");
-    ensure!(
-        !darwin || host.contains("darwin"),
-        "{target} can only be built on a macOS host"
-    );
+    ensure!(!darwin || host.contains("darwin"), "{target} can only be built on a macOS host");
     Ok(host != target && !darwin)
 }
 
@@ -387,11 +356,7 @@ fn cross_targets_for_host() -> &'static [&'static str] {
     } else if cfg!(target_os = "macos") {
         &["x86_64-apple-darwin", "aarch64-apple-darwin"]
     } else {
-        &[
-            "x86_64-unknown-linux-gnu",
-            "aarch64-unknown-linux-gnu",
-            "x86_64-pc-windows-gnu",
-        ]
+        &["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "x86_64-pc-windows-gnu"]
     }
 }
 
@@ -439,32 +404,24 @@ fn cargo_run(release: bool, extra_args: &[String]) -> Result<()> {
 }
 
 fn label(command: &Command) -> String {
-    let words: Vec<_> = std::iter::once(command.get_program())
-        .chain(command.get_args())
-        .map(|word| word.to_string_lossy())
-        .collect();
+    let words: Vec<_> =
+        std::iter::once(command.get_program()).chain(command.get_args()).map(|word| word.to_string_lossy()).collect();
     words.join(" ")
 }
 
 fn run(command: &mut Command) -> Result<()> {
     let label = label(command);
-    let status = command
-        .stdin(Stdio::inherit())
-        .status()
-        .map_err(|err| match err.kind() {
-            std::io::ErrorKind::NotFound => anyhow!("`{label}`: required tool is not installed or not on PATH"),
-            _ => anyhow!("`{label}`: failed to start: {err}"),
-        })?;
+    let status = command.stdin(Stdio::inherit()).status().map_err(|err| match err.kind() {
+        std::io::ErrorKind::NotFound => anyhow!("`{label}`: required tool is not installed or not on PATH"),
+        _ => anyhow!("`{label}`: failed to start: {err}"),
+    })?;
     ensure!(status.success(), "`{label}` failed with {status}");
     Ok(())
 }
 
 fn output(command: &mut Command) -> Result<String> {
     let label = label(command);
-    let result = command
-        .stderr(Stdio::inherit())
-        .output()
-        .with_context(|| format!("run {label}"))?;
+    let result = command.stderr(Stdio::inherit()).output().with_context(|| format!("run {label}"))?;
     ensure!(result.status.success(), "`{label}` failed with {}", result.status);
     Ok(String::from_utf8_lossy(&result.stdout).trim().to_string())
 }
@@ -481,9 +438,7 @@ fn copy_file(src: &Path, dst: &Path) -> Result<()> {
 fn bundle_python(staging: &Path) -> Result<()> {
     let python_root = staging.join("python");
     std::fs::create_dir_all(&python_root)?;
-    run(Command::new("uv")
-        .args(["python", "install", python_version()])
-        .env("UV_PYTHON_INSTALL_DIR", &python_root))?;
+    run(Command::new("uv").args(["python", "install", python_version()]).env("UV_PYTHON_INSTALL_DIR", &python_root))?;
     let python = std::fs::read_dir(&python_root)?
         .flatten()
         .flat_map(|entry| [entry.path().join("python.exe"), entry.path().join("bin/python3")])
@@ -586,10 +541,7 @@ fn release(ci: bool, skip_build: bool) -> Result<()> {
     };
     let git = |args: &[&str]| output(&mut tool("git", args));
 
-    ensure!(
-        git(&["status", "--porcelain"])?.is_empty(),
-        "working tree has uncommitted changes"
-    );
+    ensure!(git(&["status", "--porcelain"])?.is_empty(), "working tree has uncommitted changes");
     let head = git(&["rev-parse", "HEAD"])?;
     run(&mut tool("git", &["fetch", "--tags", "origin"]))?;
     ensure!(
@@ -608,18 +560,10 @@ fn release(ci: bool, skip_build: bool) -> Result<()> {
         run(&mut tool("git", &["push", "origin", &tag]))?;
     }
 
-    match output(&mut tool(
-        "gh",
-        &["release", "view", &tag, "--json", "isDraft", "--jq", ".isDraft"],
-    ))
-    .as_deref()
-    {
+    match output(&mut tool("gh", &["release", "view", &tag, "--json", "isDraft", "--jq", ".isDraft"])).as_deref() {
         Ok("true") => {}
         Ok(_) => bail!("release {tag} is already published; its assets are left untouched"),
-        Err(_) => run(&mut tool(
-            "gh",
-            &["release", "create", &tag, "--draft", "--verify-tag", "--generate-notes"],
-        ))?,
+        Err(_) => run(&mut tool("gh", &["release", "create", &tag, "--draft", "--verify-tag", "--generate-notes"]))?,
     }
 
     let assets = if skip_build {
@@ -640,18 +584,7 @@ fn release(ci: bool, skip_build: bool) -> Result<()> {
     run(tool("gh", &["release", "upload", &tag, "--clobber"]).args(&assets))?;
 
     if ci {
-        run(&mut tool(
-            "gh",
-            &[
-                "workflow",
-                "run",
-                "release.yml",
-                "--ref",
-                &tag,
-                "-f",
-                &format!("tag={tag}"),
-            ],
-        ))?;
+        run(&mut tool("gh", &["workflow", "run", "release.yml", "--ref", &tag, "-f", &format!("tag={tag}")]))?;
     }
     println!("release: draft {tag} updated; publish it on GitHub once every platform is attached");
     Ok(())

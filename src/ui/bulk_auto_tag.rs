@@ -73,11 +73,7 @@ impl BulkAutoTagState {
     /// Closed, or reopened fresh at the folder picker. Any running job is cancelled.
     fn reset(&mut self, phase: Option<BulkAutoTagPhase>) {
         self.cancel_job();
-        *self = Self {
-            phase,
-            last_generation: self.last_generation,
-            ..Self::default()
-        };
+        *self = Self { phase, last_generation: self.last_generation, ..Self::default() };
     }
 
     pub fn open(&mut self) {
@@ -169,8 +165,7 @@ impl BulkAutoTagState {
             match keys.iter().position(|key| *key == anchor) {
                 Some(start) => {
                     let end = keys.iter().rposition(|key| key.dir_idx == dir_idx).unwrap_or(start);
-                    self.selection
-                        .set(keys[start.min(end)..=start.max(end)].iter().copied(), Some(anchor));
+                    self.selection.set(keys[start.min(end)..=start.max(end)].iter().copied(), Some(anchor));
                 }
                 None => self.selection.set(dir_keys, Some(first)),
             }
@@ -303,11 +298,7 @@ fn muted(label: impl text::IntoFragment<'static>, size: u32) -> Text<'static> {
 }
 
 fn small_button(label: &'static str, message: BulkAutoTagMsg) -> Element<'static, Message> {
-    button(text(label).size(11))
-        .padding([4, 10])
-        .on_press(message.into())
-        .style(style::modal_button(false))
-        .into()
+    button(text(label).size(11)).padding([4, 10]).on_press(message.into()).style(style::modal_button(false)).into()
 }
 
 fn folder_line(root: &Path, label: String) -> Element<'static, Message> {
@@ -326,24 +317,13 @@ fn folder_line(root: &Path, label: String) -> Element<'static, Message> {
 }
 
 fn stat_chip(label: &'static str, value: usize, accent: bool) -> Element<'static, Message> {
-    let value = text(value.to_string())
-        .size(11)
-        .font(style::SEMIBOLD)
-        .style(style::text_color(move |theme| {
-            if accent {
-                ACCENT.scale_alpha(0.95)
-            } else {
-                style::text_alpha(theme, 1.0)
-            }
-        }));
+    let value = text(value.to_string()).size(11).font(style::SEMIBOLD).style(style::text_color(move |theme| {
+        if accent { ACCENT.scale_alpha(0.95) } else { style::text_alpha(theme, 1.0) }
+    }));
     container(row![muted(label, 10), value].spacing(4).align_y(Alignment::Center))
         .padding([4, 8])
         .style(move |theme| {
-            if accent {
-                style::tinted(ACCENT, 0.12, 0.28, 10.0)(theme)
-            } else {
-                style::panel(0.42, 0.18, 10.0)(theme)
-            }
+            if accent { style::tinted(ACCENT, 0.12, 0.28, 10.0)(theme) } else { style::panel(0.42, 0.18, 10.0)(theme) }
         })
         .into()
 }
@@ -355,18 +335,11 @@ fn dir_count_badge(accepted: usize, total: usize) -> Element<'static, Message> {
         (false, true) => (ACCENT, ACCENT, 0.10, 0.22),
         (false, false) => (CONF_LOW, ACCENT, 0.10, 0.22),
     };
-    let count = text(accepted.to_string())
-        .size(10)
-        .font(style::SEMIBOLD)
-        .color(count_color.scale_alpha(0.95));
-    container(
-        row![count, muted(format!("/ {total}"), 10)]
-            .spacing(2)
-            .align_y(Alignment::Center),
-    )
-    .padding([3, 8])
-    .style(style::tinted(tone, fill, border, 10.0))
-    .into()
+    let count = text(accepted.to_string()).size(10).font(style::SEMIBOLD).color(count_color.scale_alpha(0.95));
+    container(row![count, muted(format!("/ {total}"), 10)].spacing(2).align_y(Alignment::Center))
+        .padding([3, 8])
+        .style(style::tinted(tone, fill, border, 10.0))
+        .into()
 }
 
 fn confidence_badge(confidence: Option<f64>) -> Element<'static, Message> {
@@ -379,10 +352,7 @@ fn confidence_badge(confidence: Option<f64>) -> Element<'static, Message> {
         .size(10)
         .font(style::MEDIUM)
         .color(tone.scale_alpha(0.95));
-    container(label)
-        .padding([2, 7])
-        .style(style::tinted(tone, 0.14, 0.35, 8.0))
-        .into()
+    container(label).padding([2, 7]).style(style::tinted(tone, 0.14, 0.35, 8.0)).into()
 }
 
 fn list_row_button_style(
@@ -408,10 +378,7 @@ fn list_row_button_style(
 
 /// A fixed-height table row of `cells`, or a button spanning the rest of it.
 fn list_row<'a>(cells: impl IntoIterator<Item = Element<'a, Message>>) -> Row<'a, Message> {
-    Row::with_children(cells)
-        .align_y(Alignment::Center)
-        .height(Length::Fixed(ROW_HEIGHT))
-        .width(Length::Fill)
+    Row::with_children(cells).align_y(Alignment::Center).height(Length::Fixed(ROW_HEIGHT)).width(Length::Fill)
 }
 
 fn row_button(label: Row<'static, Message>, message: BulkAutoTagMsg) -> button::Button<'static, Message> {
@@ -433,14 +400,10 @@ fn file_row(
 
     if let Some(error) = file.error.clone() {
         let body = container(
-            row![
-                text("✕").size(11).color(style::ERROR),
-                text(name).size(11).width(Length::Fill),
-                muted(error, 10),
-            ]
-            .spacing(8)
-            .align_y(Alignment::Center)
-            .width(Length::Fill),
+            row![text("✕").size(11).color(style::ERROR), text(name).size(11).width(Length::Fill), muted(error, 10),]
+                .spacing(8)
+                .align_y(Alignment::Center)
+                .width(Length::Fill),
         )
         .width(Length::Fill)
         .height(Length::Fixed(ROW_HEIGHT))
@@ -458,16 +421,9 @@ fn file_row(
     let accepted = file.accepted;
     let label = row![
         icon("music-solid.svg", 13.0, move |theme| {
-            if selected || accepted {
-                ACCENT.scale_alpha(0.9)
-            } else {
-                style::muted(theme)
-            }
+            if selected || accepted { ACCENT.scale_alpha(0.9) } else { style::muted(theme) }
         }),
-        text(name)
-            .size(12)
-            .width(Length::FillPortion(2))
-            .style(style::highlight_text(selected)),
+        text(name).size(12).width(Length::FillPortion(2)).style(style::highlight_text(selected)),
         container(
             text(file.suggested.clone().unwrap_or_default())
                 .size(11)
@@ -536,21 +492,14 @@ fn directory_group(
             };
             style::solid_button(
                 style::by_status(status, idle_text, Color::WHITE, Color::WHITE),
-                style::outline(
-                    style::by_status(status, idle_border, ACCENT.scale_alpha(0.70), ACCENT),
-                    0.0,
-                ),
+                style::outline(style::by_status(status, idle_border, ACCENT.scale_alpha(0.70), ACCENT), 0.0),
                 style::by_status(status, idle_bg, ACCENT.scale_alpha(0.88), ACCENT.scale_alpha(0.95)),
             )
         });
 
     let header_label = row![
         icon("folder-solid.svg", 14.0, move |theme| {
-            if dir_selected || accepted > 0 {
-                ACCENT.scale_alpha(0.95)
-            } else {
-                style::muted(theme)
-            }
+            if dir_selected || accepted > 0 { ACCENT.scale_alpha(0.95) } else { style::muted(theme) }
         }),
         text(label).size(12).font(style::SEMIBOLD).width(Length::Fill),
         dir_count_badge(accepted, count),
@@ -584,12 +533,10 @@ fn directory_group(
         .map(|(file_idx, file)| file_row(state, BulkFileKey { dir_idx, file_idx }, file, file_idx % 2 == 1));
     column![
         header,
-        container(Column::with_children(files))
-            .width(Length::Fill)
-            .style(|theme: &Theme| {
-                container::background(theme.extended_palette().background.base.color.scale_alpha(0.35))
-                    .border(style::outline(ACCENT.scale_alpha(0.12), 0.0))
-            }),
+        container(Column::with_children(files)).width(Length::Fill).style(|theme: &Theme| {
+            container::background(theme.extended_palette().background.base.color.scale_alpha(0.35))
+                .border(style::outline(ACCENT.scale_alpha(0.12), 0.0))
+        }),
     ]
     .width(Length::Fill)
     .into()
@@ -633,10 +580,7 @@ fn review_body(state: &BulkAutoTagState) -> Element<'static, Message> {
     let table_header = container(
         row![
             // Lines "File" up with the names, past each row's icon.
-            spacer(
-                Length::Fixed(FILE_INDENT + SELECTION_STRIPE_WIDTH + CHECKBOX_COLUMN_WIDTH + 16.0),
-                Length::Shrink
-            ),
+            spacer(Length::Fixed(FILE_INDENT + SELECTION_STRIPE_WIDTH + CHECKBOX_COLUMN_WIDTH + 16.0), Length::Shrink),
             muted("File", 10).width(Length::FillPortion(2)),
             muted("Suggested tag", 10).width(Length::FillPortion(1)),
             muted("Confidence", 10).width(Length::Fixed(72.0)),
@@ -651,24 +595,15 @@ fn review_body(state: &BulkAutoTagState) -> Element<'static, Message> {
     .width(Length::Fill)
     .style(style::panel(0.28, 0.16, 0.0));
 
-    let groups = state
-        .groups
-        .iter()
-        .enumerate()
-        .map(|(dir_idx, group)| directory_group(state, &root, dir_idx, group));
-    let list = container(column![
-        table_header,
-        scrollable(Column::with_children(groups).spacing(4)).height(Length::Fill),
-    ])
-    .height(Length::Fill)
-    .width(Length::Fill)
-    .style(style::panel(0.18, 0.22, 8.0));
+    let groups = state.groups.iter().enumerate().map(|(dir_idx, group)| directory_group(state, &root, dir_idx, group));
+    let list =
+        container(column![table_header, scrollable(Column::with_children(groups).spacing(4)).height(Length::Fill),])
+            .height(Length::Fill)
+            .width(Length::Fill)
+            .style(style::panel(0.18, 0.22, 8.0));
 
     let all_collapsed = dir_count > 0 && state.groups.iter().all(|group| !group.expanded);
-    let folder_summary = format!(
-        "{}  ·  {dir_count} folders · {file_count} files",
-        truncate_path(&root, 64)
-    );
+    let folder_summary = format!("{}  ·  {dir_count} folders · {file_count} files", truncate_path(&root, 64));
     column![
         stats,
         folder_line(&root, folder_summary),
@@ -723,15 +658,7 @@ fn done_body(state: &BulkAutoTagState) -> Element<'static, Message> {
         ]
         .spacing(8)
     });
-    column![
-        summary,
-        state
-            .root
-            .as_deref()
-            .map(|root| folder_line(root, truncate_path(root, 64))),
-    ]
-    .spacing(8)
-    .into()
+    column![summary, state.root.as_deref().map(|root| folder_line(root, truncate_path(root, 64))),].spacing(8).into()
 }
 
 pub fn bulk_auto_tag_view(state: &BulkAutoTagState) -> Element<'_, Message> {
@@ -763,10 +690,8 @@ pub fn bulk_auto_tag_view(state: &BulkAutoTagState) -> Element<'_, Message> {
 
     let content: Element<'_, Message> = match phase {
         BulkAutoTagPhase::PickDirectory => {
-            let root_label = state
-                .root
-                .as_deref()
-                .map_or_else(|| "No folder selected".to_string(), |path| truncate_path(path, 56));
+            let root_label =
+                state.root.as_deref().map_or_else(|| "No folder selected".to_string(), |path| truncate_path(path, 56));
             column![
                 container(
                     row![
@@ -780,10 +705,7 @@ pub fn bulk_auto_tag_view(state: &BulkAutoTagState) -> Element<'_, Message> {
                 .width(Length::Fill)
                 .style(style::panel(0.35, 0.22, 6.0)),
                 (!state.status.is_empty()).then(|| text(&state.status).size(12)),
-                state
-                    .error
-                    .as_ref()
-                    .map(|error| text(error).size(12).color(style::ERROR)),
+                state.error.as_ref().map(|error| text(error).size(12).color(style::ERROR)),
             ]
             .spacing(10)
             .into()
@@ -800,21 +722,14 @@ pub fn bulk_auto_tag_view(state: &BulkAutoTagState) -> Element<'_, Message> {
         .width(Length::Fill)
         .style(style::tinted(ACCENT, 0.10, 0.22, 6.0))
         .into(),
-        BulkAutoTagPhase::Review => container(review_body(state))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into(),
+        BulkAutoTagPhase::Review => container(review_body(state)).width(Length::Fill).height(Length::Fill).into(),
         BulkAutoTagPhase::Done => done_body(state),
     };
 
     let can_scan = phase == BulkAutoTagPhase::PickDirectory;
     let footer = modal_footer(
         [
-            modal_button(
-                "Choose folder…",
-                can_scan.then(|| BulkAutoTagMsg::PickDirectory.into()),
-                false,
-            ),
+            modal_button("Choose folder…", can_scan.then(|| BulkAutoTagMsg::PickDirectory.into()), false),
             modal_button(
                 "Scan folder",
                 (can_scan && state.root.is_some()).then(|| BulkAutoTagMsg::RunScan.into()),
@@ -826,11 +741,7 @@ pub fn bulk_auto_tag_view(state: &BulkAutoTagState) -> Element<'_, Message> {
                 true,
             ),
         ],
-        modal_button(
-            if busy { "Cancel" } else { "Close" },
-            Some(BulkAutoTagMsg::Close.into()),
-            false,
-        ),
+        modal_button(if busy { "Cancel" } else { "Close" }, Some(BulkAutoTagMsg::Close.into()), false),
     );
 
     let layout = column![header, content, footer].spacing(12).padding(20);
@@ -857,17 +768,10 @@ mod tests {
     }
 
     fn state() -> BulkAutoTagState {
-        let group = |path: &str, files| BulkDirGroup {
-            path: PathBuf::from(path),
-            files,
-            expanded: true,
-        };
+        let group = |path: &str, files| BulkDirGroup { path: PathBuf::from(path), files, expanded: true };
         BulkAutoTagState {
             groups: vec![
-                group(
-                    "a",
-                    vec![proposal("a1", true), proposal("a2", false), proposal("a3", true)],
-                ),
+                group("a", vec![proposal("a1", true), proposal("a2", false), proposal("a3", true)]),
                 group("b", vec![proposal("b1", true), proposal("b2", true)]),
             ],
             ..BulkAutoTagState::default()

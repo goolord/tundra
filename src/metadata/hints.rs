@@ -59,13 +59,7 @@ static TABLE: LazyLock<Vec<Instrument>> = LazyLock::new(|| {
         .lines()
         .map(|line| {
             let mut parts = line.splitn(3, '|');
-            let mut next = || {
-                parts
-                    .next()
-                    .expect("label|weak|names")
-                    .split(',')
-                    .filter(|s| !s.is_empty())
-            };
+            let mut next = || parts.next().expect("label|weak|names").split(',').filter(|s| !s.is_empty());
             Instrument {
                 label: next().next().expect("label"),
                 weak: next().collect(),
@@ -126,10 +120,7 @@ fn is_simple_plural(plural: &str, singular: &str) -> bool {
 }
 
 fn normalize_instrument_term(term: &str) -> String {
-    term.chars()
-        .filter(|ch| ch.is_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect()
+    term.chars().filter(|ch| ch.is_alphanumeric()).flat_map(char::to_lowercase).collect()
 }
 
 /// Bit `i` is set when `term` names instrument `i`.
@@ -172,9 +163,7 @@ pub fn instrument_hint_from_path(path: &Path) -> Option<String> {
             let length = token.chars().count() as i32;
             let hit = match hint_label_for_term(&token) {
                 Some(label) => Some((base + length, label)),
-                None => weak_hint_label(&token)
-                    .filter(|_| allow_weak)
-                    .map(|label| (base / 100 + length, label)),
+                None => weak_hint_label(&token).filter(|_| allow_weak).map(|label| (base / 100 + length, label)),
             };
             if let Some((score, label)) = hit
                 && best.is_none_or(|(best_score, _)| score > best_score)
@@ -221,35 +210,24 @@ fn should_stop_artist_walk(path: &Path) -> bool {
     static TEMP_DIRS: LazyLock<Vec<std::path::PathBuf>> = LazyLock::new(|| {
         let temp = std::env::temp_dir();
         let canonical = crate::path_util::canonical_path(&temp).ok();
-        [Some(temp), canonical]
-            .into_iter()
-            .flatten()
-            .map(|dir| crate::path_util::cache_key(&dir))
-            .collect()
+        [Some(temp), canonical].into_iter().flatten().map(|dir| crate::path_util::cache_key(&dir)).collect()
     });
     path.parent().is_none() || TEMP_DIRS.contains(&crate::path_util::cache_key(path))
 }
 
 fn path_segment_is_ephemeral_temp(name: &str) -> bool {
-    name.split('_')
-        .any(|part| part.len() >= 8 && part.chars().all(|ch| ch.is_ascii_digit()))
+    name.split('_').any(|part| part.len() >= 8 && part.chars().all(|ch| ch.is_ascii_digit()))
 }
 
 fn is_generic_path_segment(name: &str) -> bool {
-    static NORMALIZED: LazyLock<HashSet<String>> = LazyLock::new(|| {
-        GENERIC_PATH_SEGMENTS
-            .split(',')
-            .map(normalize_instrument_term)
-            .collect()
-    });
+    static NORMALIZED: LazyLock<HashSet<String>> =
+        LazyLock::new(|| GENERIC_PATH_SEGMENTS.split(',').map(normalize_instrument_term).collect());
     let norm = normalize_instrument_term(name);
     norm.is_empty() || NORMALIZED.contains(&norm)
 }
 
 fn path_segment_is_instrument_category(name: &str) -> bool {
-    hint_name_tokens(name)
-        .iter()
-        .any(|token| hint_label_for_term(token).is_some())
+    hint_name_tokens(name).iter().any(|token| hint_label_for_term(token).is_some())
 }
 
 fn path_segment_is_pack_metadata(name: &str) -> bool {
@@ -263,11 +241,7 @@ fn path_segment_is_pack_metadata(name: &str) -> bool {
 
 fn format_path_segment_as_artist(name: &str) -> String {
     let primary = name.split(" - ").next().unwrap_or(name).trim();
-    primary
-        .replace('_', " ")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
+    primary.replace('_', " ").split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Candidate words in a file or folder name: the whole name, each word (split
@@ -277,10 +251,7 @@ fn hint_name_tokens(name: &str) -> Vec<String> {
     let mut words: Vec<String> = Vec::new();
     let mut current = String::new();
     for ch in name.chars() {
-        let boundary = current
-            .chars()
-            .last()
-            .is_some_and(|last| last.is_numeric() != ch.is_numeric());
+        let boundary = current.chars().last().is_some_and(|last| last.is_numeric() != ch.is_numeric());
         if (!ch.is_alphanumeric() || boundary) && !current.is_empty() {
             words.push(normalize_instrument_term(&current));
             current.clear();
@@ -302,10 +273,7 @@ fn hint_name_tokens(name: &str) -> Vec<String> {
 
 fn weak_hint_label(term: &str) -> Option<&'static str> {
     let needle = normalize_instrument_term(term);
-    TABLE
-        .iter()
-        .find(|group| group.weak.contains(&needle.as_str()))
-        .map(|group| group.label)
+    TABLE.iter().find(|group| group.weak.contains(&needle.as_str())).map(|group| group.label)
 }
 
 fn hint_label_for_term(term: &str) -> Option<&'static str> {

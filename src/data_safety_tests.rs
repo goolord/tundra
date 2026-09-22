@@ -17,10 +17,7 @@ fn write_auto_tags_falls_back_to_the_sidecar_and_leaves_no_temps() {
     write_minimal_wav(&wav);
 
     crate::tag_store::with_test_db(dir.path().join("tags.db"), || {
-        assert!(
-            write_auto_tags(&broken, "Kick").expect("fallback write"),
-            "unwritable container uses the sidecar"
-        );
+        assert!(write_auto_tags(&broken, "Kick").expect("fallback write"), "unwritable container uses the sidecar");
         assert_eq!(fs::read(&broken).expect("bytes unchanged"), junk);
         assert_eq!(crate::tag_store::instrument(&broken).as_deref(), Some("Kick"));
         assert_eq!(crate::tag_store::tag_version(&broken), Some(TUNDRA_TAG_VERSION));
@@ -51,14 +48,9 @@ fn caches_recover_from_crash_aside() {
 
     let root = PathBuf::from("samples");
     let dirs = HashMap::from([(root.clone(), vec![root.join("kick.wav")])]);
-    cache_recovers_from_crash_aside("dir-cache", "dir_cache.bin", |path| {
-        DirCache::persist_map_to(path, &dirs)
-    });
+    cache_recovers_from_crash_aside("dir-cache", "dir_cache.bin", |path| DirCache::persist_map_to(path, &dirs));
 
-    let cached = crate::metadata::CachedMetadata {
-        mtime_secs: 1,
-        fields: crate::metadata::TagFields::default(),
-    };
+    let cached = crate::metadata::CachedMetadata { mtime_secs: 1, fields: crate::metadata::TagFields::default() };
     let metadata = HashMap::from([(root.join("kick.wav"), cached)]);
     cache_recovers_from_crash_aside("metadata-cache", "metadata_cache.bin", |path| {
         MetadataCache::persist_map_to(path, &metadata)
@@ -132,8 +124,7 @@ fn mp3_write_keeps_id3_frames_tundra_does_not_manage() {
         let mut id3 = mp3.remove_id3v2().unwrap_or_default();
         id3.insert_user_text("DAW_PROJECT".into(), "session-42".into());
         mp3.set_id3v2(id3);
-        mp3.save_to_path(&audio, WriteOptions::default())
-            .expect("seed foreign frame");
+        mp3.save_to_path(&audio, WriteOptions::default()).expect("seed foreign frame");
     }
 
     crate::tag_store::with_test_db(dir.path().join("tags.db"), || {
@@ -142,10 +133,7 @@ fn mp3_write_keeps_id3_frames_tundra_does_not_manage() {
 
     let mut file = fs::File::open(&audio).expect("open");
     let mp3 = MpegFile::read_from(&mut file, ParseOptions::new()).expect("parse");
-    assert_eq!(
-        mp3.id3v2().and_then(|tag| tag.get_user_text("DAW_PROJECT")),
-        Some("session-42")
-    );
+    assert_eq!(mp3.id3v2().and_then(|tag| tag.get_user_text("DAW_PROJECT")), Some("session-42"));
 }
 
 #[test]
@@ -178,16 +166,8 @@ fn write_aborts_when_the_file_changes_or_disappears_mid_write() {
     const EXTERNAL: &[u8] = b"another program saved this";
     type Edit = (&'static str, fn(&Path), Option<&'static [u8]>);
     let edits: [Edit; 2] = [
-        (
-            "changed-mid-write",
-            |dest| fs::write(dest, EXTERNAL).expect("external write"),
-            Some(EXTERNAL),
-        ),
-        (
-            "deleted-mid-write",
-            |dest| fs::remove_file(dest).expect("user deletes file"),
-            None,
-        ),
+        ("changed-mid-write", |dest| fs::write(dest, EXTERNAL).expect("external write"), Some(EXTERNAL)),
+        ("deleted-mid-write", |dest| fs::remove_file(dest).expect("user deletes file"), None),
     ];
     for (case, edit, expected) in edits {
         let dir = ScratchDir::new(case);
@@ -199,11 +179,7 @@ fn write_aborts_when_the_file_changes_or_disappears_mid_write() {
         });
         let err = result.expect_err("the write must abort");
         assert!(expected.is_none() || err.contains("changed on disk"), "{case}: {err}");
-        assert_eq!(
-            fs::read(&dest).ok().as_deref(),
-            expected,
-            "{case}: never overwritten or resurrected"
-        );
+        assert_eq!(fs::read(&dest).ok().as_deref(), expected, "{case}: never overwritten or resurrected");
         assert_eq!(dir.sidecar_count(), 0, "{case}");
     }
 }
@@ -215,10 +191,7 @@ fn sidecar_instrument_survives_a_native_write_of_other_fields() {
 
     crate::tag_store::with_test_db(dir.path().join("tags.db"), || {
         crate::tag_store::set_instrument(&audio, "Kick", TUNDRA_TAG_VERSION).expect("sidecar");
-        let edits = ManualTagEdits {
-            title: "Boom".into(),
-            ..ManualTagEdits::default()
-        };
+        let edits = ManualTagEdits { title: "Boom".into(), ..ManualTagEdits::default() };
         write_manual_tags(&audio, &edits).expect("native write");
         assert_eq!(
             crate::tag_store::instrument(&audio).as_deref(),
@@ -299,10 +272,7 @@ fn write_that_would_truncate_audio_is_refused_and_falls_back_to_sidecar() {
     crate::tag_store::with_test_db(dir.path().join("tags.db"), || {
         write_manual_tags(&audio, &full_edits()).expect("sidecar fallback");
         assert_eq!(fs::read(&audio).expect("unchanged"), original);
-        assert_eq!(
-            crate::tag_store::manual_fields(&audio).map(|fields| fields.title),
-            Some("Crack".into())
-        );
+        assert_eq!(crate::tag_store::manual_fields(&audio).map(|fields| fields.title), Some("Crack".into()));
     });
     assert_eq!(dir.sidecar_count(), 0);
 }

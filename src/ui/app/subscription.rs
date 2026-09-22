@@ -9,9 +9,7 @@ use std::time::Duration;
 
 /// A message every `millis` milliseconds.
 fn every(millis: u64) -> Subscription<()> {
-    Subscription::run_with(millis, |&millis| {
-        async_io::Timer::interval(Duration::from_millis(millis)).map(|_| ())
-    })
+    Subscription::run_with(millis, |&millis| async_io::Timer::interval(Duration::from_millis(millis)).map(|_| ()))
 }
 
 fn global_event(event: Event, status: event::Status, _window: window::Id) -> Option<Message> {
@@ -23,12 +21,11 @@ fn global_event(event: Event, status: event::Status, _window: window::Id) -> Opt
         Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => Some(Message::MouseReleased),
         Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => Some(Message::ModifiersChanged(modifiers)),
         // Shortcuts only see keys no focused widget took.
-        Event::Keyboard(keyboard::Event::KeyPressed {
-            key,
-            modifiers,
-            repeat: false,
-            ..
-        }) if status == event::Status::Ignored => Some(Message::KeyPressed(key, modifiers)),
+        Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, repeat: false, .. })
+            if status == event::Status::Ignored =>
+        {
+            Some(Message::KeyPressed(key, modifiers))
+        }
         _ => None,
     }
 }

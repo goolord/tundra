@@ -22,9 +22,7 @@ pub struct Pref<T: 'static> {
 
 impl<T: Copy + Serialize + DeserializeOwned> Pref<T> {
     pub fn load(&self) -> T {
-        cache_file(self.file)
-            .and_then(|path| read_bincode(&path))
-            .map_or(self.default, self.clean)
+        cache_file(self.file).and_then(|path| read_bincode(&path)).map_or(self.default, self.clean)
     }
 
     pub fn save(&self, value: T) {
@@ -39,11 +37,7 @@ pub const SIDEBAR_WIDTH: Pref<f32> = Pref {
     label: "sidebar width",
     default: DEFAULT_SIDEBAR_WIDTH,
     clean: |width| {
-        if width.is_finite() {
-            width.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH)
-        } else {
-            DEFAULT_SIDEBAR_WIDTH
-        }
+        if width.is_finite() { width.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH) } else { DEFAULT_SIDEBAR_WIDTH }
     },
 };
 pub const VOLUME: Pref<f32> = Pref {
@@ -52,25 +46,12 @@ pub const VOLUME: Pref<f32> = Pref {
     default: 1.0,
     clean: |volume| if volume.is_finite() { clamp_volume(volume) } else { 1.0 },
 };
-pub const LOOPING: Pref<bool> = Pref {
-    file: "looping.bin",
-    label: "loop",
-    default: false,
-    clean: |looping| looping,
-};
-pub const ALWAYS_ON_TOP: Pref<bool> = Pref {
-    file: "always_on_top.bin",
-    label: "always on top",
-    default: false,
-    clean: |always_on_top| always_on_top,
-};
+pub const LOOPING: Pref<bool> = Pref { file: "looping.bin", label: "loop", default: false, clean: |looping| looping };
+pub const ALWAYS_ON_TOP: Pref<bool> =
+    Pref { file: "always_on_top.bin", label: "always on top", default: false, clean: |always_on_top| always_on_top };
 
 pub fn window_level(always_on_top: bool) -> window::Level {
-    if always_on_top {
-        window::Level::AlwaysOnTop
-    } else {
-        window::Level::Normal
-    }
+    if always_on_top { window::Level::AlwaysOnTop } else { window::Level::Normal }
 }
 
 /// Run `task` against the app window, or do nothing if there is none yet.

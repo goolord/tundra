@@ -49,18 +49,14 @@ impl ClassifyCache {
     /// analysis started. If the file changed since, the entry never matches.
     fn insert(&mut self, path: &Path, stamp: FileStamp, result: &ClassificationResult) {
         let result = result.clone();
-        self.entries
-            .insert(cache_key(path), CachedClassification { stamp, result });
+        self.entries.insert(cache_key(path), CachedClassification { stamp, result });
         self.dirty = true;
     }
 }
 
 static CACHE: LazyLock<Mutex<ClassifyCache>> = LazyLock::new(|| {
     let entries = app_data::cache_file(CACHE_FILE).and_then(|path| app_data::read_bincode(&path));
-    Mutex::new(ClassifyCache {
-        entries: entries.unwrap_or_default(),
-        dirty: false,
-    })
+    Mutex::new(ClassifyCache { entries: entries.unwrap_or_default(), dirty: false })
 });
 
 pub fn get_cached(path: &Path) -> Option<ClassificationResult> {
@@ -106,15 +102,10 @@ mod tests {
         cache.persist_to(&file);
         assert!(!cache.dirty);
         assert_eq!(dir.sidecar_count(), 0);
-        let cache = ClassifyCache {
-            entries: app_data::read_bincode(&file).expect("reload"),
-            dirty: false,
-        };
+        let cache = ClassifyCache { entries: app_data::read_bincode(&file).expect("reload"), dirty: false };
         assert_eq!(cache.get(&audio).map(|result| result.instrument), Some("Kick".into()));
 
-        let modified = std::fs::metadata(&audio)
-            .and_then(|meta| meta.modified())
-            .expect("mtime");
+        let modified = std::fs::metadata(&audio).and_then(|meta| meta.modified()).expect("mtime");
         std::fs::write(&audio, b"different audio").expect("replace");
         std::fs::File::options()
             .write(true)

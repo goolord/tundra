@@ -16,11 +16,7 @@ pub struct Dialog {
 
 impl Dialog {
     pub fn new(title: &str, body: String) -> Self {
-        Self {
-            title: title.into(),
-            body,
-            rows: Vec::new(),
-        }
+        Self { title: title.into(), body, rows: Vec::new() }
     }
 
     pub fn waveform_help() -> Self {
@@ -44,10 +40,7 @@ impl Dialog {
             text(&self.title).size(18),
             (!self.body.is_empty()).then(|| text(&self.body).size(14).width(Length::Fill)),
             (!self.rows.is_empty()).then(|| table(&self.rows)),
-            row![
-                spacer(Length::Fill, Length::Shrink),
-                button(text("OK")).on_press(Message::DismissDialog),
-            ],
+            row![spacer(Length::Fill, Length::Shrink), button(text("OK")).on_press(Message::DismissDialog),],
         ];
         opaque(container(body.spacing(12).padding(16).width(Length::Fixed(440.0))).style(style::card(8.0)))
     }
@@ -55,16 +48,8 @@ impl Dialog {
 
 fn table(rows: &[(&'static str, &'static str)]) -> Element<'static, Message> {
     let line = |input, action, size, alpha| {
-        let cell = move |label| {
-            text(label)
-                .size(size)
-                .width(Length::FillPortion(1))
-                .style(style::faded_text(alpha))
-        };
-        row![cell(input), cell(action)]
-            .spacing(12)
-            .align_y(Alignment::Center)
-            .width(Length::Fill)
+        let cell = move |label| text(label).size(size).width(Length::FillPortion(1)).style(style::faded_text(alpha));
+        row![cell(input), cell(action)].spacing(12).align_y(Alignment::Center).width(Length::Fill)
     };
     let header = container(line("Input", "Action", 10, 0.62))
         .padding([6, 10])
@@ -96,21 +81,15 @@ fn table(rows: &[(&'static str, &'static str)]) -> Element<'static, Message> {
 
 /// Dims `base` and centers `overlay` on top; clicks never reach `base`.
 pub fn with_dim_overlay<'a>(base: Element<'a, Message>, overlay: Element<'a, Message>) -> Element<'a, Message> {
-    stack![base, opaque(container(center(overlay)).style(dim_scrim))]
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+    stack![base, opaque(container(center(overlay)).style(dim_scrim))].width(Length::Fill).height(Length::Fill).into()
 }
 
 /// Shows `dialog` over `base`; clicking outside it dismisses.
 pub fn with_dialog<'a>(base: Element<'a, Message>, dialog: &'a Dialog) -> Element<'a, Message> {
-    stack![
-        base,
-        opaque(mouse_area(center(dialog.view()).style(dim_scrim)).on_press(Message::DismissDialog))
-    ]
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .into()
+    stack![base, opaque(mouse_area(center(dialog.view()).style(dim_scrim)).on_press(Message::DismissDialog))]
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
 }
 
 fn dim_scrim(_theme: &iced::Theme) -> container::Style {

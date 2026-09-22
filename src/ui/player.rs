@@ -216,11 +216,7 @@ impl Player {
     /// Copies the audio thread's playhead into the time label.
     pub fn sync_playback_ui(&mut self) {
         if !self.controls.scrubbing
-            && let Some(progress) = self
-                .controls
-                .playback_position
-                .as_ref()
-                .map(|position| position.progress())
+            && let Some(progress) = self.controls.playback_position.as_ref().map(|position| position.progress())
         {
             self.set_progress(progress);
         }
@@ -260,18 +256,12 @@ impl Player {
                     )
                 })
                 .style(context_menu_style);
-                container(menu)
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .padding(2)
-                    .into()
+                container(menu).width(Length::Fill).height(Length::Fill).padding(2).into()
             }
             None => spacer(Length::Fill, Length::Fill).into(),
         };
-        let track = self
-            .current_file
-            .as_deref()
-            .and_then(|path| Some((crate::path_util::file_name_lossy(path)?, path)));
+        let track =
+            self.current_file.as_deref().and_then(|path| Some((crate::path_util::file_name_lossy(path)?, path)));
 
         container(column![waveform_area, self.controls.view(track)])
             .width(Length::Fill)
@@ -287,35 +277,30 @@ fn accent(theme: &Theme) -> Color {
 
 fn waveform_toolbar(zoom: f32, tags: Vec<(TagField, String)>) -> Element<'static, Message> {
     let zoom_button = |label, message: WaveformMsg| {
-        button(text(label).size(15))
-            .padding([2, 10])
-            .on_press(message.into())
-            .style(|theme: &Theme, status| {
-                let palette = theme.extended_palette();
-                let (accent, text_color) = (accent(theme), palette.background.base.text);
-                let idle_border = palette.background.strong.color.scale_alpha(0.35);
-                button::Style {
-                    text_color: style::by_status(status, style::text_alpha(theme, 0.82), text_color, text_color),
-                    border: style::outline(
-                        style::by_status(status, idle_border, accent.scale_alpha(0.35), idle_border),
-                        6.0,
-                    ),
-                    ..button::Style::default()
-                }
-                .with_background(style::by_status(
-                    status,
-                    palette.background.weak.color.scale_alpha(0.42),
-                    accent.scale_alpha(0.18),
-                    accent.scale_alpha(0.28),
-                ))
-            })
+        button(text(label).size(15)).padding([2, 10]).on_press(message.into()).style(|theme: &Theme, status| {
+            let palette = theme.extended_palette();
+            let (accent, text_color) = (accent(theme), palette.background.base.text);
+            let idle_border = palette.background.strong.color.scale_alpha(0.35);
+            button::Style {
+                text_color: style::by_status(status, style::text_alpha(theme, 0.82), text_color, text_color),
+                border: style::outline(
+                    style::by_status(status, idle_border, accent.scale_alpha(0.35), idle_border),
+                    6.0,
+                ),
+                ..button::Style::default()
+            }
+            .with_background(style::by_status(
+                status,
+                palette.background.weak.color.scale_alpha(0.42),
+                accent.scale_alpha(0.18),
+                accent.scale_alpha(0.28),
+            ))
+        })
     };
     let zoom_label = text(format!("Zoom {zoom:.1}×"))
         .size(11)
         .font(style::SEMIBOLD)
-        .style(|theme: &Theme| text::Style {
-            color: Some(accent(theme).scale_alpha(0.92)),
-        });
+        .style(|theme: &Theme| text::Style { color: Some(accent(theme).scale_alpha(0.92)) });
     let zoom_label = container(zoom_label)
         .padding([4, 8])
         .style(|theme: &Theme| style::tinted(accent(theme), 0.14, 0.24, 6.0)(theme));
@@ -333,29 +318,20 @@ fn waveform_toolbar(zoom: f32, tags: Vec<(TagField, String)>) -> Element<'static
     if !tags.is_empty() {
         bar = bar.push(toolbar_tags(tags));
     }
-    container(bar)
-        .width(Length::Fill)
-        .style(style::panel(0.48, 0.28, 0.0))
-        .into()
+    container(bar).width(Length::Fill).style(style::panel(0.48, 0.28, 0.0)).into()
 }
 
 fn toolbar_tags(tags: Vec<(TagField, String)>) -> Element<'static, Message> {
     let chips = tags.into_iter().map(|(field, value)| {
         let accent = style::tag_field_color(field);
-        let label = text(field.label())
-            .size(9)
-            .font(style::SEMIBOLD)
-            .color(accent.scale_alpha(0.88));
+        let label = text(field.label()).size(9).font(style::SEMIBOLD).color(accent.scale_alpha(0.88));
         let value = text(value).size(11).font(style::MEDIUM).style(style::faded_text(0.92));
         container(row![label, value].spacing(4).align_y(Alignment::Center))
             .padding([3, 8])
             .style(style::tinted(accent, 0.12, 0.28, 6.0))
             .into()
     });
-    let strip = Row::with_children(chips)
-        .spacing(6)
-        .align_y(Alignment::Center)
-        .padding([0, 2]);
+    let strip = Row::with_children(chips).spacing(6).align_y(Alignment::Center).padding([0, 2]);
     container(
         scrollable(strip)
             .direction(Direction::Horizontal(Scrollbar::new().width(3).scroller_width(3)))
@@ -371,26 +347,17 @@ impl Controls {
     fn time_labels(&self) -> (String, String) {
         let progress = self
             .playback_progress
-            .map(|shown| {
-                self.playback_position
-                    .as_ref()
-                    .map_or(shown, |position| position.progress())
-            })
+            .map(|shown| self.playback_position.as_ref().map_or(shown, |position| position.progress()))
             .unwrap_or(0.0);
         let label = |secs: Option<f64>| secs.map(format_duration).unwrap_or_else(|| "--:--".into());
-        (
-            label(self.track_duration.map(|duration| progress.clamp(0.0, 1.0) * duration)),
-            label(self.track_duration),
-        )
+        (label(self.track_duration.map(|duration| progress.clamp(0.0, 1.0) * duration)), label(self.track_duration))
     }
 
     fn view(&self, track: Option<(String, &Path)>) -> Element<'_, Message> {
         let track_info: Element<'_, Message> = match track {
             Some((name, path)) => {
                 let (current, total) = self.time_labels();
-                container(track_info_row(name, path.to_path_buf(), current, total))
-                    .width(Length::FillPortion(2))
-                    .into()
+                container(track_info_row(name, path.to_path_buf(), current, total)).width(Length::FillPortion(2)).into()
             }
             None => spacer(Length::Fill, Length::Shrink).into(),
         };
@@ -464,10 +431,7 @@ fn transport_button(
             let (background, border_color) = if primary {
                 let hovered = accent.scale_alpha(if lit { 0.92 } else { 0.22 });
                 let idle = if lit { accent } else { idle };
-                (
-                    style::by_status(status, idle, hovered, accent.scale_alpha(0.78)),
-                    accent.scale_alpha(0.55),
-                )
+                (style::by_status(status, idle, hovered, accent.scale_alpha(0.78)), accent.scale_alpha(0.55))
             } else {
                 let background = style::by_status(status, idle, strong.scale_alpha(0.28), strong.scale_alpha(0.42));
                 (background, strong.scale_alpha(0.35))
@@ -482,19 +446,12 @@ fn transport_button(
 }
 
 fn track_info_row(name: String, path: PathBuf, current: String, total: String) -> Element<'static, Message> {
-    let time = |label: String, alpha| {
-        text(label)
-            .size(12)
-            .font(iced::Font::MONOSPACE)
-            .style(style::faded_text(alpha))
-    };
+    let time = |label: String, alpha| text(label).size(12).font(iced::Font::MONOSPACE).style(style::faded_text(alpha));
     let separator = |glyph| text(glyph).size(11).style(style::faded_text(0.42));
     mouse_area(
         row![
             icon("music-solid.svg", 14.0, |theme| accent(theme).scale_alpha(0.85)),
-            container(text(name).size(12).style(style::faded_text(0.72)))
-                .width(Length::Fill)
-                .clip(true),
+            container(text(name).size(12).style(style::faded_text(0.72))).width(Length::Fill).clip(true),
             separator("·"),
             time(current, 0.62),
             separator("/"),
@@ -503,10 +460,7 @@ fn track_info_row(name: String, path: PathBuf, current: String, total: String) -
         .spacing(6)
         .align_y(Alignment::Center),
     )
-    .on_press(Message::FileDragPress {
-        path,
-        from_file_list: false,
-    })
+    .on_press(Message::FileDragPress { path, from_file_list: false })
     .interaction(iced::mouse::Interaction::Grab)
     .into()
 }
@@ -538,11 +492,7 @@ fn volume_slider_style(theme: &Theme, status: slider::Status) -> slider::Style {
 pub fn format_duration(secs: f64) -> String {
     let total = secs.max(0.0).floor() as u64;
     let (hours, minutes, seconds) = (total / 3600, total / 60 % 60, total % 60);
-    if hours > 0 {
-        format!("{hours}:{minutes:02}:{seconds:02}")
-    } else {
-        format!("{minutes}:{seconds:02}")
-    }
+    if hours > 0 { format!("{hours}:{minutes:02}:{seconds:02}") } else { format!("{minutes}:{seconds:02}") }
 }
 
 #[cfg(test)]
@@ -567,16 +517,8 @@ mod tests {
 
     #[test]
     fn seek_moves_the_shared_position_only_once_a_worker_is_attached() {
-        assert_eq!(
-            seek_to_quarter(true),
-            0.25,
-            "playhead should already read the seek target"
-        );
-        assert_eq!(
-            seek_to_quarter(false),
-            0.9,
-            "a queued seek must not advertise a frame playback never reached"
-        );
+        assert_eq!(seek_to_quarter(true), 0.25, "playhead should already read the seek target");
+        assert_eq!(seek_to_quarter(false), 0.9, "a queued seek must not advertise a frame playback never reached");
     }
 
     #[test]

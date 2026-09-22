@@ -36,11 +36,7 @@ impl App {
 
     /// Re-runs the search when a tag write changed the index.
     fn tags_written(&mut self, changed: bool) -> Task<Message> {
-        if changed {
-            self.refresh_search_if_active()
-        } else {
-            Task::none()
-        }
+        if changed { self.refresh_search_if_active() } else { Task::none() }
     }
 
     pub(super) fn update_settings(&mut self, message: SettingsMsg) -> Task<Message> {

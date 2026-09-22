@@ -68,10 +68,7 @@ struct PlotArea {
 impl PlotArea {
     fn from_size(size: Size) -> Self {
         let (x, y) = (AMPLITUDE_GUTTER, AMPLITUDE_PAD_TOP);
-        let (width, height) = (
-            (size.width - x).max(1.0),
-            (size.height - y - TIME_MARKER_HEIGHT).max(1.0),
-        );
+        let (width, height) = ((size.width - x).max(1.0), (size.height - y - TIME_MARKER_HEIGHT).max(1.0));
         Self { x, y, width, height }
     }
 
@@ -246,11 +243,9 @@ impl WaveForm {
             return Some(view);
         }
         let plot = PlotArea::from_size(bounds.size());
-        let anchor_x = cursor
-            .position_in(bounds)
-            .map_or(0.5, |point| ((point.x - plot.x) / plot.width).clamp(0.0, 1.0));
-        view.accumulate_wheel(y, anchor_x, self.sample_count, &mut state.wheel_lines)
-            .then_some(view)
+        let anchor_x =
+            cursor.position_in(bounds).map_or(0.5, |point| ((point.x - plot.x) / plot.width).clamp(0.0, 1.0));
+        view.accumulate_wheel(y, anchor_x, self.sample_count, &mut state.wheel_lines).then_some(view)
     }
 }
 
@@ -406,17 +401,14 @@ impl Program<Message> for WaveForm {
                 let (anchor, last_x) = state.pan.as_mut()?;
                 let dx = position.x - std::mem::replace(last_x, position.x);
                 let visible = view::visible_fraction_of(self.sample_count, self.view.zoom);
-                let mut view = state.last_pan_view.unwrap_or(WaveFormView {
-                    zoom: self.view.zoom,
-                    ..*anchor
-                });
+                let mut view = state.last_pan_view.unwrap_or(WaveFormView { zoom: self.view.zoom, ..*anchor });
                 view.apply_pan_delta(-f64::from(dx) / f64::from(plot.width) * visible, self.sample_count);
                 state.last_pan_view = Some(view);
                 Some(Action::request_redraw().and_capture())
             }
-            mouse::Event::WheelScrolled { delta } if cursor.is_over(bounds) => self
-                .wheel(state, delta, bounds, cursor)
-                .and_then(|view| publish(WaveformMsg::ViewChanged(view))),
+            mouse::Event::WheelScrolled { delta } if cursor.is_over(bounds) => {
+                self.wheel(state, delta, bounds, cursor).and_then(|view| publish(WaveformMsg::ViewChanged(view)))
+            }
             _ => None,
         }
     }
@@ -446,11 +438,7 @@ mod tests {
         let peaks = Arc::new(Mutex::new(WaveformPeaks::empty()));
         let position = PlaybackPosition::new(sample_count as u64);
         let mut waveform = WaveForm::new(sample_count, 48_000, peaks, position, Default::default());
-        waveform.view = WaveFormView {
-            zoom,
-            offset,
-            overscroll,
-        };
+        waveform.view = WaveFormView { zoom, offset, overscroll };
         waveform
     }
 
@@ -462,16 +450,9 @@ mod tests {
             let tolerance = 1.0 + plot.width / wf.view.sample_window(SAMPLES).1 as f32;
             for step in 0..=20 {
                 let x = plot.x + plot.width * (step as f32 / 20.0);
-                let progress = wf
-                    .progress_at_x(wf.view, plot, x)
-                    .expect("click inside the plot resolves");
-                let back = wf
-                    .playhead_screen_x(wf.view, plot, progress)
-                    .expect("progress resolves back");
-                assert!(
-                    (back - x).abs() <= tolerance,
-                    "zoom {zoom} offset {offset}: clicked {x}, drawn at {back}"
-                );
+                let progress = wf.progress_at_x(wf.view, plot, x).expect("click inside the plot resolves");
+                let back = wf.playhead_screen_x(wf.view, plot, progress).expect("progress resolves back");
+                assert!((back - x).abs() <= tolerance, "zoom {zoom} offset {offset}: clicked {x}, drawn at {back}");
             }
         }
     }
@@ -491,15 +472,9 @@ mod tests {
                 let x = width * (step as f32 / 10.0);
                 let drawn = (x - origin_x) * scale_x + origin_x + translate_x;
                 let mapped = wf.map_content_x(view, width, x);
-                assert!(
-                    (mapped - drawn).abs() < 1e-3,
-                    "{offset}/{overscroll}: {x} drawn at {drawn}, mapped {mapped}"
-                );
+                assert!((mapped - drawn).abs() < 1e-3, "{offset}/{overscroll}: {x} drawn at {drawn}, mapped {mapped}");
                 let back = wf.unmap_content_x(view, width, mapped);
-                assert!(
-                    (back - x).abs() < 1e-2,
-                    "{offset}/{overscroll}: {x} round-tripped to {back}"
-                );
+                assert!((back - x).abs() < 1e-2, "{offset}/{overscroll}: {x} round-tripped to {back}");
             }
         }
     }
@@ -507,10 +482,7 @@ mod tests {
     #[test]
     fn cache_key_includes_plot_width() {
         let wf = waveform(10_000, 1.0, 0.0, 0.0);
-        assert_ne!(
-            wf.content_cache_key(&Theme::Dark, 400.0),
-            wf.content_cache_key(&Theme::Dark, 800.0)
-        );
+        assert_ne!(wf.content_cache_key(&Theme::Dark, 400.0), wf.content_cache_key(&Theme::Dark, 800.0));
     }
 
     #[test]
@@ -522,9 +494,6 @@ mod tests {
         // to the left rather than parked on the first visible sample.
         let progress = (start as f64 / 2.0) / SAMPLES as f64;
         let x = wf.playhead_content_x(wf.view, 832.0, progress).expect("playhead x");
-        assert!(
-            x < 0.0,
-            "playhead for a sample before the window should be left of the plot, got {x}"
-        );
+        assert!(x < 0.0, "playhead for a sample before the window should be left of the plot, got {x}");
     }
 }

@@ -106,9 +106,7 @@ fn prepare_schema(connection: &Connection) -> Result<(), String> {
         // Adding a column and back-filling it commit together, or a failed
         // back-fill would never be retried.
         let transaction = connection.unchecked_transaction().map_err(fail)?;
-        transaction
-            .execute(&format!("ALTER TABLE instrument_tags ADD COLUMN {column} {decl}"), [])
-            .map_err(fail)?;
+        transaction.execute(&format!("ALTER TABLE instrument_tags ADD COLUMN {column} {decl}"), []).map_err(fail)?;
         if column == "user_owned" {
             // Rows written before ownership was tracked: any manual field
             // besides the instrument means the tag editor wrote the row.
@@ -132,9 +130,7 @@ const ROW_COLUMNS: &str =
 
 fn load_rows(connection: &Connection) -> Result<HashMap<PathBuf, Row>, String> {
     let fail = |err: rusqlite::Error| format!("Failed to read tag store: {err}");
-    let mut statement = connection
-        .prepare(&format!("SELECT {ROW_COLUMNS} FROM instrument_tags"))
-        .map_err(fail)?;
+    let mut statement = connection.prepare(&format!("SELECT {ROW_COLUMNS} FROM instrument_tags")).map_err(fail)?;
     let rows = statement
         .query_map([], |row| {
             let unsigned = |index| row.get::<_, i64>(index).map(|value| value.max(0) as u64);
@@ -148,12 +144,8 @@ fn load_rows(connection: &Connection) -> Result<HashMap<PathBuf, Row>, String> {
                 comment: row.get(10)?,
             };
             let path: String = row.get(0)?;
-            let stored = Row {
-                fields,
-                tag_version: row.get(2)?,
-                stamp: (unsigned(3)?, unsigned(4)?),
-                user_owned: row.get(11)?,
-            };
+            let stored =
+                Row { fields, tag_version: row.get(2)?, stamp: (unsigned(3)?, unsigned(4)?), user_owned: row.get(11)? };
             Ok((cache_key(Path::new(&path)), stored))
         })
         .map_err(fail)?;
@@ -227,10 +219,7 @@ fn open_store() -> TagStore {
         database = Err(err);
         HashMap::new()
     });
-    TagStore {
-        rows: RwLock::new(rows),
-        database: Mutex::new(database),
-    }
+    TagStore { rows: RwLock::new(rows), database: Mutex::new(database) }
 }
 
 /// Behind a lock only so `with_test_db` can swap in another database.
@@ -334,10 +323,8 @@ pub fn clear_manual_fields(path: &Path) -> Result<(), String> {
         return modify(path, |_| Some(Change::Delete));
     }
     update(path, |row| {
-        row.fields = ManualTagEdits {
-            instrument: std::mem::take(&mut row.fields.instrument),
-            ..ManualTagEdits::default()
-        };
+        row.fields =
+            ManualTagEdits { instrument: std::mem::take(&mut row.fields.instrument), ..ManualTagEdits::default() };
     })
 }
 
@@ -419,10 +406,7 @@ mod tests {
         let writer = Connection::open(&src).expect("open src");
         prepare_schema(&writer).expect("schema");
         writer
-            .execute(
-                "INSERT INTO instrument_tags (path, instrument) VALUES ('c:/kick.wav', 'Kick')",
-                [],
-            )
+            .execute("INSERT INTO instrument_tags (path, instrument) VALUES ('c:/kick.wav', 'Kick')", [])
             .expect("insert");
 
         // `writer` stays open, so the row may still live only in the WAL.
@@ -456,10 +440,7 @@ mod tests {
         with_test_db(db, || {
             assert_eq!(instrument(&audio).as_deref(), Some("Kick"), "reloaded from disk");
             std::fs::write(&audio, b"short").expect("replace file");
-            assert!(
-                instrument(&audio).is_none(),
-                "stamp mismatch must hide stale sidecar row"
-            );
+            assert!(instrument(&audio).is_none(), "stamp mismatch must hide stale sidecar row");
             std::fs::remove_file(&audio).expect("remove file");
             assert!(instrument(&audio).is_none(), "missing file hides the row");
         });
@@ -471,11 +452,8 @@ mod tests {
         let audio = scratch.path().join("kick.wav");
         std::fs::write(&audio, b"audio").expect("write");
         with_test_db(scratch.path().join("tags.db"), || {
-            let fields = ManualTagEdits {
-                instrument: " Snare ".into(),
-                title: "Crack".into(),
-                ..ManualTagEdits::default()
-            };
+            let fields =
+                ManualTagEdits { instrument: " Snare ".into(), title: "Crack".into(), ..ManualTagEdits::default() };
             set_manual_fields(&audio, &fields, 1).expect("manual");
             assert_eq!(instrument(&audio).as_deref(), Some("Snare"));
             assert_eq!(tundra_instrument(&audio), None);
@@ -503,10 +481,7 @@ mod tests {
 
             std::fs::write(&audio, b"someone else's file").expect("replace");
             restamp(&audio, before);
-            assert!(
-                instrument(&audio).is_none(),
-                "a stale stamp must not carry the row over"
-            );
+            assert!(instrument(&audio).is_none(), "a stale stamp must not carry the row over");
         });
     }
 }

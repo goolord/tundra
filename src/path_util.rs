@@ -28,11 +28,7 @@ pub fn canonical_path(path: &Path) -> std::io::Result<PathBuf> {
 /// Windows and macOS, whose default volumes ignore case.
 pub fn cache_key(path: &Path) -> PathBuf {
     let path = normalize_path(path.to_path_buf());
-    if cfg!(any(windows, target_os = "macos")) {
-        PathBuf::from(path.to_string_lossy().to_lowercase())
-    } else {
-        path
-    }
+    if cfg!(any(windows, target_os = "macos")) { PathBuf::from(path.to_string_lossy().to_lowercase()) } else { path }
 }
 
 /// Keys a cache lookup must try: the path as stored, then the stable `cache_key`.
@@ -40,11 +36,7 @@ pub fn cache_key(path: &Path) -> PathBuf {
 /// appear under both forms.
 pub fn cache_lookup_keys(path: &Path) -> Vec<PathBuf> {
     let key = cache_key(path);
-    if key == path {
-        vec![key]
-    } else {
-        vec![path.to_path_buf(), key]
-    }
+    if key == path { vec![key] } else { vec![path.to_path_buf(), key] }
 }
 
 /// The key favorites are stored under: the canonical path's cache key when the file exists.
@@ -65,9 +57,8 @@ pub fn resolve_open_path<'a>(path: &Path, known_paths: impl IntoIterator<Item = 
     }
 
     let target = cache_key(&path);
-    if let Some(candidate) = known_paths
-        .into_iter()
-        .find(|candidate| cache_key(candidate) == target && candidate.exists())
+    if let Some(candidate) =
+        known_paths.into_iter().find(|candidate| cache_key(candidate) == target && candidate.exists())
     {
         return canonical_path(candidate).unwrap_or_else(|_| candidate.to_path_buf());
     }
@@ -125,10 +116,7 @@ pub fn truncate_path(path: &Path, max_chars: usize) -> String {
 
 /// Dot-files, plus files the OS marks hidden.
 pub fn is_hidden(path: &Path) -> bool {
-    if path
-        .file_name()
-        .is_some_and(|name| name.to_string_lossy().starts_with('.'))
-    {
+    if path.file_name().is_some_and(|name| name.to_string_lossy().starts_with('.')) {
         return true;
     }
     #[cfg(windows)]
@@ -164,11 +152,7 @@ impl FileStamp {
     pub fn of(path: &Path) -> Option<Self> {
         let meta = std::fs::metadata(path).ok()?;
         let modified = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;
-        Some(Self {
-            secs: modified.as_secs(),
-            nanos: modified.subsec_nanos(),
-            len: meta.len(),
-        })
+        Some(Self { secs: modified.as_secs(), nanos: modified.subsec_nanos(), len: meta.len() })
     }
 }
 
@@ -202,10 +186,7 @@ mod tests {
         #[cfg(windows)]
         {
             let root = Path::new(r"\\?\F:\Samples");
-            assert!(is_under(
-                Path::new(r"f:\samples\ADM Samples - Copy\Snare\01_Snare.flac"),
-                root
-            ));
+            assert!(is_under(Path::new(r"f:\samples\ADM Samples - Copy\Snare\01_Snare.flac"), root));
             assert!(!is_under(Path::new(r"F:\Other\snare.flac"), root));
         }
     }
@@ -222,10 +203,7 @@ mod tests {
     #[cfg(windows)]
     fn repair_windows_drive_path_fixes_missing_separator_and_pipe() {
         for broken in [r"F:Samples\kick.wav", r"F:|Samples\kick.wav"] {
-            assert_eq!(
-                repair_windows_drive_path(Path::new(broken)),
-                PathBuf::from(r"F:\Samples\kick.wav")
-            );
+            assert_eq!(repair_windows_drive_path(Path::new(broken)), PathBuf::from(r"F:\Samples\kick.wav"));
         }
         for fine in [r"F:\Samples\kick.wav", "F:", "kick.wav"] {
             assert_eq!(repair_windows_drive_path(Path::new(fine)), PathBuf::from(fine));
@@ -256,9 +234,7 @@ mod tests {
 
         // The temp dir as the OS reports it can differ from its canonical form:
         // a symlink (`/var` -> `/private/var` on macOS) or an 8.3 short name on Windows.
-        let reported = std::env::temp_dir()
-            .join(dir.path().file_name().unwrap())
-            .join("kick.wav");
+        let reported = std::env::temp_dir().join(dir.path().file_name().unwrap()).join("kick.wav");
         assert_eq!(favorite_lookup_key(&reported), stored);
 
         #[cfg(windows)]
@@ -271,10 +247,7 @@ mod tests {
     #[test]
     fn display_path_drops_verbatim_prefix() {
         assert_eq!(display_path(Path::new(r"\\?\F:\Samples")), r"F:\Samples");
-        assert_eq!(
-            display_path(Path::new(r"\\?\UNC\nas\share\kick.wav")),
-            r"\\nas\share\kick.wav"
-        );
+        assert_eq!(display_path(Path::new(r"\\?\UNC\nas\share\kick.wav")), r"\\nas\share\kick.wav");
         assert_eq!(display_path(Path::new(r"F:\Samples")), r"F:\Samples");
         assert_eq!(display_path(Path::new("/samples/kick.wav")), "/samples/kick.wav");
         assert_eq!(truncate_path(Path::new(r"\\?\F:\Samples"), 32), r"F:\Samples");

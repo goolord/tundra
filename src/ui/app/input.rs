@@ -41,12 +41,7 @@ pub(super) enum DragStage {
 
 impl FileDrag {
     pub(super) fn file(path: PathBuf, open_on_click: bool) -> Self {
-        Self::File {
-            path,
-            origin: None,
-            stage: DragStage::Pressed,
-            open_on_click,
-        }
+        Self::File { path, origin: None, stage: DragStage::Pressed, open_on_click }
     }
 }
 
@@ -64,10 +59,7 @@ pub(super) struct ScrollbarDrag {
 }
 
 fn scroll_file_list_to(offset: f32) -> Task<Message> {
-    let offset = AbsoluteOffset {
-        x: Some(0.0),
-        y: Some(offset),
-    };
+    let offset = AbsoluteOffset { x: Some(0.0), y: Some(offset) };
     operation::scroll_to(Id::new(FILE_LIST_SCROLL_ID), offset)
 }
 
@@ -95,9 +87,7 @@ impl App {
             let metrics = self.file_selector.scroll_metrics();
             if metrics.max_scroll > 0.0 {
                 let track_y = (point.y - drag.track_top).clamp(0.0, drag.track_height);
-                tasks.push(scroll_file_list_to(
-                    metrics.offset_for_track_y(track_y, drag.grab_offset),
-                ));
+                tasks.push(scroll_file_list_to(metrics.offset_for_track_y(track_y, drag.grab_offset)));
             }
         }
         if self.sidebar_resize.is_none() && self.file_list_scrollbar_drag.is_none() {
@@ -139,11 +129,7 @@ impl App {
         }
         // Tab completes a tag field name, or else walks file search -> tag search -> file list.
         if focus == FilterFocus::TagSearch && self.file_selector.tag_search_can_autocomplete() {
-            return if command || shift {
-                Task::none()
-            } else {
-                self.autocomplete_tag_field()
-            };
+            return if command || shift { Task::none() } else { self.autocomplete_tag_field() };
         }
         if command {
             return Task::none();
@@ -176,9 +162,7 @@ impl App {
             self.file_list_focused = true;
         }
         self.file_drag = Some(if from_file_list && self.modifiers.shift() {
-            FileDrag::Scroll {
-                last_y: self.last_cursor.y,
-            }
+            FileDrag::Scroll { last_y: self.last_cursor.y }
         } else {
             FileDrag::file(path, from_file_list)
         });
@@ -194,9 +178,7 @@ impl App {
                 }
                 operation::scroll_by(FILE_LIST_SCROLL_ID, AbsoluteOffset { x: 0.0, y: dy })
             }
-            Some(FileDrag::File {
-                path, origin, stage, ..
-            }) => {
+            Some(FileDrag::File { path, origin, stage, .. }) => {
                 let Some(origin) = *origin else {
                     *origin = Some(point);
                     return Task::none();
@@ -220,12 +202,11 @@ impl App {
 
     fn release_file_drag(&mut self) -> Task<Message> {
         let click_to_open = match &self.file_drag {
-            Some(FileDrag::File {
-                path,
-                stage: DragStage::Pressed,
-                open_on_click: true,
-                ..
-            }) if !self.native_drag.is_active() => Some(path.clone()),
+            Some(FileDrag::File { path, stage: DragStage::Pressed, open_on_click: true, .. })
+                if !self.native_drag.is_active() =>
+            {
+                Some(path.clone())
+            }
             _ => None,
         };
         if self.native_drag.is_active() {
@@ -249,24 +230,17 @@ impl App {
 
     /// Ends the drag and explains how to drag from the file manager instead.
     pub(super) fn drag_failed(&mut self, intro: &str) {
-        let gesture = if cfg!(target_os = "macos") {
-            "Control-click or use a two-finger click"
-        } else {
-            "Right-click"
-        };
+        let gesture = if cfg!(target_os = "macos") { "Control-click or use a two-finger click" } else { "Right-click" };
         let manager = crate::platform::file_manager_label();
-        self.show_notice(format!(
-            "{intro} {gesture} the file and choose \"{manager}\", then drag it from there."
-        ));
+        self.show_notice(format!("{intro} {gesture} the file and choose \"{manager}\", then drag it from there."));
         self.file_drag = None;
     }
 
     pub(super) fn drag_window_ready(&mut self, window_id: Option<u32>) -> Task<Message> {
         let init = match window_id {
-            Some(id) => self
-                .native_drag
-                .init_with_window_id(id)
-                .map_err(|err| format!("Could not initialize drag-out: {err}.")),
+            Some(id) => {
+                self.native_drag.init_with_window_id(id).map_err(|err| format!("Could not initialize drag-out: {err}."))
+            }
             None if cfg!(all(unix, not(target_os = "macos"))) => {
                 Err("Drag-out from the file list requires X11 and is unavailable on native Wayland.".into())
             }
@@ -291,10 +265,7 @@ impl App {
         let canonical = match crate::path_util::canonical_path(&path) {
             Ok(path) => path,
             Err(err) => {
-                self.drag_failed(&format!(
-                    "Cannot drag {}: {err}.",
-                    crate::path_util::display_path(&path)
-                ));
+                self.drag_failed(&format!("Cannot drag {}: {err}.", crate::path_util::display_path(&path)));
                 return Task::none();
             }
         };
@@ -324,11 +295,7 @@ impl App {
             return Task::none();
         }
         let grab_offset = metrics.grab_offset(track_y);
-        self.file_list_scrollbar_drag = Some(ScrollbarDrag {
-            track_top,
-            track_height,
-            grab_offset,
-        });
+        self.file_list_scrollbar_drag = Some(ScrollbarDrag { track_top, track_height, grab_offset });
         scroll_file_list_to(metrics.offset_for_track_y(track_y, grab_offset))
     }
 

@@ -199,10 +199,7 @@ impl MetadataCache {
 
     fn cached(&self, path: &Path) -> Option<CachedMetadata> {
         let map = self.snapshot();
-        crate::path_util::cache_lookup_keys(path)
-            .iter()
-            .find_map(|key| map.get(key))
-            .cloned()
+        crate::path_util::cache_lookup_keys(path).iter().find_map(|key| map.get(key)).cloned()
     }
 
     /// Indexed tags without touching the disk, for display.
@@ -226,27 +223,19 @@ impl MetadataCache {
 }
 
 fn keep_newer(map: &mut MetadataMap, key: PathBuf, entry: CachedMetadata) {
-    if map
-        .get(&key)
-        .is_none_or(|existing| existing.mtime_secs <= entry.mtime_secs)
-    {
+    if map.get(&key).is_none_or(|existing| existing.mtime_secs <= entry.mtime_secs) {
         map.insert(key, entry);
     }
 }
 
 fn load_map<V: serde::de::DeserializeOwned>(file: &str) -> HashMap<PathBuf, V> {
-    crate::app_data::cache_file(file)
-        .and_then(|path| crate::app_data::read_bincode(&path))
-        .unwrap_or_default()
+    crate::app_data::cache_file(file).and_then(|path| crate::app_data::read_bincode(&path)).unwrap_or_default()
 }
 
 /// Runs off the UI thread at start-up.
 pub fn load_startup_caches(allowed: AllowedDirectories) -> PersistedCaches {
     // Temps from an atomic save that crashed; the live file is intact.
-    for dir in [crate::app_data::cache_dir(), crate::app_data::config_dir()]
-        .into_iter()
-        .flatten()
-    {
+    for dir in [crate::app_data::cache_dir(), crate::app_data::config_dir()].into_iter().flatten() {
         crate::safe_write::reclaim_write_sidecars(&dir);
     }
 
@@ -272,13 +261,7 @@ mod tests {
     use super::*;
 
     fn entry(mtime_secs: u64, title: &str) -> CachedMetadata {
-        CachedMetadata {
-            mtime_secs,
-            fields: TagFields {
-                title: title.into(),
-                ..TagFields::default()
-            },
-        }
+        CachedMetadata { mtime_secs, fields: TagFields { title: title.into(), ..TagFields::default() } }
     }
 
     #[test]
@@ -300,9 +283,6 @@ mod tests {
         keep_newer(&mut map, key.clone(), entry(50, "new"));
         keep_newer(&mut map, key, entry(40, "old raw spelling"));
         assert_eq!(map.len(), 1);
-        assert_eq!(
-            map.values().next().map(|cached| cached.fields.title.as_str()),
-            Some("new")
-        );
+        assert_eq!(map.values().next().map(|cached| cached.fields.title.as_str()), Some("new"));
     }
 }

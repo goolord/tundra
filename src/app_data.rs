@@ -49,9 +49,7 @@ pub fn write_bincode<T: Serialize>(path: &Path, value: &T, label: &str) -> bool 
         Ok(bytes) => write_atomic(path, &bytes).map_err(|err| err.to_string()),
         Err(err) => Err(err.to_string()),
     };
-    result
-        .inspect_err(|err| eprintln!("Failed to write {label}: {err}"))
-        .is_ok()
+    result.inspect_err(|err| eprintln!("Failed to write {label}: {err}")).is_ok()
 }
 
 /// Load user data such as settings or favorites.
@@ -66,10 +64,7 @@ pub fn load_user_data<T: Default + DeserializeOwned>(path: &Path, label: &str) -
         Ok(bytes) => bytes,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return (T::default(), true),
         Err(err) => {
-            eprintln!(
-                "Failed to read {label} ({}): {err}; changes will not be saved this session",
-                path.display()
-            );
+            eprintln!("Failed to read {label} ({}): {err}; changes will not be saved this session", path.display());
             return (T::default(), false);
         }
     };

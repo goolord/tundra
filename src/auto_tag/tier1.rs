@@ -43,9 +43,7 @@ fn load_mono_audio(path: &Path) -> Result<Vec<f32>, ClassifyError> {
     let fail = |what: &str, err: &dyn std::fmt::Display| {
         ClassifyError::analysis_failed(format!("{what} {}: {err}", crate::path_util::display_path(path)))
     };
-    let file_len = std::fs::metadata(path)
-        .map_err(|err| fail("Failed to stat", &err))?
-        .len();
+    let file_len = std::fs::metadata(path).map_err(|err| fail("Failed to stat", &err))?.len();
     if file_len > MAX_AUDIO_BYTES {
         let mb = |bytes: u64| bytes / (1024 * 1024);
         return Err(ClassifyError::analysis_failed(format!(
@@ -152,10 +150,8 @@ mod tests {
     /// Frame-by-frame reference: copy each frame, count its crossings.
     fn reference_zcr(audio: &[f32]) -> f64 {
         let padded_signal: Vec<f32> = std::iter::once(0.0).chain(audio.iter().copied()).collect();
-        let crossings: Vec<f32> = padded_signal
-            .windows(2)
-            .map(|pair| if pair[0] * pair[1] < 0.0 { 1.0 } else { 0.0 })
-            .collect();
+        let crossings: Vec<f32> =
+            padded_signal.windows(2).map(|pair| if pair[0] * pair[1] < 0.0 { 1.0 } else { 0.0 }).collect();
         let rates: Vec<f64> = reflect_pad(&crossings, FRAME_LENGTH / 2)
             .windows(FRAME_LENGTH)
             .step_by(HOP_LENGTH)
@@ -167,9 +163,8 @@ mod tests {
     #[test]
     fn prefix_sum_zcr_matches_frame_by_frame_reference() {
         for (len, freq) in [(3_000, 440.0), (22_050, 90.0), (50_000, 3_000.0), (4_096, 7.0)] {
-            let audio: Vec<f32> = (0..len)
-                .map(|n| (n as f32 * freq * std::f32::consts::TAU / SAMPLE_RATE as f32).sin())
-                .collect();
+            let audio: Vec<f32> =
+                (0..len).map(|n| (n as f32 * freq * std::f32::consts::TAU / SAMPLE_RATE as f32).sin()).collect();
             let fast = zero_crossing_rate(&audio);
             let slow = reference_zcr(&audio);
             assert!((fast - slow).abs() < 1e-12, "len {len}: {fast} vs {slow}");

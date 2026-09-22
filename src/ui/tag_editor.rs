@@ -20,11 +20,7 @@ pub struct TagEditorState {
 
 impl TagEditorState {
     pub fn for_path(path: PathBuf, fields: &TagFields) -> Self {
-        Self {
-            target: Some(path),
-            edits: ManualTagEdits::from_tag_fields(fields),
-            ..Self::default()
-        }
+        Self { target: Some(path), edits: ManualTagEdits::from_tag_fields(fields), ..Self::default() }
     }
 
     pub fn begin_save(&mut self) {
@@ -62,16 +58,13 @@ impl TagEditorState {
 }
 
 pub fn tag_editor_view(state: &TagEditorState) -> Element<'_, Message> {
-    let target_label = state.target.as_deref().map_or_else(
-        || NO_AUDIO_SELECTED.to_string(),
-        |path| crate::path_util::truncate_path(path, 56),
-    );
+    let target_label = state
+        .target
+        .as_deref()
+        .map_or_else(|| NO_AUDIO_SELECTED.to_string(), |path| crate::path_util::truncate_path(path, 56));
     let fields = ManualTagEdits::EDITOR_FIELDS.into_iter().map(|field| {
         row![
-            text(field.label())
-                .size(11)
-                .width(Length::Fixed(88.0))
-                .style(style::faded_text(0.65)),
+            text(field.label()).size(11).width(Length::Fixed(88.0)).style(style::faded_text(0.65)),
             text_input("", state.edits.field_value(field))
                 .on_input(move |input| TagEditorMsg::Input(field, input).into())
                 .padding([6, 8])

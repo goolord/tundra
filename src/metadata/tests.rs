@@ -45,10 +45,7 @@ fn index_entry(path: &Path, fields: TagFields) -> CachedMetadata {
 }
 
 fn filter(field: TagField, value: &str) -> TagFilter {
-    TagFilter {
-        field,
-        value: value.to_string(),
-    }
+    TagFilter { field, value: value.to_string() }
 }
 
 /// Searches `paths` the way the library does, reading tags from `metadata`.
@@ -58,11 +55,7 @@ fn search_paths(
     tag_filters: &[TagFilter],
     metadata: Arc<HashMap<PathBuf, CachedMetadata>>,
 ) -> Vec<PathBuf> {
-    let query = SearchQuery {
-        text,
-        tag_filters,
-        ..SearchQuery::default()
-    };
+    let query = SearchQuery { text, tag_filters, ..SearchQuery::default() };
     search(paths, &query, MetadataLookup::new(metadata)).paths
 }
 
@@ -97,11 +90,7 @@ fn tag_only_search_needs_every_filter_and_skips_folders_and_unindexed_files() {
     let dir = ScratchDir::new("tag-search");
     let audio = dir.path().join("kick.wav");
     std::fs::write(&audio, b"RIFF").unwrap();
-    let fields = TagFields {
-        bpm: "120".into(),
-        key: "Am".into(),
-        ..TagFields::default()
-    };
+    let fields = TagFields { bpm: "120".into(), key: "Am".into(), ..TagFields::default() };
     let index = Arc::new(HashMap::from([(audio.clone(), index_entry(&audio, fields))]));
     // A library-wide tag query must not parse unindexed files.
     let unindexed = dir.path().join("snare.wav");
@@ -119,22 +108,12 @@ fn tag_only_search_needs_every_filter_and_skips_folders_and_unindexed_files() {
 #[test]
 fn tag_search_narrows_with_single_char_filename_query() {
     let dir = ScratchDir::new("tag-narrow");
-    let fields = TagFields {
-        instrument: "Kick".into(),
-        ..Default::default()
-    };
-    let paths: Vec<_> = ["1 kick.wav", "2 kick.wav", "3 kick.wav"]
-        .map(|name| dir.path().join(name))
-        .into();
+    let fields = TagFields { instrument: "Kick".into(), ..Default::default() };
+    let paths: Vec<_> = ["1 kick.wav", "2 kick.wav", "3 kick.wav"].map(|name| dir.path().join(name)).into();
     for path in &paths {
         std::fs::write(path, b"RIFF").unwrap();
     }
-    let index = Arc::new(
-        paths
-            .iter()
-            .map(|path| (path.clone(), index_entry(path, fields.clone())))
-            .collect(),
-    );
+    let index = Arc::new(paths.iter().map(|path| (path.clone(), index_entry(path, fields.clone()))).collect());
     let filters = [filter(TagField::Instrument, "Kick")];
 
     assert_eq!(search_paths(&paths, "", &filters, Arc::clone(&index)).len(), 3);
@@ -146,19 +125,10 @@ fn metadata_lookup_matches_cache_key_variants() {
     let dir = ScratchDir::new("lookup-keys");
     let audio = dir.path().join("snare.wav");
     std::fs::write(&audio, b"RIFF").unwrap();
-    let fields = TagFields {
-        explicit_instrument: "Snare".into(),
-        instrument: "Snare".into(),
-        ..TagFields::default()
-    };
+    let fields = TagFields { explicit_instrument: "Snare".into(), instrument: "Snare".into(), ..TagFields::default() };
     let key = crate::path_util::cache_key(&audio);
     let index = Arc::new(HashMap::from([(key, index_entry(&audio, fields))]));
-    assert_eq!(
-        MetadataLookup::new(Arc::clone(&index))
-            .tag_fields(&audio)
-            .explicit_instrument,
-        "Snare"
-    );
+    assert_eq!(MetadataLookup::new(Arc::clone(&index)).tag_fields(&audio).explicit_instrument, "Snare");
 
     let paths = [audio];
     let hits = search_paths(&paths, "", &[filter(TagField::Instrument, "snare")], index);
@@ -168,10 +138,7 @@ fn metadata_lookup_matches_cache_key_variants() {
 #[test]
 fn tag_fields_ignore_cache_when_file_missing() {
     let path = PathBuf::from(r"C:\missing\tundra-kick.wav");
-    let fields = TagFields {
-        bpm: "120".into(),
-        ..TagFields::default()
-    };
+    let fields = TagFields { bpm: "120".into(), ..TagFields::default() };
     let cached = CachedMetadata { mtime_secs: 1, fields };
     let mut lookup = MetadataLookup::new(Arc::new(HashMap::from([(path.clone(), cached)])));
     assert!(lookup.tag_fields(&path).bpm.is_empty());
@@ -250,11 +217,7 @@ fn instrument_hint_reads_names_kit_codes_word_pairs_and_other_languages() {
         ("/Samples/オープンハイハット.wav", Some("Hi-Hat")),
     ];
     for (path, expected) in cases {
-        assert_eq!(
-            instrument_hint_from_path(Path::new(path)).as_deref(),
-            expected,
-            "{path}"
-        );
+        assert_eq!(instrument_hint_from_path(Path::new(path)).as_deref(), expected, "{path}");
     }
 }
 
@@ -281,10 +244,7 @@ fn artist_hint_reads_label_from_directory_layout() {
         ("/Samples/KSHMR/Vol4/Kicks/kick.wav", Some("KSHMR")),
         ("/Samples/KSHMR/Kicks/kick.wav", Some("KSHMR")),
         ("/Splice/packs/deadmau5/kick.wav", Some("deadmau5")),
-        (
-            "/Samples/Native Instruments/Battery 4/Snares/snare.wav",
-            Some("Native Instruments"),
-        ),
+        ("/Samples/Native Instruments/Battery 4/Snares/snare.wav", Some("Native Instruments")),
         ("/Samples/snares/tight_01.wav", None),
     ] {
         assert_eq!(artist_hint_from_path(Path::new(path)).as_deref(), expected, "{path}");
@@ -307,10 +267,7 @@ fn tundra_comment_keeps_user_lines_and_replaces_only_its_own() {
     assert_eq!(tundra_comment(Some("  ")), marker);
     assert_eq!(tundra_comment(Some("Recorded live")), "Recorded live");
     assert_eq!(tundra_comment(Some("Tundra v0")), marker);
-    assert_eq!(
-        tundra_comment(Some("Recorded live\nINSTRUMENT: Kick\nTundra")),
-        format!("Recorded live\n{marker}")
-    );
+    assert_eq!(tundra_comment(Some("Recorded live\nINSTRUMENT: Kick\nTundra")), format!("Recorded live\n{marker}"));
 }
 
 #[test]
@@ -319,10 +276,7 @@ fn auto_tag_replaces_only_instruments_tundra_owns() {
     let cases: [(&[(&str, &str)], bool); 3] = [
         // A marker would claim the user's instrument.
         (&[(WAV_INSTRUMENT_KEY, "Snare")], false),
-        (
-            &[(WAV_INSTRUMENT_KEY, "Snare"), (WAV_COMMENT_KEY, "Recorded live")],
-            false,
-        ),
+        (&[(WAV_INSTRUMENT_KEY, "Snare"), (WAV_COMMENT_KEY, "Recorded live")], false),
         // A legacy Tundra marker is eligible for upgrade.
         (&[(WAV_INSTRUMENT_KEY, "Snare"), (WAV_COMMENT_KEY, "Tundra")], true),
     ];
@@ -332,22 +286,12 @@ fn auto_tag_replaces_only_instruments_tundra_owns() {
         write_riff_info(&audio, info);
 
         let status = auto_tag_field_status(&audio).expect("status");
-        let flags = (
-            status.needs_instrument,
-            status.needs_comment,
-            status.can_retag_instrument,
-        );
+        let flags = (status.needs_instrument, status.needs_comment, status.can_retag_instrument);
         assert_eq!(flags, (false, tundra_owned, tundra_owned), "{info:?}");
         if !tundra_owned {
-            assert!(
-                !write_auto_tags(&audio, "Kick").expect("write"),
-                "{info:?}: user tags stay"
-            );
+            assert!(!write_auto_tags(&audio, "Kick").expect("write"), "{info:?}: user tags stay");
             assert_eq!(instrument_tag(&audio).as_deref(), Some("Snare"));
-            assert_eq!(
-                riff(&audio, WAV_COMMENT_KEY).as_deref(),
-                info.get(1).map(|(_, comment)| *comment)
-            );
+            assert_eq!(riff(&audio, WAV_COMMENT_KEY).as_deref(), info.get(1).map(|(_, comment)| *comment));
         }
     }
 }
@@ -378,10 +322,7 @@ fn write_auto_tags_skips_retag_when_tag_version_is_current() {
 fn sidecar_row_does_not_own_user_native_instrument() {
     let dir = ScratchDir::new("sidecar-user-native");
     let audio = wav_in(&dir, "", "snare.wav");
-    write_riff_info(
-        &audio,
-        &[(WAV_INSTRUMENT_KEY, "Snare"), (WAV_COMMENT_KEY, "Recorded live")],
-    );
+    write_riff_info(&audio, &[(WAV_INSTRUMENT_KEY, "Snare"), (WAV_COMMENT_KEY, "Recorded live")]);
 
     crate::tag_store::with_test_db(dir.path().join("tags.db"), || {
         crate::tag_store::set_instrument(&audio, "Kick", 0).expect("stale sidecar");
@@ -420,16 +361,10 @@ fn write_auto_tags_preserves_wav_non_info_chunks() {
 
     let chunks = parse_riff_wave_chunks(&std::fs::read(&audio).expect("read")).expect("parse tagged wav");
     for chunk in &extra {
-        assert!(
-            chunks.contains(chunk),
-            "{} chunk must survive",
-            String::from_utf8_lossy(&chunk.0)
-        );
+        assert!(chunks.contains(chunk), "{} chunk must survive", String::from_utf8_lossy(&chunk.0));
     }
     assert!(
-        chunks
-            .iter()
-            .any(|(id, data)| id == b"LIST" && data.starts_with(b"INFO")),
+        chunks.iter().any(|(id, data)| id == b"LIST" && data.starts_with(b"INFO")),
         "LIST INFO must be written without replacing adtl"
     );
     assert_eq!(instrument_tag(&audio).as_deref(), Some("Kick"));
@@ -445,11 +380,7 @@ fn write_auto_tags_keeps_existing_wav_tags_and_user_comment() {
 
     assert_eq!(riff(&audio, WAV_INSTRUMENT_KEY).as_deref(), Some("Kick"));
     assert_eq!(riff(&audio, "IGNR").as_deref(), Some("Drums"));
-    assert_eq!(
-        riff(&audio, WAV_ARTIST_KEY).as_deref(),
-        Some("KSHMR"),
-        "artist from the folder"
-    );
+    assert_eq!(riff(&audio, WAV_ARTIST_KEY).as_deref(), Some("KSHMR"), "artist from the folder");
     assert_eq!(
         riff(&audio, WAV_COMMENT_KEY).as_deref(),
         Some("already had a note"),
@@ -502,20 +433,14 @@ fn tagging_preserves_embedded_cover_art() {
     let mut mp3 = read_mp3();
     let mut id3 = mp3.remove_id3v2().unwrap_or_default();
     id3.insert_picture(
-        Picture::unchecked(art.clone())
-            .pic_type(PictureType::CoverFront)
-            .mime_type(MimeType::Png)
-            .build(),
+        Picture::unchecked(art.clone()).pic_type(PictureType::CoverFront).mime_type(MimeType::Png).build(),
     );
     mp3.set_id3v2(id3);
     mp3.save_to_path(&audio, WriteOptions::default()).expect("save art");
 
     assert!(write_auto_tags(&audio, "Kick").expect("tag"));
 
-    let tag = read_mp3()
-        .remove_id3v2()
-        .map(Tag::from)
-        .expect("mp3 keeps its ID3v2 tag");
+    let tag = read_mp3().remove_id3v2().map(Tag::from).expect("mp3 keeps its ID3v2 tag");
     let pictures: Vec<_> = tag.pictures().iter().map(|picture| picture.data()).collect();
     assert_eq!(pictures, [art.as_slice()], "cover art must survive auto-tagging");
 }
@@ -530,10 +455,8 @@ fn legacy_grouping_reads_as_instrument_and_is_rewritten_canonically() {
         let mut file = std::fs::File::open(&audio).expect("open ogg");
         lofty::ogg::VorbisFile::read_from(&mut file, ParseOptions::new()).expect("parse ogg")
     };
-    ogg.vorbis_comments_mut()
-        .insert("GROUPING".to_string(), "Kick".to_string());
-    ogg.save_to_path(&audio, WriteOptions::default())
-        .expect("save grouping");
+    ogg.vorbis_comments_mut().insert("GROUPING".to_string(), "Kick".to_string());
+    ogg.save_to_path(&audio, WriteOptions::default()).expect("save grouping");
 
     assert_eq!(read_tag_fields(&audio).expect("read grouping").instrument, "Kick");
     assert!(
@@ -601,21 +524,10 @@ fn unwritable_container_falls_back_to_sidecar_store_and_stays_searchable() {
     std::fs::write(&audio, b"not actually a RIFF container").expect("write junk");
 
     crate::tag_store::with_test_db(dir.path().join("tags.db"), || {
-        assert_eq!(
-            write_auto_tags(&audio, "Kick"),
-            Ok(true),
-            "fallback reports the tag as written"
-        );
+        assert_eq!(write_auto_tags(&audio, "Kick"), Ok(true), "fallback reports the tag as written");
         assert_eq!(crate::tag_store::instrument(&audio).as_deref(), Some("Kick"));
-        assert_eq!(
-            instrument_tag(&audio).as_deref(),
-            Some("Kick"),
-            "sidecar surfaces in reads"
-        );
-        assert!(
-            finds_by_instrument(&audio, "Kick"),
-            "sidecar-tagged files are searchable"
-        );
+        assert_eq!(instrument_tag(&audio).as_deref(), Some("Kick"), "sidecar surfaces in reads");
+        assert!(finds_by_instrument(&audio, "Kick"), "sidecar-tagged files are searchable");
         assert_eq!(crate::tag_store::tag_version(&audio), Some(TUNDRA_TAG_VERSION));
 
         assert_eq!(write_auto_tags(&audio, "Snare"), Ok(false), "current sidecar tags stay");
@@ -629,11 +541,7 @@ fn unwritable_container_falls_back_to_sidecar_store_and_stays_searchable() {
 
 /// Everything in `dir`, to prove a failed write left only the original behind.
 fn dir_entries(dir: &Path) -> Vec<PathBuf> {
-    std::fs::read_dir(dir)
-        .expect("read dir")
-        .flatten()
-        .map(|entry| entry.path())
-        .collect()
+    std::fs::read_dir(dir).expect("read dir").flatten().map(|entry| entry.path()).collect()
 }
 
 #[test]
@@ -644,11 +552,7 @@ fn stage_and_replace_failures_keep_the_original_and_remove_the_tmp() {
     let check = |result: Result<(), String>, case: &str| {
         assert!(result.is_err(), "{case} must fail");
         assert_eq!(std::fs::read(&audio).expect("dest"), original, "{case}");
-        assert_eq!(
-            dir_entries(dir.path()),
-            std::slice::from_ref(&audio),
-            "{case}: staged tmp must be deleted"
-        );
+        assert_eq!(dir_entries(dir.path()), std::slice::from_ref(&audio), "{case}: staged tmp must be deleted");
     };
 
     check(stage_and_replace(&audio, |_| Err("edit failed".into())), "edit");
@@ -671,9 +575,7 @@ fn stage_and_replace_failures_keep_the_original_and_remove_the_tmp() {
     check(sync_fails, "sync");
 
     let replace_fails = crate::test_fixtures::with_replace_blocked(dir.path(), &audio, || {
-        stage_and_replace(&audio, |tmp| {
-            std::fs::write(tmp, b"mutated").map_err(|err| err.to_string())
-        })
+        stage_and_replace(&audio, |tmp| std::fs::write(tmp, b"mutated").map_err(|err| err.to_string()))
     });
     check(replace_fails, "replace");
 }
@@ -688,11 +590,7 @@ fn stage_and_replace_edits_a_copy_then_swaps_it_in_keeping_read_only() {
     std::fs::set_permissions(&audio, perms).expect("readonly");
 
     stage_and_replace(&audio, |tmp| {
-        assert_eq!(
-            std::fs::read(&audio).expect("during edit"),
-            original,
-            "original untouched"
-        );
+        assert_eq!(std::fs::read(&audio).expect("during edit"), original, "original untouched");
         std::fs::write(tmp, b"mutated-copy").map_err(|err| err.to_string())
     })
     .expect("stage and replace");

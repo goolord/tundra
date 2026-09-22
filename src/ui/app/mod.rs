@@ -144,18 +144,14 @@ fn background<T: Send + 'static>(
     panicked: impl FnOnce() -> T + Send + 'static,
     done: impl FnOnce(T) -> Message + Send + 'static,
 ) -> Task<Message> {
-    Task::perform(run_blocking(work), move |result| {
-        done(result.unwrap_or_else(|()| panicked()))
-    })
+    Task::perform(run_blocking(work), move |result| done(result.unwrap_or_else(|()| panicked())))
 }
 
 impl App {
     fn new() -> Self {
         let allowed_directories = AllowedDirectories::load();
         let settings_first_run = allowed_directories.is_empty();
-        let current_dir = allowed_directories
-            .startup_directory()
-            .unwrap_or_else(startup_directory);
+        let current_dir = allowed_directories.startup_directory().unwrap_or_else(startup_directory);
         App {
             file_selector: FileSelector::new(&current_dir),
             player: Player::new(prefs::VOLUME.load(), prefs::LOOPING.load()),
@@ -169,11 +165,7 @@ impl App {
             search_enabled_memo: RefCell::default(),
             caches_ready: false,
             pending_launch_path: crate::launch::primary_open_target(&crate::launch::paths_from_args()),
-            modal: if settings_first_run {
-                Modal::Settings
-            } else {
-                Modal::None
-            },
+            modal: if settings_first_run { Modal::Settings } else { Modal::None },
             dialog: None,
             settings_first_run,
             settings_error: None,
@@ -202,22 +194,17 @@ impl App {
     fn boot() -> (Self, Task<Message>) {
         let mut app = Self::new();
         let allowed = app.allowed_directories.clone();
-        let (is_playing, looping) = (
-            Arc::clone(&app.player.controls.is_playing),
-            Arc::clone(&app.player.controls.looping),
-        );
+        let (is_playing, looping) =
+            (Arc::clone(&app.player.controls.is_playing), Arc::clone(&app.player.controls.looping));
         let volume = app.player.controls.volume;
         let tasks = [
             Task::perform(run_blocking(move || load_startup_caches(allowed)), |caches| {
                 Message::StartupCachesReady(caches.expect("loading caches panicked"))
             }),
-            Task::perform(
-                run_blocking(move || PlayerWorker::spawn(is_playing, looping, volume)),
-                |spawned| {
-                    let (worker, events) = spawned.expect("starting the audio thread panicked");
-                    Message::PlayerWorkerReady(worker, Arc::new(events))
-                },
-            ),
+            Task::perform(run_blocking(move || PlayerWorker::spawn(is_playing, looping, volume)), |spawned| {
+                let (worker, events) = spawned.expect("starting the audio thread panicked");
+                Message::PlayerWorkerReady(worker, Arc::new(events))
+            }),
             app.open_pending_launch(),
             on_window(|id| window::is_maximized(id).map(|maximized| WindowMsg::MaximizedChanged(maximized).into())),
         ];
@@ -229,10 +216,7 @@ impl App {
     }
 
     fn current_file_name(&self) -> Option<String> {
-        self.player
-            .current_file
-            .as_deref()
-            .and_then(crate::path_util::file_name_lossy)
+        self.player.current_file.as_deref().and_then(crate::path_util::file_name_lossy)
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -258,11 +242,9 @@ impl App {
                 self.file_selector.list_scroll_offset = viewport.absolute_offset().y;
                 self.file_selector.list_viewport_height = viewport.bounds().height;
             }
-            Message::FileListScrollbarPress {
-                track_y,
-                track_top,
-                track_height,
-            } => return self.press_scrollbar(track_y, track_top, track_height),
+            Message::FileListScrollbarPress { track_y, track_top, track_height } => {
+                return self.press_scrollbar(track_y, track_top, track_height);
+            }
             Message::FileListHoverChanged(hovered) => self.file_list_focused &= hovered,
             Message::FileRowHover(index) => {
                 self.file_selector.filter_focus = Default::default();
@@ -300,10 +282,7 @@ impl App {
             Message::FileDragCompleted(Err(err)) => self.drag_failed(&format!("Drag failed: {err}.")),
             Message::DragWindowId(window_id) => return self.drag_window_ready(window_id),
             Message::SidebarResizeStart => {
-                self.sidebar_resize = Some(SidebarResize {
-                    origin_x: None,
-                    origin_width: self.sidebar_width,
-                });
+                self.sidebar_resize = Some(SidebarResize { origin_x: None, origin_width: self.sidebar_width });
             }
 
             Message::StartupCachesReady(caches) => return self.startup_caches_ready(caches),
@@ -353,10 +332,7 @@ impl App {
 
     /// Shift extends a click's selection; Ctrl (Cmd on macOS) toggles.
     fn click_modifiers(&self) -> (bool, bool) {
-        (
-            self.modifiers.shift(),
-            self.modifiers.control() || self.modifiers.logo(),
-        )
+        (self.modifiers.shift(), self.modifiers.control() || self.modifiers.logo())
     }
 
     fn player_event(&mut self, event: PlayerEvent) {
@@ -469,10 +445,9 @@ impl App {
 /// Asks for a folder, starting in `start_dir`.
 fn pick_folder(start_dir: PathBuf, done: fn(Option<PathBuf>) -> Message) -> Task<Message> {
     let dialog = rfd::AsyncFileDialog::new().set_title("Select Folder");
-    Task::perform(
-        async move { dialog.set_directory(&start_dir).pick_folder().await },
-        move |folder| done(folder.map(|folder| folder.path().to_path_buf())),
-    )
+    Task::perform(async move { dialog.set_directory(&start_dir).pick_folder().await }, move |folder| {
+        done(folder.map(|folder| folder.path().to_path_buf()))
+    })
 }
 
 /// Asks for an audio file, starting in `start_dir`.
@@ -480,8 +455,7 @@ fn pick_audio_file(start_dir: PathBuf, done: fn(Option<PathBuf>) -> Message) -> 
     let dialog = rfd::AsyncFileDialog::new()
         .set_title("Select audio file")
         .add_filter("Audio", crate::metadata::AUDIO_EXTENSIONS);
-    Task::perform(
-        async move { dialog.set_directory(&start_dir).pick_file().await },
-        move |file| done(file.map(|file| file.path().to_path_buf())),
-    )
+    Task::perform(async move { dialog.set_directory(&start_dir).pick_file().await }, move |file| {
+        done(file.map(|file| file.path().to_path_buf()))
+    })
 }

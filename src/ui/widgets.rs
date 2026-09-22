@@ -52,10 +52,7 @@ pub fn modal_shell<'a>(body: impl Into<Element<'a, Message>>, width: f32) -> con
 
 /// A modal footer or toolbar button; `None` disables it.
 pub fn modal_button<'a>(label: &'a str, message: Option<Message>, primary: bool) -> Button<'a, Message> {
-    button(text(label).size(12))
-        .padding([6, 12])
-        .on_press_maybe(message)
-        .style(style::modal_button(primary))
+    button(text(label).size(12)).padding([6, 12]).on_press_maybe(message).style(style::modal_button(primary))
 }
 
 /// A modal's title and intro, the top of its body column.
@@ -81,10 +78,7 @@ pub fn modal_footer<'a>(
 pub fn modal_info_row<'a>(label: &'a str, value: impl Into<std::borrow::Cow<'a, str>>) -> Element<'a, Message> {
     container(
         row![
-            text(label)
-                .size(11)
-                .width(Length::Fixed(88.0))
-                .style(style::faded_text(0.65)),
+            text(label).size(11).width(Length::Fixed(88.0)).style(style::faded_text(0.65)),
             text(value.into()).size(12).width(Length::Fill),
         ]
         .spacing(8)
@@ -117,9 +111,7 @@ fn context_menu_button(label: &str, message: Message) -> Element<'static, Messag
 }
 
 pub fn context_menu_style(theme: &Theme, _status: iced_aw::style::Status) -> iced_aw::style::context_menu::Style {
-    iced_aw::style::context_menu::Style {
-        background: theme.extended_palette().background.base.color.into(),
-    }
+    iced_aw::style::context_menu::Style { background: theme.extended_palette().background.base.color.into() }
 }
 
 /// Actions a file's right-click menu offers, beyond copy and reveal.
@@ -141,20 +133,11 @@ pub fn file_context_menu(
         extras.edit_tags.map(|message| ("Edit tags…", message)),
         extras.favorite,
     ];
-    let always = [
-        ("Copy name", copy_name),
-        ("Copy full path", copy_path),
-        (crate::platform::file_manager_label(), reveal),
-    ];
-    column(
-        optional
-            .into_iter()
-            .flatten()
-            .chain(always)
-            .map(|(label, message)| context_menu_button(label, message)),
-    )
-    .spacing(2)
-    .padding([4, 0])
-    .width(220)
-    .into()
+    let always =
+        [("Copy name", copy_name), ("Copy full path", copy_path), (crate::platform::file_manager_label(), reveal)];
+    column(optional.into_iter().flatten().chain(always).map(|(label, message)| context_menu_button(label, message)))
+        .spacing(2)
+        .padding([4, 0])
+        .width(220)
+        .into()
 }

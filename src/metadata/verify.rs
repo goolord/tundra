@@ -19,10 +19,7 @@ pub(crate) fn verify_staged_write(
     let before = audio_fingerprint(original, container)?;
     let after = audio_fingerprint(staged, container)?;
     if before != after {
-        return Err(format!(
-            "Refused to save tags to {}: the audio data would have changed",
-            display_path(original)
-        ));
+        return Err(format!("Refused to save tags to {}: the audio data would have changed", display_path(original)));
     }
     verify_read_back(original, staged, container, edit)
 }
@@ -57,10 +54,7 @@ fn verify_read_back(original: &Path, staged: &Path, container: Container, edit: 
         .filter(|(_, wanted, _)| !wanted.trim().is_empty())
         .map(|(label, wanted, found)| (label, wanted.as_str(), found.as_str()));
 
-    match native_checks
-        .chain(manual_checks)
-        .find(|(_, wanted, found)| wanted.trim() != found.trim())
-    {
+    match native_checks.chain(manual_checks).find(|(_, wanted, found)| wanted.trim() != found.trim()) {
         Some((label, ..)) => Err(refuse(&format!("{label} did not read back as written"))),
         None => Ok(()),
     }
@@ -162,9 +156,7 @@ fn hash_mpeg<R: Read + Seek>(reader: &mut R, hasher: &mut impl Hasher, len: u64)
         if reader.read_exact(&mut header).is_err() || &header[..3] != b"ID3" {
             break;
         }
-        let size = header[6..10]
-            .iter()
-            .fold(0u64, |acc, byte| (acc << 7) | u64::from(byte & 0x7F));
+        let size = header[6..10].iter().fold(0u64, |acc, byte| (acc << 7) | u64::from(byte & 0x7F));
         let footer = if header[5] & 0x10 != 0 { 10 } else { 0 };
         start += 10 + size + footer;
     }
@@ -217,12 +209,9 @@ mod tests {
 
     #[test]
     fn rejects_a_copy_whose_audio_changed() {
-        for (ext, container) in [
-            ("wav", Container::Wav),
-            ("flac", Container::Flac),
-            ("mp3", Container::Mp3),
-            ("aiff", Container::Aiff),
-        ] {
+        for (ext, container) in
+            [("wav", Container::Wav), ("flac", Container::Flac), ("mp3", Container::Mp3), ("aiff", Container::Aiff)]
+        {
             let dir = ScratchDir::new(&format!("verify-{ext}"));
             let original = copy_asset(dir.path(), "tone", ext);
             let staged = dir.path().join(format!("staged.{ext}"));

@@ -28,10 +28,7 @@ pub struct AutoTagState {
 
 impl AutoTagState {
     pub fn for_target(target: Option<PathBuf>) -> Self {
-        let mut state = Self {
-            target,
-            ..Self::default()
-        };
+        let mut state = Self { target, ..Self::default() };
         state.refresh_from_disk();
         state
     }
@@ -74,11 +71,7 @@ impl AutoTagState {
 }
 
 fn muted(content: &str) -> Element<'_, Message> {
-    text(content)
-        .size(11)
-        .width(Length::Fill)
-        .style(style::muted_text)
-        .into()
+    text(content).size(11).width(Length::Fill).style(style::muted_text).into()
 }
 
 fn details_disclosure(state: &AutoTagState) -> Element<'_, Message> {
@@ -102,23 +95,16 @@ fn details_disclosure(state: &AutoTagState) -> Element<'_, Message> {
     let details = column![
         result.map(|result| modal_info_row("Tier", result.tier.to_string())),
         result.map(|result| modal_info_row("Pipeline", &result.summary)),
-        result
-            .and_then(|result| result.zcr)
-            .map(|zcr| modal_info_row("ZCR", format!("{zcr:.4}"))),
+        result.and_then(|result| result.zcr).map(|zcr| modal_info_row("ZCR", format!("{zcr:.4}"))),
         state.error_details.as_deref().map(muted),
         muted("Setup: cargo xtask setup"),
     ]
     .spacing(6)
     .width(Length::Fill);
-    column![
-        toggle,
-        container(details.padding([8, 10]))
-            .width(Length::Fill)
-            .style(style::panel(0.22, 0.18, 0.0)),
-    ]
-    .spacing(6)
-    .width(Length::Fill)
-    .into()
+    column![toggle, container(details.padding([8, 10])).width(Length::Fill).style(style::panel(0.22, 0.18, 0.0)),]
+        .spacing(6)
+        .width(Length::Fill)
+        .into()
 }
 
 pub fn auto_tag_view(state: &AutoTagState) -> Element<'_, Message> {
@@ -135,18 +121,14 @@ pub fn auto_tag_view(state: &AutoTagState) -> Element<'_, Message> {
     )
     .push(modal_info_row(
         "File",
-        state.target.as_deref().map_or_else(
-            || NO_AUDIO_SELECTED.to_string(),
-            |path| crate::path_util::truncate_path(path, 56),
-        ),
+        state
+            .target
+            .as_deref()
+            .map_or_else(|| NO_AUDIO_SELECTED.to_string(), |path| crate::path_util::truncate_path(path, 56)),
     ))
     .push(modal_info_row(
         "Current tag",
-        state
-            .existing_instrument
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or("(none)"),
+        state.existing_instrument.as_deref().filter(|value| !value.trim().is_empty()).unwrap_or("(none)"),
     ));
 
     let status_warning = if allows_instrument_work {
@@ -156,11 +138,7 @@ pub fn auto_tag_view(state: &AutoTagState) -> Element<'_, Message> {
     } else {
         Some(AUTO_TAG_ALREADY_COMPLETE)
     };
-    body = body.push(
-        status_warning
-            .filter(|_| has_target)
-            .map(|warning| colored(warning.into(), style::WARN)),
-    );
+    body = body.push(status_warning.filter(|_| has_target).map(|warning| colored(warning.into(), style::WARN)));
 
     if state.running {
         body = body.push(text("Analyzing…").size(12).width(Length::Fill));

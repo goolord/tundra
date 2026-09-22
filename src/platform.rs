@@ -33,11 +33,7 @@ pub fn reveal_in_file_manager(path: &Path) {
     #[cfg(all(unix, not(target_os = "macos")))]
     let mut command = Command::new("xdg-open");
     #[cfg(all(unix, not(target_os = "macos")))]
-    command.arg(if path.is_dir() {
-        path
-    } else {
-        path.parent().unwrap_or(path)
-    });
+    command.arg(if path.is_dir() { path } else { path.parent().unwrap_or(path) });
     hide_console(&mut command);
     if let Err(err) = command.spawn() {
         eprintln!("Could not open the file manager for {}: {err}", path.display());
@@ -60,21 +56,13 @@ pub fn hide_console(command: &mut Command) {
 /// executable, a macOS bundle's `Resources`, then the source tree in dev builds.
 fn search_roots() -> Vec<PathBuf> {
     use crate::path_util::normalize_path;
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|exe| Some(normalize_path(exe).parent()?.to_path_buf()));
-    let bundle_resources = exe_dir
-        .as_ref()
-        .filter(|dir| dir.ends_with("MacOS"))
-        .and_then(|dir| Some(dir.parent()?.join("Resources")));
+    let exe_dir = std::env::current_exe().ok().and_then(|exe| Some(normalize_path(exe).parent()?.to_path_buf()));
+    let bundle_resources =
+        exe_dir.as_ref().filter(|dir| dir.ends_with("MacOS")).and_then(|dir| Some(dir.parent()?.join("Resources")));
     let manifest = Some(PathBuf::from(env!("CARGO_MANIFEST_DIR"))).filter(|dir| dir.is_dir());
 
     let mut roots = Vec::new();
-    for root in [bundle_resources, exe_dir, manifest]
-        .into_iter()
-        .flatten()
-        .map(normalize_path)
-    {
+    for root in [bundle_resources, exe_dir, manifest].into_iter().flatten().map(normalize_path) {
         if !roots.contains(&root) {
             roots.push(root);
         }

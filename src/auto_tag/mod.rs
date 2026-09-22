@@ -40,10 +40,7 @@ pub struct ClassifyError {
 
 impl ClassifyError {
     pub fn new(message: impl Into<String>, details: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-            details: details.into(),
-        }
+        Self { message: message.into(), details: details.into() }
     }
 
     fn analysis_failed(details: impl Into<String>) -> Self {
@@ -70,10 +67,7 @@ pub fn classify_file_bulk(path: &Path) -> Result<ClassificationResult, ClassifyE
     let stamp = crate::path_util::FileStamp::of(path);
     let zcr = tier1::file_zcr(path)?;
     let (result, cacheable) = if let Some((instrument, confidence)) = tier1::classify_zcr(zcr) {
-        let summary = format!(
-            "Tier 1 · ZCR {zcr:.4} · {instrument}{}",
-            format_confidence(Some(confidence))
-        );
+        let summary = format!("Tier 1 · ZCR {zcr:.4} · {instrument}{}", format_confidence(Some(confidence)));
         let result = ClassificationResult {
             instrument: instrument.into(),
             tier: 1,

@@ -60,28 +60,17 @@ pub fn search(paths: &[PathBuf], query: &SearchQuery, lookup: MetadataLookup) ->
 }
 
 fn matcher(case_sensitive: bool) -> SkimMatcherV2 {
-    if case_sensitive {
-        SkimMatcherV2::default().respect_case()
-    } else {
-        SkimMatcherV2::default().ignore_case()
-    }
+    if case_sensitive { SkimMatcherV2::default().respect_case() } else { SkimMatcherV2::default().ignore_case() }
 }
 
 /// Case folding applied once to both query terms and searched text.
 fn fold<'a>(text: impl Into<Cow<'a, str>>, case_sensitive: bool) -> Cow<'a, str> {
     let text = text.into();
-    if case_sensitive {
-        text
-    } else {
-        Cow::Owned(text.to_lowercase())
-    }
+    if case_sensitive { text } else { Cow::Owned(text.to_lowercase()) }
 }
 
 fn split_terms(query: &str, case_sensitive: bool) -> Vec<String> {
-    query
-        .split_whitespace()
-        .map(|term| fold(term, case_sensitive).into_owned())
-        .collect()
+    query.split_whitespace().map(|term| fold(term, case_sensitive).into_owned()).collect()
 }
 
 /// Substring hits outrank fuzzy ones; weak fuzzy hits count as no match.
@@ -90,10 +79,7 @@ fn term_score(matcher: &SkimMatcherV2, text: &str, term: &str) -> i64 {
     if text.contains(term) {
         return CONTAINS_NAME_MATCH_SCORE + term.len() as i64;
     }
-    matcher
-        .fuzzy_match(text, term)
-        .filter(|&score| score >= FILE_SEARCH_MIN_FUZZY_SCORE)
-        .unwrap_or(0)
+    matcher.fuzzy_match(text, term).filter(|&score| score >= FILE_SEARCH_MIN_FUZZY_SCORE).unwrap_or(0)
 }
 
 /// A filename query, split and folded once per search instead of per path.
@@ -115,9 +101,7 @@ struct PathText<'a> {
 
 impl PathText<'_> {
     fn name_fields(&self) -> impl Iterator<Item = &str> {
-        std::iter::once(&*self.name)
-            .filter(|name| !name.is_empty())
-            .chain(self.stem.as_deref())
+        std::iter::once(&*self.name).filter(|name| !name.is_empty()).chain(self.stem.as_deref())
     }
 }
 
@@ -165,16 +149,9 @@ impl<'a> FileQuery<'a> {
         let mut name_score = 0i64;
         let mut path_score = 0i64;
         for term in &self.terms {
-            let name_term = text
-                .name_fields()
-                .map(|field| term_score(self.matcher, field, term))
-                .max()
-                .unwrap_or(0);
-            let path_term = if text.full.contains(term.as_str()) {
-                CONTAINS_NAME_MATCH_SCORE + term.len() as i64
-            } else {
-                0
-            };
+            let name_term = text.name_fields().map(|field| term_score(self.matcher, field, term)).max().unwrap_or(0);
+            let path_term =
+                if text.full.contains(term.as_str()) { CONTAINS_NAME_MATCH_SCORE + term.len() as i64 } else { 0 };
             if name_term.max(path_term) == 0 {
                 return (0, 0);
             }
@@ -186,11 +163,7 @@ impl<'a> FileQuery<'a> {
 
     fn sort_score(&self, path: &Path, text: &PathText, name_score: i64, path_score: i64) -> i64 {
         if !is_audio(path) {
-            return if name_score > 0 {
-                name_score + DIRECT_FOLDER_BONUS
-            } else {
-                path_score
-            };
+            return if name_score > 0 { name_score + DIRECT_FOLDER_BONUS } else { path_score };
         }
         let base = if name_score > 0 { name_score } else { path_score };
         // The stem is folded like the query, so a name that matched
@@ -251,10 +224,7 @@ impl<'a> TagQuery<'a> {
             .iter()
             .map(|filter| {
                 let terms = split_terms(&filter.value, false);
-                let terms = terms
-                    .into_iter()
-                    .map(|term| FilterTerm::new(term, filter.field))
-                    .collect();
+                let terms = terms.into_iter().map(|term| FilterTerm::new(term, filter.field)).collect();
                 (filter.field, terms, HashMap::new())
             })
             .collect();
@@ -267,14 +237,8 @@ impl<'a> TagQuery<'a> {
             return None;
         }
         let value = value.to_lowercase();
-        let groups = if field == TagField::Instrument {
-            instrument_group_mask(&value)
-        } else {
-            0
-        };
-        terms.iter().try_fold(i64::MAX, |min, term| {
-            term.score(matcher, &value, groups).map(|score| min.min(score))
-        })
+        let groups = if field == TagField::Instrument { instrument_group_mask(&value) } else { 0 };
+        terms.iter().try_fold(i64::MAX, |min, term| term.score(matcher, &value, groups).map(|score| min.min(score)))
     }
 
     /// Lowest score across filters, or `None` unless every filter matches.
@@ -321,10 +285,7 @@ fn into_result(mut matches: Vec<(i64, PathBuf)>, lookup: MetadataLookup, limit: 
     matches
         .sort_unstable_by(|(a_score, a_path), (b_score, b_path)| b_score.cmp(a_score).then_with(|| a_path.cmp(b_path)));
     matches.truncate(limit);
-    SearchResult {
-        paths: matches.into_iter().map(|(_, path)| path).collect(),
-        new_metadata: lookup.into_new_entries(),
-    }
+    SearchResult { paths: matches.into_iter().map(|(_, path)| path).collect(), new_metadata: lookup.into_new_entries() }
 }
 
 /// Tag filters with no filename query: answered from the index alone.
@@ -400,20 +361,13 @@ mod tests {
 
     fn tag_score(fields: &TagFields, field: TagField, value: &str) -> Option<i64> {
         let matcher = matcher(false);
-        let filter = TagFilter {
-            field,
-            value: value.into(),
-        };
+        let filter = TagFilter { field, value: value.into() };
         TagQuery::new(&matcher, &[filter]).score(fields)
     }
 
     fn file_search(paths: &[&str], text: &str) -> Vec<PathBuf> {
         let paths: Vec<_> = paths.iter().map(PathBuf::from).collect();
-        let query = SearchQuery {
-            text,
-            show_directories: true,
-            ..SearchQuery::default()
-        };
+        let query = SearchQuery { text, show_directories: true, ..SearchQuery::default() };
         search(&paths, &query, MetadataLookup::new(Arc::default())).paths
     }
 
@@ -437,10 +391,7 @@ mod tests {
             .chain(["/Samples/01 Snare.wav".into(), "/Samples/Synth Pad 01.wav".into()])
             .collect();
         let found = file_search(&names.iter().map(String::as_str).collect::<Vec<_>>(), "snare");
-        assert!(
-            found.iter().any(|path| path.ends_with("01 Snare.wav")),
-            "substring matches remain"
-        );
+        assert!(found.iter().any(|path| path.ends_with("01 Snare.wav")), "substring matches remain");
         assert!(
             !found.iter().any(|path| path.ends_with("Synth Pad 01.wav")),
             "fuzzy-only matches should be dropped once the confident cap is full"
@@ -449,18 +400,9 @@ mod tests {
 
     #[test]
     fn exact_and_prefix_stem_bonuses_fold_case_without_splitting_characters() {
-        assert_eq!(
-            file_search(&["/samples/ベースkick.wav"], "kick"),
-            [PathBuf::from("/samples/ベースkick.wav")]
-        );
-        let ranked = file_search(
-            &["/s/éa.wav", "/s/éclat extra.wav", "/s/ÉCLAT.wav", "/s/Kick 01.wav"],
-            "éclat",
-        );
-        assert_eq!(
-            ranked,
-            [PathBuf::from("/s/ÉCLAT.wav"), PathBuf::from("/s/éclat extra.wav")]
-        );
+        assert_eq!(file_search(&["/samples/ベースkick.wav"], "kick"), [PathBuf::from("/samples/ベースkick.wav")]);
+        let ranked = file_search(&["/s/éa.wav", "/s/éclat extra.wav", "/s/ÉCLAT.wav", "/s/Kick 01.wav"], "éclat");
+        assert_eq!(ranked, [PathBuf::from("/s/ÉCLAT.wav"), PathBuf::from("/s/éclat extra.wav")]);
         let ranked = file_search(&["/s/a kick.wav", "/s/Kick 01.wav"], "kick");
         assert_eq!(ranked[0], PathBuf::from("/s/Kick 01.wav"), "prefix bonus");
     }
@@ -474,19 +416,10 @@ mod tests {
             instrument: "Drums".into(),
             ..TagFields::default()
         };
-        assert!(
-            tag_score(&fields, TagField::Bpm, "120").is_some(),
-            "partial values match"
-        );
+        assert!(tag_score(&fields, TagField::Bpm, "120").is_some(), "partial values match");
         assert!(tag_score(&fields, TagField::Comment, "snare loop").is_some());
-        assert!(
-            tag_score(&fields, TagField::Comment, "snare kick").is_none(),
-            "every term must match"
-        );
-        assert!(
-            tag_score(&fields, TagField::Instrument, "snare").is_some(),
-            "explicit instrument wins"
-        );
+        assert!(tag_score(&fields, TagField::Comment, "snare kick").is_none(), "every term must match");
+        assert!(tag_score(&fields, TagField::Instrument, "snare").is_some(), "explicit instrument wins");
     }
 
     #[test]
@@ -494,10 +427,7 @@ mod tests {
         assert!(!file_search_active("2", &[]));
         assert!(!file_search_active(" ", &[]));
         assert!(file_search_active("ki", &[]));
-        let kick = TagFilter {
-            field: TagField::Instrument,
-            value: "Kick".into(),
-        };
+        let kick = TagFilter { field: TagField::Instrument, value: "Kick".into() };
         assert!(file_search_active("", &[kick]));
     }
 }

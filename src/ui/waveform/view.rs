@@ -63,11 +63,7 @@ pub struct WaveFormView {
 
 impl Default for WaveFormView {
     fn default() -> Self {
-        Self {
-            zoom: MIN_ZOOM,
-            offset: 0.0,
-            overscroll: 0.0,
-        }
+        Self { zoom: MIN_ZOOM, offset: 0.0, overscroll: 0.0 }
     }
 }
 
@@ -86,11 +82,7 @@ pub(super) struct WaveformLayout {
 
 impl WaveformLayout {
     pub(super) fn new(width: f32, visible_count: usize) -> Self {
-        let columns = if width <= 0.0 {
-            1
-        } else {
-            (width.ceil() as usize).clamp(1, visible_count.max(1))
-        };
+        let columns = if width <= 0.0 { 1 } else { (width.ceil() as usize).clamp(1, visible_count.max(1)) };
         let samples_per_col = visible_count.div_ceil(columns).next_power_of_two();
         let column_count = visible_count.div_ceil(samples_per_col);
         let per = |count: usize| if count > 0 { width / count as f32 } else { width };
@@ -264,11 +256,7 @@ mod tests {
     use super::*;
 
     fn view(zoom: f32, offset: f64) -> WaveFormView {
-        WaveFormView {
-            zoom,
-            offset,
-            overscroll: 0.0,
-        }
+        WaveFormView { zoom, offset, overscroll: 0.0 }
     }
 
     #[test]
@@ -304,10 +292,7 @@ mod tests {
         let before = sample_under(&view);
         view.apply_zoom_at(2.0, anchor_x, samples);
         let after = sample_under(&view);
-        assert!(
-            (after - before).abs() < 2.0,
-            "cursor sample moved: before={before} after={after}"
-        );
+        assert!((after - before).abs() < 2.0, "cursor sample moved: before={before} after={after}");
     }
 
     #[test]
@@ -335,10 +320,7 @@ mod tests {
         assert_eq!((start, phase), (0, 0.0));
         let layout = WaveformLayout::new(800.0, visible);
         let first_col_left = 0.5 * layout.column_width - phase * layout.px_per_sample - layout.column_width * 0.5;
-        assert!(
-            first_col_left >= -f32::EPSILON,
-            "first column envelope should reach the left plot edge"
-        );
+        assert!(first_col_left >= -f32::EPSILON, "first column envelope should reach the left plot edge");
 
         assert!(WaveformLayout::new(900.0, 132_300).column_count <= 900);
         let layout = WaveformLayout::new(900.0, 400);

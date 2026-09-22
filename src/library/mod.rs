@@ -61,11 +61,7 @@ pub fn list_directory(dir: &Path) -> Result<Vec<ListedEntry>, String> {
         })
         .collect();
     listed.extend(
-        sweep
-            .finish()
-            .into_iter()
-            .filter(|path| is_audio(path))
-            .map(|path| ListedEntry { path, is_dir: false }),
+        sweep.finish().into_iter().filter(|path| is_audio(path)).map(|path| ListedEntry { path, is_dir: false }),
     );
     Ok(listed)
 }

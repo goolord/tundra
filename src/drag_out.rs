@@ -24,14 +24,8 @@ impl HasWindowHandle for WindowHandleBorrow<'_> {
 #[cfg(any(windows, target_os = "macos"))]
 pub fn start_blocking(window: &dyn HasWindowHandle, path: PathBuf) -> Result<(), String> {
     let item = drag::DragItem::Files(vec![path.clone()]);
-    drag::start_drag(
-        &WindowHandleBorrow(window),
-        item,
-        drag::Image::File(path),
-        |_, _| {},
-        drag::Options::default(),
-    )
-    .map_err(|err| err.to_string())
+    drag::start_drag(&WindowHandleBorrow(window), item, drag::Image::File(path), |_, _| {}, drag::Options::default())
+        .map_err(|err| err.to_string())
 }
 
 pub fn x11_window_id(window: &dyn HasWindowHandle) -> Option<u32> {
@@ -182,14 +176,7 @@ mod x11 {
                 )?
                 .check()?;
             let atoms = Atoms::new(&connection)?.reply()?;
-            let source = Self {
-                connection,
-                root,
-                app_window,
-                source_window,
-                atoms,
-                drag: None,
-            };
+            let source = Self { connection, root, app_window, source_window, atoms, drag: None };
             let (window_type, dnd) = (source.atoms._NET_WM_WINDOW_TYPE, source.atoms._NET_WM_WINDOW_TYPE_DND);
             source.set_atoms(window_type, &[dnd])?;
             Ok(source)
@@ -197,9 +184,7 @@ mod x11 {
 
         fn set_atoms(&self, property: Atom, values: &[Atom]) -> Result<(), X11Error> {
             let window = self.source_window;
-            self.connection
-                .change_property32(REPLACE, window, property, AtomEnum::ATOM, values)?
-                .check()?;
+            self.connection.change_property32(REPLACE, window, property, AtomEnum::ATOM, values)?.check()?;
             Ok(self.connection.flush()?)
         }
 
@@ -237,11 +222,7 @@ mod x11 {
             if owner.reply()?.owner != self.source_window {
                 return Err("could not own the XDND selection".into());
             }
-            self.drag = Some(ActiveDrag {
-                uri_list,
-                timestamp,
-                ..ActiveDrag::default()
-            });
+            self.drag = Some(ActiveDrag { uri_list, timestamp, ..ActiveDrag::default() });
             let pointer = self.connection.query_pointer(self.root)?.reply()?;
             self.move_icon(pointer.root_x, pointer.root_y)?;
             self.connection.map_window(self.source_window)?.check()?;
@@ -251,9 +232,7 @@ mod x11 {
         /// The server's current time, read from the `PropertyNotify` of a dummy write.
         fn server_timestamp(&self) -> Result<u32, X11Error> {
             let (window, atom) = (self.source_window, self.atoms.TUNDRA_DRAG_TIMESTAMP);
-            self.connection
-                .change_property8(REPLACE, window, atom, AtomEnum::INTEGER, &[0])?
-                .check()?;
+            self.connection.change_property8(REPLACE, window, atom, AtomEnum::INTEGER, &[0])?.check()?;
             self.connection.flush()?;
             for _ in 0..TIMESTAMP_POLL_LIMIT {
                 match self.connection.poll_for_event()? {
@@ -271,14 +250,7 @@ mod x11 {
             let pointer = self.connection.query_pointer(self.root)?.reply()?;
             self.move_icon(pointer.root_x, pointer.root_y)?;
             let target = self.find_target(pointer.child)?;
-            let Self {
-                connection,
-                atoms,
-                source_window: me,
-                drag: Some(drag),
-                ..
-            } = self
-            else {
+            let Self { connection, atoms, source_window: me, drag: Some(drag), .. } = self else {
                 return Ok(());
             };
             if target != drag.target {
@@ -332,21 +304,14 @@ mod x11 {
         fn cancel(&mut self) {
             let drag = self.drag.as_ref().filter(|drag| !drag.dropped);
             if let Some(target) = drag.and_then(|drag| drag.target) {
-                let _ = send(
-                    &self.connection,
-                    target,
-                    self.atoms.XdndLeave,
-                    [self.source_window, 0, 0, 0, 0],
-                );
+                let _ = send(&self.connection, target, self.atoms.XdndLeave, [self.source_window, 0, 0, 0, 0]);
             }
             self.reset(true);
         }
 
         fn reset(&mut self, release_selection: bool) {
             if release_selection && let Some(drag) = &self.drag {
-                let _ = self
-                    .connection
-                    .set_selection_owner(x11rb::NONE, self.atoms.XdndSelection, drag.timestamp);
+                let _ = self.connection.set_selection_owner(x11rb::NONE, self.atoms.XdndSelection, drag.timestamp);
             }
             let _ = self.connection.unmap_window(self.source_window);
             let _ = self.connection.flush();
@@ -388,11 +353,7 @@ mod x11 {
                 };
                 let version = self.property32(recipient, self.atoms.XdndAware, AtomEnum::ATOM)?;
                 if let Some(version) = version.filter(|version| *version >= 3) {
-                    return Ok(Some(DragTarget {
-                        window,
-                        recipient,
-                        version,
-                    }));
+                    return Ok(Some(DragTarget { window, recipient, version }));
                 }
             }
             Ok(None)
@@ -441,38 +402,22 @@ mod x11 {
             if request.owner != self.source_window || request.selection != self.atoms.XdndSelection {
                 return Ok(());
             }
-            let property = if request.property == x11rb::NONE {
-                request.target
-            } else {
-                request.property
-            };
+            let property = if request.property == x11rb::NONE { request.target } else { request.property };
             let not_older = |drag: &&ActiveDrag| {
                 request.time == x11rb::CURRENT_TIME || request.time.wrapping_sub(drag.timestamp) < (1 << 31)
             };
-            let written = self
-                .drag
-                .as_ref()
-                .filter(|drag| drag.dropped)
-                .filter(not_older)
-                .is_some_and(|drag| {
-                    let (requestor, atoms) = (request.requestor, &self.atoms);
-                    let cookie = if request.target == atoms.TextUriList {
-                        self.connection.change_property8(
-                            REPLACE,
-                            requestor,
-                            property,
-                            atoms.TextUriList,
-                            &drag.uri_list,
-                        )
-                    } else if request.target == atoms.TARGETS {
-                        let targets = [atoms.TextUriList, atoms.TARGETS];
-                        self.connection
-                            .change_property32(REPLACE, requestor, property, AtomEnum::ATOM, &targets)
-                    } else {
-                        return false;
-                    };
-                    cookie.is_ok_and(|cookie| cookie.check().is_ok())
-                });
+            let written = self.drag.as_ref().filter(|drag| drag.dropped).filter(not_older).is_some_and(|drag| {
+                let (requestor, atoms) = (request.requestor, &self.atoms);
+                let cookie = if request.target == atoms.TextUriList {
+                    self.connection.change_property8(REPLACE, requestor, property, atoms.TextUriList, &drag.uri_list)
+                } else if request.target == atoms.TARGETS {
+                    let targets = [atoms.TextUriList, atoms.TARGETS];
+                    self.connection.change_property32(REPLACE, requestor, property, AtomEnum::ATOM, &targets)
+                } else {
+                    return false;
+                };
+                cookie.is_ok_and(|cookie| cookie.check().is_ok())
+            });
             let notify = SelectionNotifyEvent {
                 response_type: SELECTION_NOTIFY_EVENT,
                 sequence: 0,
@@ -482,9 +427,7 @@ mod x11 {
                 target: request.target,
                 property: if written { property } else { x11rb::NONE },
             };
-            self.connection
-                .send_event(false, request.requestor, EventMask::NO_EVENT, notify)?
-                .check()?;
+            self.connection.send_event(false, request.requestor, EventMask::NO_EVENT, notify)?.check()?;
             Ok(self.connection.flush()?)
         }
     }
@@ -499,9 +442,7 @@ mod x11 {
 
     fn send(connection: &RustConnection, target: DragTarget, kind: Atom, data: [u32; 5]) -> Result<(), X11Error> {
         let event = ClientMessageEvent::new(32, target.window, kind, data);
-        connection
-            .send_event(false, target.recipient, EventMask::NO_EVENT, event)?
-            .check()?;
+        connection.send_event(false, target.recipient, EventMask::NO_EVENT, event)?.check()?;
         Ok(connection.flush()?)
     }
 

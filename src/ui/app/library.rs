@@ -115,11 +115,7 @@ impl App {
         }
         // Playing a file only re-runs the search when its tags turned out to be
         // stale; otherwise the list (and selection) stay put.
-        let refresh = if self.merge_path_metadata(path) {
-            self.refresh_search_if_active()
-        } else {
-            Task::none()
-        };
+        let refresh = if self.merge_path_metadata(path) { self.refresh_search_if_active() } else { Task::none() };
         self.file_selector.sync_selection_for_path(path);
         refresh
     }
@@ -156,11 +152,7 @@ impl App {
     }
 
     pub(super) fn refresh_search_if_active(&mut self) -> Task<Message> {
-        if self.file_selector.search_active() {
-            self.start_file_search()
-        } else {
-            Task::none()
-        }
+        if self.file_selector.search_active() { self.start_file_search() } else { Task::none() }
     }
 
     fn reset_file_list(&mut self) {
@@ -251,11 +243,7 @@ impl App {
         self.dir_cache.finish_loading(caches.dirs);
         self.metadata_cache.finish_loading(caches.metadata);
         self.caches_ready = true;
-        Task::batch([
-            self.warm_allowed_caches(),
-            self.refresh_search_if_active(),
-            self.open_pending_launch(),
-        ])
+        Task::batch([self.warm_allowed_caches(), self.refresh_search_if_active(), self.open_pending_launch()])
     }
 
     pub(super) fn insert_walked_directory(&mut self, dir: PathBuf, children: Vec<PathBuf>) -> Task<Message> {
@@ -265,10 +253,7 @@ impl App {
         }
         self.dir_cache.insert(dir, children.clone());
         let metadata = self.metadata_cache.snapshot();
-        Task::perform(
-            async move { index_paths(&children, metadata) },
-            Message::MetadataIndexed,
-        )
+        Task::perform(async move { index_paths(&children, metadata) }, Message::MetadataIndexed)
     }
 
     /// Runs the current file query and tag filters, replacing any search in flight.
@@ -281,13 +266,9 @@ impl App {
             self.reset_file_list();
             return Task::none();
         }
-        let favorites = selector.favorites_only.then(|| {
-            self.favorites
-                .paths()
-                .iter()
-                .cloned()
-                .collect::<std::collections::HashSet<_>>()
-        });
+        let favorites = selector
+            .favorites_only
+            .then(|| self.favorites.paths().iter().cloned().collect::<std::collections::HashSet<_>>());
         if favorites.as_ref().is_some_and(|favorites| favorites.is_empty()) {
             self.file_selector.set_file_list(Vec::new(), None);
             return Task::none();
@@ -300,11 +281,7 @@ impl App {
 
         let tag_only = selector.tag_only_search();
         // Wait for typing to pause; a one- or two-letter query matches so much that it waits longer.
-        let debounce_ms = if !tag_only && selector.search_value.len() <= FILE_SEARCH_MIN_QUERY_LEN {
-            450
-        } else {
-            200
-        };
+        let debounce_ms = if !tag_only && selector.search_value.len() <= FILE_SEARCH_MIN_QUERY_LEN { 450 } else { 200 };
         let request = SearchRequest {
             debounce: Duration::from_millis(debounce_ms),
             allowed_roots: self.allowed_directories.roots().to_vec(),
@@ -320,10 +297,9 @@ impl App {
         let generation = self.search_generation;
         let (abort, registration) = AbortHandle::new_pair();
         self.search_abort = abort;
-        Task::perform(
-            Abortable::new(execute_file_search(request), registration),
-            move |result| FilterMsg::SearchCompleted(generation, result).into(),
-        )
+        Task::perform(Abortable::new(execute_file_search(request), registration), move |result| {
+            FilterMsg::SearchCompleted(generation, result).into()
+        })
     }
 
     pub(super) fn update_filter(&mut self, message: FilterMsg) -> Task<Message> {

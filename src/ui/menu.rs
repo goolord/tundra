@@ -92,23 +92,14 @@ fn window_button(label: &'static str, message: Message, close: bool) -> Element<
             Color::from_rgb8(0xc4, 0x2b, 0x1c),
             Color::from_rgb8(0x9a, 0x1f, 0x12),
         );
-        let text_color = if red == Color::TRANSPARENT {
-            text_color
-        } else {
-            Color::WHITE
-        };
+        let text_color = if red == Color::TRANSPARENT { text_color } else { Color::WHITE };
         style::solid_button(text_color, Border::default(), red)
     })
     .into()
 }
 
 fn ghost_hover_fill(theme: &Theme, status: button::Status) -> Color {
-    style::by_status(
-        status,
-        Color::TRANSPARENT,
-        style::text_alpha(theme, 0.08),
-        style::text_alpha(theme, 0.14),
-    )
+    style::by_status(status, Color::TRANSPARENT, style::text_alpha(theme, 0.08), style::text_alpha(theme, 0.14))
 }
 
 fn menu_bar_widget(always_on_top: bool) -> Element<'static, Message> {
@@ -137,19 +128,12 @@ fn menu_bar_widget(always_on_top: bool) -> Element<'static, Message> {
         .width(Length::Fixed(12.0))
         .align_x(alignment::Horizontal::Center);
     let on_top = menu_button(
-        row![on_top_mark, text("Always On Top").size(13).width(Length::Fill)]
-            .spacing(6)
-            .align_y(Alignment::Center),
+        row![on_top_mark, text("Always On Top").size(13).width(Length::Fill)].spacing(6).align_y(Alignment::Center),
         Message::SetAlwaysOnTop(!always_on_top),
     );
 
     MenuBar::new(vec![
-        menu(
-            "File",
-            file.into_iter()
-                .map(|(label, message)| menu_item(label, message))
-                .collect(),
-        ),
+        menu("File", file.into_iter().map(|(label, message)| menu_item(label, message)).collect()),
         menu("View", vec![on_top]),
         menu("Help", vec![menu_item("About Tundra", Message::About)]),
     ])
@@ -189,11 +173,7 @@ fn menu_item(label: &'static str, message: Message) -> button::Button<'static, M
 }
 
 fn menu_button(content: impl Into<Element<'static, Message>>, message: Message) -> button::Button<'static, Message> {
-    button(content)
-        .width(Length::Fill)
-        .padding([3, 10])
-        .style(flat_button_style)
-        .on_press(message)
+    button(content).width(Length::Fill).padding([3, 10]).style(flat_button_style).on_press(message)
 }
 
 fn menu_root(label: &'static str) -> button::Button<'static, Message> {

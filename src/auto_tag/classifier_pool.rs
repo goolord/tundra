@@ -75,10 +75,7 @@ impl Worker {
                 Err(err) => attempts.push(format!("{label}: {}", err.details)),
             }
         }
-        Err(ClassifyError::new(
-            "Couldn't start classifier worker.",
-            format!("{INSTALL_HINT}. {}", attempts.join("; ")),
-        ))
+        Err(ClassifyError::new("Couldn't start classifier worker.", format!("{INSTALL_HINT}. {}", attempts.join("; "))))
     }
 
     fn start(mut command: Command) -> Result<Self, ClassifyError> {
@@ -98,18 +95,10 @@ impl Worker {
         });
         let (line_tx, lines) = mpsc::channel();
         std::thread::spawn(move || {
-            BufReader::new(stdout)
-                .lines()
-                .map_while(Result::ok)
-                .try_for_each(|line| line_tx.send(line))
+            BufReader::new(stdout).lines().map_while(Result::ok).try_for_each(|line| line_tx.send(line))
         });
         // Built before the greeting so a failed start still kills the child.
-        let worker = Self {
-            stdin: child.stdin.take().expect("stdin piped"),
-            child,
-            lines,
-            last_used: Instant::now(),
-        };
+        let worker = Self { stdin: child.stdin.take().expect("stdin piped"), child, lines, last_used: Instant::now() };
         let ready: WorkerReady = parse(&worker.next_line()?, "Unexpected worker greeting")?;
         if !ready.ready {
             return Err(failed(ready.error.unwrap_or_else(|| "unknown worker error".into())));
@@ -144,10 +133,7 @@ impl Worker {
 
         let response: WorkerResponse = parse(&self.next_line()?, "Invalid worker output")?;
         if response.id != Some(id) {
-            return Err(failed(format!(
-                "Worker replied to request {:?} while {id} was pending",
-                response.id
-            )));
+            return Err(failed(format!("Worker replied to request {:?} while {id} was pending", response.id)));
         }
         self.last_used = Instant::now();
         Ok(match (response.ok, response.result) {
@@ -213,8 +199,7 @@ fn launch_commands() -> Vec<(String, Command)> {
     }
     let mut uv = Command::new("uv");
     let pinned = include_str!("../../scripts/.python-version").trim();
-    uv.current_dir(&scripts_dir)
-        .args(["run", "--python", pinned, "classifier_worker.py"]);
+    uv.current_dir(&scripts_dir).args(["run", "--python", pinned, "classifier_worker.py"]);
     commands.push(("uv run".to_string(), uv));
     #[cfg(not(windows))]
     commands.extend(["python3", "python"].map(|system| (system.to_string(), python(Path::new(system)))));
@@ -267,9 +252,7 @@ fn reap_idle_workers() {
         std::thread::sleep(IDLE_TIMEOUT / 4);
         for slot in &POOL.slots {
             if let Ok(mut worker) = slot.try_lock()
-                && worker
-                    .as_ref()
-                    .is_some_and(|worker| worker.last_used.elapsed() >= IDLE_TIMEOUT)
+                && worker.as_ref().is_some_and(|worker| worker.last_used.elapsed() >= IDLE_TIMEOUT)
             {
                 *worker = None;
             }
@@ -298,13 +281,10 @@ impl ClassifierPool {
 
     /// An idle slot if one is free, otherwise round-robin.
     fn pick(&self) -> MutexGuard<'_, Option<Worker>> {
-        self.slots
-            .iter()
-            .find_map(|slot| slot.try_lock().ok())
-            .unwrap_or_else(|| {
-                let index = self.next.fetch_add(1, Ordering::Relaxed) % self.slots.len();
-                Self::lock(&self.slots[index])
-            })
+        self.slots.iter().find_map(|slot| slot.try_lock().ok()).unwrap_or_else(|| {
+            let index = self.next.fetch_add(1, Ordering::Relaxed) % self.slots.len();
+            Self::lock(&self.slots[index])
+        })
     }
 
     fn classify(&self, path: &Path, tier1_zcr: f64) -> Result<Tier2Response, ClassifyError> {
@@ -312,9 +292,7 @@ impl ClassifierPool {
         let mut last_error = None;
         // A worker that crashed or desynced gets one fresh replacement.
         for _ in 0..2 {
-            let exited = slot
-                .as_mut()
-                .is_none_or(|worker| !matches!(worker.child.try_wait(), Ok(None)));
+            let exited = slot.as_mut().is_none_or(|worker| !matches!(worker.child.try_wait(), Ok(None)));
             if exited {
                 *slot = Some(self.spawn()?);
             }

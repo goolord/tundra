@@ -137,17 +137,10 @@ pub async fn execute_file_search(request: SearchRequest) -> SearchOutput {
     };
     let lookup = MetadataLookup::with_new_entries(metadata_map, indexed);
 
-    let query = SearchQuery {
-        text: &file_query,
-        tag_filters: &tag_filters,
-        case_sensitive,
-        show_directories,
-    };
+    let query = SearchQuery { text: &file_query, tag_filters: &tag_filters, case_sensitive, show_directories };
     let mut result = search(&paths, &query, lookup);
     if let Some(favorites) = favorites {
-        result
-            .paths
-            .retain(|path| favorites.contains(&crate::path_util::favorite_lookup_key(path)));
+        result.paths.retain(|path| favorites.contains(&crate::path_util::favorite_lookup_key(path)));
     }
     for path in &mut result.paths {
         *path = resolve_open_path(path, paths.iter().map(PathBuf::as_path));

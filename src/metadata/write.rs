@@ -46,12 +46,8 @@ impl TagEdit<'_> {
     pub(crate) fn keyed<'k>(&self, native_keys: [&'k str; 3], manual_keys: &[&'k str]) -> Vec<(&'k str, &str)> {
         let native = [&self.native.instrument, &self.native.artist, &self.native.comment];
         let native = native_keys.into_iter().zip(native);
-        let manual = self
-            .manual
-            .map(|edits| [&edits.title, &edits.genre, &edits.bpm, &edits.key]);
-        let manual = manual
-            .into_iter()
-            .flat_map(|values| manual_keys.iter().copied().zip(values));
+        let manual = self.manual.map(|edits| [&edits.title, &edits.genre, &edits.bpm, &edits.key]);
+        let manual = manual.into_iter().flat_map(|values| manual_keys.iter().copied().zip(values));
         native
             .filter_map(|(key, value)| Some((key, value.as_deref()?)))
             .chain(manual.map(|(key, value)| (key, value.as_str())))
@@ -78,11 +74,7 @@ fn set_id3_text(id3: &mut Id3v2Tag, id: &'static str, value: &str) {
     drop(id3.remove(&frame_id));
     let value = value.trim();
     if !value.is_empty() {
-        id3.insert(Frame::Text(TextInformationFrame::new(
-            frame_id,
-            TextEncoding::UTF8,
-            value.to_string(),
-        )));
+        id3.insert(Frame::Text(TextInformationFrame::new(frame_id, TextEncoding::UTF8, value.to_string())));
     }
 }
 
@@ -97,12 +89,9 @@ pub(crate) fn apply_id3_edit(id3: &mut Id3v2Tag, edit: &TagEdit) {
         id3.set_comment(comment.trim().to_string());
     }
     if let Some(manual) = edit.manual {
-        for (id, value) in [
-            ("TIT2", &manual.title),
-            ("TCON", &manual.genre),
-            ("TBPM", &manual.bpm),
-            ("TKEY", &manual.key),
-        ] {
+        for (id, value) in
+            [("TIT2", &manual.title), ("TCON", &manual.genre), ("TBPM", &manual.bpm), ("TKEY", &manual.key)]
+        {
             set_id3_text(id3, id, value);
         }
     }
@@ -177,10 +166,7 @@ pub(crate) fn write_tags(path: &Path, edit: &TagEdit) -> Result<(), String> {
     // Reads pick the parser by extension; a tag written in a format they will
     // not look for would vanish from search.
     if Container::of(&target) != Some(container) {
-        return Err(format!(
-            "{} does not contain the audio format its extension says",
-            display_path(path)
-        ));
+        return Err(format!("{} does not contain the audio format its extension says", display_path(path)));
     }
     let sidecar_stamp = FileStamp::of(path);
 
@@ -209,9 +195,7 @@ fn write_target(path: &Path) -> PathBuf {
 pub(crate) fn stage_and_replace(path: &Path, edit: impl FnOnce(&Path) -> Result<(), String>) -> Result<(), String> {
     use crate::safe_write::{ensure_writable, replace_file, sync_file, sync_parent_dir, unique_sidecar};
 
-    let original_perms = std::fs::metadata(path)
-        .map_err(|err| path_io_error("read", path, err))?
-        .permissions();
+    let original_perms = std::fs::metadata(path).map_err(|err| path_io_error("read", path, err))?.permissions();
     // Size and mtime, to notice another program writing the file mid-edit.
     let before_stamp = FileStamp::of(path);
     let tmp = unique_sidecar(path, "tag");
@@ -263,9 +247,7 @@ pub(crate) fn stage_and_replace(path: &Path, edit: impl FnOnce(&Path) -> Result<
 }
 
 fn require_audio(path: &Path) -> Result<(), String> {
-    is_audio(path)
-        .then_some(())
-        .ok_or_else(|| format!("Not an audio file: {}", display_path(path)))
+    is_audio(path).then_some(()).ok_or_else(|| format!("Not an audio file: {}", display_path(path)))
 }
 
 /// Fields for the sidecar when the container refuses the write. An empty
@@ -319,11 +301,7 @@ pub fn write_manual_tags(path: &Path, edits: &ManualTagEdits) -> Result<SavedTo,
 /// finds the file.
 pub fn write_auto_tags(path: &Path, instrument: &str) -> Result<bool, String> {
     require_audio(path)?;
-    let NativeInspection {
-        native,
-        durable_instrument: durable,
-        status,
-    } = inspect_native(path);
+    let NativeInspection { native, durable_instrument: durable, status } = inspect_native(path);
     if status.is_complete() {
         return Ok(false);
     }
@@ -338,11 +316,7 @@ pub fn write_auto_tags(path: &Path, instrument: &str) -> Result<bool, String> {
         status.allows_instrument_work() && !instrument.is_empty() && !current.eq_ignore_ascii_case(instrument);
     let pending = NativeTags {
         instrument: instrument_changed.then(|| instrument.to_string()),
-        artist: status
-            .needs_artist
-            .then(|| artist_hint_from_path(path))
-            .flatten()
-            .filter(|artist| !artist.is_empty()),
+        artist: status.needs_artist.then(|| artist_hint_from_path(path)).flatten().filter(|artist| !artist.is_empty()),
         comment: status.needs_comment.then(|| tundra_comment(native.comment.as_deref())),
     };
 
@@ -350,10 +324,7 @@ pub fn write_auto_tags(path: &Path, instrument: &str) -> Result<bool, String> {
         return Ok(false);
     }
 
-    let edit = TagEdit {
-        native: pending,
-        manual: None,
-    };
+    let edit = TagEdit { native: pending, manual: None };
     match write_tags(path, &edit) {
         Ok(()) => Ok(true),
         Err(native_error) => {

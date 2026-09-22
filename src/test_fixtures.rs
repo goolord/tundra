@@ -53,10 +53,7 @@ pub fn copy_asset(dir: &Path, stem: &str, ext: &str) -> PathBuf {
 
 pub fn count_tundra_sidecars(dir: &Path) -> usize {
     fs::read_dir(dir).map_or(0, |entries| {
-        entries
-            .flatten()
-            .filter(|entry| entry.file_name().to_string_lossy().contains(".tundra-"))
-            .count()
+        entries.flatten().filter(|entry| entry.file_name().to_string_lossy().contains(".tundra-")).count()
     })
 }
 
@@ -66,11 +63,7 @@ pub fn minimal_wav_bytes() -> Vec<u8> {
     wav.extend(548u32.to_le_bytes());
     wav.extend(b"WAVEfmt ");
     // fmt size; PCM, mono; rate; byte rate; block align 2, 16 bits.
-    wav.extend(
-        [16u32, 0x0001_0001, 44_100, 88_200, 0x0010_0002]
-            .iter()
-            .flat_map(|word| word.to_le_bytes()),
-    );
+    wav.extend([16u32, 0x0001_0001, 44_100, 88_200, 0x0010_0002].iter().flat_map(|word| word.to_le_bytes()));
     wav.extend(b"data");
     wav.extend(512u32.to_le_bytes());
     wav.resize(wav.len() + 512, 0);
@@ -127,12 +120,7 @@ pub fn with_replace_blocked<R>(dir: &Path, dest: &Path, f: impl FnOnce() -> R) -
         use std::os::windows::fs::OpenOptionsExt;
         let _ = dir;
         // FILE_SHARE_READ: staging may read it; deleting or replacing it fails.
-        let _lock = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .share_mode(1)
-            .open(dest)
-            .expect("lock dest");
+        let _lock = fs::OpenOptions::new().read(true).write(true).share_mode(1).open(dest).expect("lock dest");
         f()
     }
 }

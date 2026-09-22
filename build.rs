@@ -15,10 +15,7 @@ fn main() {
         .filter(|name| name.ends_with(".svg"))
         .collect();
     names.sort();
-    assert!(
-        !names.is_empty(),
-        "no icons in resources/; run `git lfs pull` or `cargo xtask setup`"
-    );
+    assert!(!names.is_empty(), "no icons in resources/; run `git lfs pull` or `cargo xtask setup`");
 
     let mut body = String::from(
         "use iced::widget::svg::Handle;\n\npub fn handle(name: &str) -> Option<Handle> {\n    let bytes: &[u8] = match name {\n",

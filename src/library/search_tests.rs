@@ -13,11 +13,7 @@ fn shared<V>(map: HashMap<PathBuf, V>) -> Shared<V> {
 fn kick_tags(mtime_secs: u64) -> CachedMetadata {
     CachedMetadata {
         mtime_secs,
-        fields: TagFields {
-            explicit_instrument: "Kick".into(),
-            instrument: "Kick".into(),
-            ..TagFields::default()
-        },
+        fields: TagFields { explicit_instrument: "Kick".into(), instrument: "Kick".into(), ..TagFields::default() },
     }
 }
 
@@ -40,10 +36,7 @@ fn search(roots: &[&Path], metadata: Shared<CachedMetadata>, file_query: &str, i
         dir_cache: shared(HashMap::new()),
         metadata_cache: metadata,
         file_query: file_query.into(),
-        tag_filters: vec![TagFilter {
-            field: TagField::Instrument,
-            value: instrument.into(),
-        }],
+        tag_filters: vec![TagFilter { field: TagField::Instrument, value: instrument.into() }],
         case_sensitive: false,
         show_directories: false,
         tag_only: file_query.trim().is_empty(),
@@ -65,10 +58,7 @@ fn file_query_keeps_tagged_files_the_walk_cannot_reach() {
     Arc::make_mut(&mut metadata.write().unwrap()).insert(cache_key(&ghost), kick_tags(0));
 
     let tag_only = search(&[root.path()], Arc::clone(&metadata), "", "kick").result.paths;
-    assert!(
-        contains_path(&tag_only, &ghost),
-        "tag-only search missed {ghost:?}, got {tag_only:?}"
-    );
+    assert!(contains_path(&tag_only, &ghost), "tag-only search missed {ghost:?}, got {tag_only:?}");
 
     // Narrowing with a file query must not drop what the tag filter just surfaced.
     let narrowed = search(&[root.path()], metadata, "ghost", "kick").result.paths;
@@ -94,10 +84,7 @@ fn tag_only_search_walks_a_root_with_no_cache_or_metadata() {
     std::fs::write(cold.path().join("snare.wav"), b"RIFF").unwrap();
 
     let result = search(&[known.path(), cold.path()], metadata, "", "kick");
-    assert!(
-        !result.walked_roots.contains_key(known.path()),
-        "root with metadata should not be walked"
-    );
+    assert!(!result.walked_roots.contains_key(known.path()), "root with metadata should not be walked");
     assert!(
         result.walked_roots.contains_key(cold.path()),
         "root with no cache and no metadata must be walked, got {:?}",
@@ -123,10 +110,8 @@ fn file_query_narrows_an_active_tag_filter() {
 
 /// `cached_paths_for_root` over listings given as `(dir, files)`.
 fn cached(listings: &[(&str, &[&str])], root: &str) -> (Vec<PathBuf>, bool) {
-    let cache = listings
-        .iter()
-        .map(|(dir, files)| (PathBuf::from(dir), files.iter().map(PathBuf::from).collect()))
-        .collect();
+    let cache =
+        listings.iter().map(|(dir, files)| (PathBuf::from(dir), files.iter().map(PathBuf::from).collect())).collect();
     cached_paths_for_root(&cache, Path::new(root))
 }
 
@@ -136,10 +121,7 @@ fn paths(files: &[&str]) -> Vec<PathBuf> {
 
 #[test]
 fn cached_paths_for_root_is_found_only_once_the_root_itself_is_walked() {
-    let sub: (&str, &[&str]) = (
-        "/Samples/ADM",
-        &["/Samples/ADM/01_Snare.flac", "/Samples/ADM/02_Snare.flac"],
-    );
+    let sub: (&str, &[&str]) = ("/Samples/ADM", &["/Samples/ADM/01_Snare.flac", "/Samples/ADM/02_Snare.flac"]);
     // Visited subtrees are a slice of the library, not coverage of the root.
     assert_eq!(cached(&[sub], "/Samples"), (paths(sub.1), false));
 
@@ -160,10 +142,7 @@ fn cached_paths_for_root_merges_spellings_of_one_directory() {
         r"\\?\F:\Samples",
     );
     assert!(walked);
-    assert_eq!(
-        found,
-        paths(&[r"\\?\F:\Samples\Old\kick.wav", r"F:\Samples\ADM\01_Snare.flac"])
-    );
+    assert_eq!(found, paths(&[r"\\?\F:\Samples\Old\kick.wav", r"F:\Samples\ADM\01_Snare.flac"]));
 
     // The same directory under two spellings keeps only the fuller listing.
     let (found, walked) = cached(

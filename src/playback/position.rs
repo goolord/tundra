@@ -10,10 +10,7 @@ pub struct PlaybackPosition {
 
 impl PlaybackPosition {
     pub fn new(total_frames: u64) -> Arc<Self> {
-        Arc::new(Self {
-            frame: AtomicU64::new(0),
-            total_frames: AtomicU64::new(total_frames),
-        })
+        Arc::new(Self { frame: AtomicU64::new(0), total_frames: AtomicU64::new(total_frames) })
     }
 
     pub fn progress(&self) -> f64 {
@@ -37,8 +34,7 @@ impl PlaybackPosition {
 
     pub fn set_frame(&self, frame: u64) {
         let total = self.total_frames();
-        self.frame
-            .store(if total == 0 { frame } else { frame.min(total) }, Ordering::Release);
+        self.frame.store(if total == 0 { frame } else { frame.min(total) }, Ordering::Release);
     }
 
     /// Moves the playhead to `progress` (0 to 1) of the track.

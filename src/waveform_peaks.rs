@@ -21,12 +21,7 @@ impl WaveformPeaks {
     }
 
     pub fn new(sample_count: usize) -> Self {
-        Self {
-            min: vec![0.0; PEAK_BUCKET_COUNT],
-            max: vec![0.0; PEAK_BUCKET_COUNT],
-            sample_count,
-            complete: false,
-        }
+        Self { min: vec![0.0; PEAK_BUCKET_COUNT], max: vec![0.0; PEAK_BUCKET_COUNT], sample_count, complete: false }
     }
 
     fn bucket(&self, sample_index: usize) -> usize {
@@ -60,10 +55,7 @@ impl WaveformPeaks {
 fn build_peaks(path: &Path, sample_count_hint: usize, cancelled: &dyn Fn() -> bool) -> Option<WaveformPeaks> {
     if std::fs::metadata(path).is_ok_and(|meta| meta.len() > MAX_PEAK_DECODE_BYTES) {
         let complete = sample_count_hint > 0;
-        return Some(WaveformPeaks {
-            complete,
-            ..WaveformPeaks::new(sample_count_hint)
-        });
+        return Some(WaveformPeaks { complete, ..WaveformPeaks::new(sample_count_hint) });
     }
     let sample_count = match sample_count_hint {
         0 => decode_peaks(path, None, cancelled)?.sample_count,

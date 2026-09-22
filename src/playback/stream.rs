@@ -28,13 +28,8 @@ pub fn probe_decoder(path: &Path) -> Result<StreamInfo, String> {
     if sample_rate == 0 {
         return Err("Audio file has an invalid sample rate".into());
     }
-    let total_frames = decoder
-        .total_duration()
-        .map_or(0, |duration| frames_from_duration(duration, sample_rate));
-    Ok(StreamInfo {
-        sample_rate,
-        total_frames,
-    })
+    let total_frames = decoder.total_duration().map_or(0, |duration| frames_from_duration(duration, sample_rate));
+    Ok(StreamInfo { sample_rate, total_frames })
 }
 
 fn frames_from_duration(duration: Duration, sample_rate: u32) -> u64 {
@@ -61,10 +56,7 @@ impl StreamSource {
         let channels = decoder.channels() as usize;
         let sample_rate = decoder.sample_rate();
         if channels == 0 || sample_rate == 0 {
-            return Err(format!(
-                "{} has invalid audio layout",
-                crate::path_util::display_path(path)
-            ));
+            return Err(format!("{} has invalid audio layout", crate::path_util::display_path(path)));
         }
 
         let progress = progress.clamp(0.0, 1.0);
@@ -83,14 +75,7 @@ impl StreamSource {
         };
         position.set_frame(start_frame);
 
-        Ok(Self {
-            decoder,
-            channels,
-            sample_rate,
-            start_frame,
-            sample_index: 0,
-            position,
-        })
+        Ok(Self { decoder, channels, sample_rate, start_frame, sample_index: 0, position })
     }
 }
 
@@ -155,10 +140,6 @@ mod tests {
         for _ in 0..source.channels * 64 {
             source.next();
         }
-        assert!(
-            position.progress() >= 0.5,
-            "playhead fell back to {} after seeking to 0.5",
-            position.progress()
-        );
+        assert!(position.progress() >= 0.5, "playhead fell back to {} after seeking to 0.5", position.progress());
     }
 }

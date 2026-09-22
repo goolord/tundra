@@ -19,9 +19,7 @@ pub const AUTO_TAG_INSTRUMENT_PRESENT: &str =
 fn directory_row(path: &Path) -> Element<'static, Message> {
     container(
         row![
-            text(crate::path_util::truncate_path(path, 52))
-                .size(12)
-                .width(Length::Fill),
+            text(crate::path_util::truncate_path(path, 52)).size(12).width(Length::Fill),
             button(text("Remove").size(11))
                 .padding([4, 8])
                 .on_press(SettingsMsg::RemoveDirectory(path.to_path_buf()).into())
@@ -67,11 +65,7 @@ pub fn settings_view(allowed: &[PathBuf], first_run: bool, error: Option<&str>) 
         .push(list)
         .push(error.map(|error| text(error.to_owned()).size(12).color(style::ERROR)))
         .push(modal_footer(
-            [modal_button(
-                "Add directory…",
-                Some(SettingsMsg::PickDirectory.into()),
-                false,
-            )],
+            [modal_button("Add directory…", Some(SettingsMsg::PickDirectory.into()), false)],
             modal_button(close_label, Some(SettingsMsg::Close.into()), true),
         ));
     modal_shell(body.padding(18), 520.0).into()

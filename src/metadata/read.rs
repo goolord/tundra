@@ -30,10 +30,7 @@ pub(crate) const VORBIS_NATIVE_KEYS: [&str; 3] = [VORBIS_INSTRUMENT_KEY, VORBIS_
 /// Sets `value` from `source` unless it already holds something.
 fn push_field(value: &mut String, source: Option<impl AsRef<str>>) {
     if value.is_empty()
-        && let Some(text) = source
-            .as_ref()
-            .map(|text| text.as_ref().trim())
-            .filter(|text| !text.is_empty())
+        && let Some(text) = source.as_ref().map(|text| text.as_ref().trim()).filter(|text| !text.is_empty())
     {
         *value = text.to_owned();
     }
@@ -61,9 +58,7 @@ fn marker_line_version(line: &str) -> Option<u32> {
     if line.eq_ignore_ascii_case("Tundra") || line.eq_ignore_ascii_case(LEGACY_TUNDRA_AUTO_TAG_COMMENT) {
         return Some(0);
     }
-    line.to_ascii_lowercase()
-        .strip_prefix("tundra v")
-        .and_then(|rest| rest.trim().parse().ok())
+    line.to_ascii_lowercase().strip_prefix("tundra v").and_then(|rest| rest.trim().parse().ok())
 }
 
 /// Version recorded in a Tundra marker comment, if any.
@@ -72,13 +67,8 @@ pub(crate) fn parse_tundra_comment_version(comment: &str) -> Option<u32> {
 }
 
 pub(crate) fn file_tundra_tag_version(path: &Path, comment: &str, native_instrument: &str) -> Option<u32> {
-    parse_tundra_comment_version(comment).or_else(|| {
-        native_instrument
-            .trim()
-            .is_empty()
-            .then(|| crate::tag_store::tag_version(path))
-            .flatten()
-    })
+    parse_tundra_comment_version(comment)
+        .or_else(|| native_instrument.trim().is_empty().then(|| crate::tag_store::tag_version(path)).flatten())
 }
 
 /// Tundra may replace tags it wrote; sidecar alone does not own native tags.
@@ -185,11 +175,7 @@ impl NativeTags {
 
     fn from_keys(keys: [&str; 3], get: impl Fn(&str) -> Option<String>) -> Self {
         let [instrument, artist, comment] = keys.map(get);
-        Self {
-            instrument,
-            artist,
-            comment,
-        }
+        Self { instrument, artist, comment }
     }
 
     fn vorbis(vorbis: Option<&VorbisComments>) -> Self {
@@ -207,9 +193,7 @@ impl NativeTags {
 
 /// Skip audio properties and cover art on tag-only reads.
 fn tag_parse_options() -> lofty::config::ParseOptions {
-    lofty::config::ParseOptions::new()
-        .read_properties(false)
-        .read_cover_art(false)
+    lofty::config::ParseOptions::new().read_properties(false).read_cover_art(false)
 }
 
 /// Read cover art back in before write so saves do not strip it.
@@ -242,9 +226,8 @@ pub(crate) fn read_container_tags_as(path: &Path, container: Container) -> Optio
         Container::Wav => {
             let mut wav = lofty::iff::wav::WavFile::read_from(&mut file, options).ok()?;
             let info = wav.remove_riff_info();
-            let native = NativeTags::from_keys(WAV_NATIVE_KEYS, |key| {
-                info.as_ref().and_then(|list| riff_get(list, key))
-            });
+            let native =
+                NativeTags::from_keys(WAV_NATIVE_KEYS, |key| info.as_ref().and_then(|list| riff_get(list, key)));
             let generic = tags([info.map(Tag::from), wav.remove_id3v2().map(Tag::from)]);
             FileTags { native, generic }
         }
@@ -259,48 +242,30 @@ pub(crate) fn read_container_tags_as(path: &Path, container: Container) -> Optio
         Container::Ogg => {
             let mut ogg = lofty::ogg::VorbisFile::read_from(&mut file, options).ok()?;
             let vorbis = std::mem::take(ogg.vorbis_comments_mut());
-            FileTags {
-                native: NativeTags::vorbis(Some(&vorbis)),
-                generic: vec![Tag::from(vorbis)],
-            }
+            FileTags { native: NativeTags::vorbis(Some(&vorbis)), generic: vec![Tag::from(vorbis)] }
         }
         Container::Mp3 => {
             let mut mp3 = lofty::mpeg::MpegFile::read_from(&mut file, options).ok()?;
             let id3v2 = mp3.remove_id3v2();
-            let other = mp3
-                .remove_id3v1()
-                .map(Tag::from)
-                .or_else(|| mp3.remove_ape().map(Tag::from));
-            FileTags {
-                native: NativeTags::id3(id3v2.as_ref()),
-                generic: tags([id3v2.map(Tag::from), other]),
-            }
+            let other = mp3.remove_id3v1().map(Tag::from).or_else(|| mp3.remove_ape().map(Tag::from));
+            FileTags { native: NativeTags::id3(id3v2.as_ref()), generic: tags([id3v2.map(Tag::from), other]) }
         }
         Container::Aiff => {
             let mut aiff = lofty::iff::aiff::AiffFile::read_from(&mut file, options).ok()?;
             let text = aiff.remove_text_chunks();
             let id3 = aiff.remove_id3v2();
             let from_id3 = NativeTags::id3(id3.as_ref());
-            let comment = text
-                .as_ref()
-                .and_then(|text| text.comment())
-                .map(|comment| comment.to_string());
+            let comment = text.as_ref().and_then(|text| text.comment()).map(|comment| comment.to_string());
             let annotations = text.as_ref().and_then(|text| text.annotations.as_ref());
             let native = NativeTags {
                 instrument: from_id3.instrument.or_else(|| {
                     let lines = annotations.into_iter().flatten().map(String::as_str);
                     lines.chain(comment.as_deref()).find_map(instrument_from_marked_comment)
                 }),
-                artist: text
-                    .as_ref()
-                    .and_then(|text| non_empty(text.author.as_deref()))
-                    .or(from_id3.artist),
+                artist: text.as_ref().and_then(|text| non_empty(text.author.as_deref())).or(from_id3.artist),
                 comment: comment.or(from_id3.comment),
             };
-            FileTags {
-                native,
-                generic: tags([text.map(Tag::from), id3.map(Tag::from)]),
-            }
+            FileTags { native, generic: tags([text.map(Tag::from), id3.map(Tag::from)]) }
         }
     })
 }
@@ -315,15 +280,8 @@ pub(crate) fn read_file_tags(path: &Path) -> Option<FileTags> {
     if let Some(tags) = read_container_tags(path) {
         return Some(tags);
     }
-    let tagged = lofty::probe::Probe::open(path)
-        .ok()?
-        .options(tag_parse_options())
-        .read()
-        .ok()?;
-    Some(FileTags {
-        native: NativeTags::default(),
-        generic: tagged.tags().to_vec(),
-    })
+    let tagged = lofty::probe::Probe::open(path).ok()?.options(tag_parse_options()).read().ok()?;
+    Some(FileTags { native: NativeTags::default(), generic: tagged.tags().to_vec() })
 }
 
 /// Canonical instrument/artist/comment keys for the container.

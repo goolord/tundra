@@ -64,10 +64,7 @@ impl MetadataLookup {
         let Some(fields) = read_tag_fields(path) else {
             return TagFields::default();
         };
-        let entry = CachedMetadata {
-            mtime_secs: mtime.unwrap_or(0),
-            fields: fields.clone(),
-        };
+        let entry = CachedMetadata { mtime_secs: mtime.unwrap_or(0), fields: fields.clone() };
         self.new_entries.insert(crate::path_util::cache_key(path), entry);
         fields
     }

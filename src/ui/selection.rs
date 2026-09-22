@@ -13,10 +13,7 @@ pub struct Selection<K> {
 
 impl<K> Default for Selection<K> {
     fn default() -> Self {
-        Self {
-            selected: HashSet::new(),
-            anchor: None,
-        }
+        Self { selected: HashSet::new(), anchor: None }
     }
 }
 

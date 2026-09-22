@@ -73,11 +73,7 @@ pub(crate) fn inspect_native(path: &Path) -> NativeInspection {
         native.comment.as_deref().unwrap_or_default(),
         native_writable,
     );
-    NativeInspection {
-        native,
-        durable_instrument,
-        status,
-    }
+    NativeInspection { native, durable_instrument, status }
 }
 
 pub fn auto_tag_field_status(path: &Path) -> Option<AutoTagFieldStatus> {

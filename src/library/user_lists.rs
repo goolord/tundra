@@ -17,15 +17,8 @@ struct SavedPaths {
 
 impl SavedPaths {
     fn load(file: Option<PathBuf>, label: &'static str) -> Self {
-        let (paths, writable) = file
-            .as_deref()
-            .map_or((Vec::new(), true), |path| load_user_data(path, label));
-        Self {
-            paths,
-            file,
-            label,
-            read_only: !writable,
-        }
+        let (paths, writable) = file.as_deref().map_or((Vec::new(), true), |path| load_user_data(path, label));
+        Self { paths, file, label, read_only: !writable }
     }
 
     fn persist(&self) {
@@ -196,10 +189,7 @@ mod tests {
 
         let loaded = AllowedDirectories::load_from(Some(path.clone()));
         assert!(loaded.is_empty());
-        assert!(
-            !path.exists(),
-            "unreadable file must not stay where a save would replace it"
-        );
+        assert!(!path.exists(), "unreadable file must not stay where a save would replace it");
 
         loaded.persist();
         let kept: Vec<_> = std::fs::read_dir(dir.path())

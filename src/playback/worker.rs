@@ -13,11 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 pub fn clamp_volume(volume: f32) -> f32 {
-    if volume.is_finite() {
-        volume.clamp(0.0, 1.0)
-    } else {
-        1.0
-    }
+    if volume.is_finite() { volume.clamp(0.0, 1.0) } else { 1.0 }
 }
 
 /// Track ids tie asynchronous events to the file that caused them, so a late
@@ -158,11 +154,7 @@ impl AudioWorker {
         }
         // Tags the rodio queue at the device rate (its default filler is 44100 Hz).
         if channels > 0 && sample_rate > 0 {
-            sink.append(SamplesBuffer::new(
-                channels,
-                sample_rate,
-                vec![0.0; usize::from(channels)],
-            ));
+            sink.append(SamplesBuffer::new(channels, sample_rate, vec![0.0; usize::from(channels)]));
         }
         match StreamSource::open(&track.path, self.offset, Arc::clone(&track.position)) {
             Ok(source) => sink.append(UniformSourceIterator::new(source, channels, sample_rate)),
@@ -227,11 +219,7 @@ impl AudioWorker {
                 self.start(progress, resume);
             }
             PlayerCommand::Ended(id, segment) => {
-                let Some(track) = self
-                    .track
-                    .as_ref()
-                    .filter(|track| track.id == id && segment == self.segment)
-                else {
+                let Some(track) = self.track.as_ref().filter(|track| track.id == id && segment == self.segment) else {
                     return;
                 };
                 if self.looping.load(Ordering::Acquire) {
@@ -304,14 +292,9 @@ mod tests {
 
     #[test]
     fn play_restarts_when_resuming_would_play_nothing() {
-        for (offset, exhausted) in [
-            (1.0, true),
-            (f64::NAN, true),
-            (0.999, true),
-            (0.0, false),
-            (0.5, false),
-            (0.99, false),
-        ] {
+        for (offset, exhausted) in
+            [(1.0, true), (f64::NAN, true), (0.999, true), (0.0, false), (0.5, false), (0.99, false)]
+        {
             assert_eq!(playback_exhausted(offset, 100), exhausted, "offset {offset}");
         }
     }

@@ -171,10 +171,7 @@ pub fn parse_tag_filter(input: &str) -> Result<TagFilter, TagParseError> {
     if value.is_empty() {
         return Err(TagParseError::EmptyValue);
     }
-    Ok(TagFilter {
-        field,
-        value: value.to_owned(),
-    })
+    Ok(TagFilter { field, value: value.to_owned() })
 }
 
 /// Fields whose key or label starts with what was typed (all of them when nothing was).
@@ -183,10 +180,7 @@ pub fn tag_field_suggestions(input: &str) -> Vec<TagField> {
         return Vec::new();
     }
     let needle = input.trim().to_ascii_lowercase();
-    TagField::ALL
-        .into_iter()
-        .filter(|field| needle.is_empty() || field.match_score(&needle) >= 700)
-        .collect()
+    TagField::ALL.into_iter().filter(|field| needle.is_empty() || field.match_score(&needle) >= 700).collect()
 }
 
 /// The best suggestion; ties go to the alphabetically first label.
@@ -262,9 +256,7 @@ impl ManualTagEdits {
     }
 
     pub fn is_empty(&self) -> bool {
-        Self::EDITOR_FIELDS
-            .iter()
-            .all(|field| self.field_value(*field).trim().is_empty())
+        Self::EDITOR_FIELDS.iter().all(|field| self.field_value(*field).trim().is_empty())
     }
 
     /// Every field with surrounding whitespace removed.
