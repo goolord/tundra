@@ -16,16 +16,10 @@ pub(crate) fn verify_staged_write(
     container: Container,
     edit: &TagEdit,
 ) -> Result<(), String> {
-    let before = audio_fingerprint(original, container)?;
-    let after = audio_fingerprint(staged, container)?;
-    if before != after {
-        return Err(format!("Refused to save tags to {}: the audio data would have changed", display_path(original)));
-    }
-    verify_read_back(original, staged, container, edit)
-}
-
-fn verify_read_back(original: &Path, staged: &Path, container: Container, edit: &TagEdit) -> Result<(), String> {
     let refuse = |why: &str| format!("Refused to save tags to {}: {why}", display_path(original));
+    if audio_fingerprint(original, container)? != audio_fingerprint(staged, container)? {
+        return Err(refuse("the audio data would have changed"));
+    }
     let tags =
         read_container_tags_as(staged, container).ok_or_else(|| refuse("the tagged copy could not be read back"))?;
     let generic = generic_tag_fields(&tags.generic);

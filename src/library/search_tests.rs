@@ -39,7 +39,6 @@ fn search(roots: &[&Path], metadata: Shared<CachedMetadata>, file_query: &str, i
         tag_filters: vec![TagFilter { field: TagField::Instrument, value: instrument.into() }],
         case_sensitive: false,
         show_directories: false,
-        tag_only: file_query.trim().is_empty(),
         favorites: None,
     }))
 }
@@ -51,61 +50,33 @@ fn contains_path(paths: &[PathBuf], wanted: &Path) -> bool {
 }
 
 #[test]
-fn file_query_keeps_tagged_files_the_walk_cannot_reach() {
-    let (root, _, metadata) = library_with_tagged_kick();
+fn file_query_narrows_the_tag_filter_but_keeps_files_the_walk_cannot_reach() {
+    let (root, audio, metadata) = library_with_tagged_kick();
     // Renamed, or on a drive that is momentarily offline, but still in the index.
     let ghost = root.path().join("Drums").join("ghost.wav");
     Arc::make_mut(&mut metadata.write().unwrap()).insert(cache_key(&ghost), kick_tags(0));
+    let found = |query: &str| search(&[root.path()], Arc::clone(&metadata), query, "kick").result.paths;
 
-    let tag_only = search(&[root.path()], Arc::clone(&metadata), "", "kick").result.paths;
+    let tag_only = found("");
     assert!(contains_path(&tag_only, &ghost), "tag-only search missed {ghost:?}, got {tag_only:?}");
-
     // Narrowing with a file query must not drop what the tag filter just surfaced.
-    let narrowed = search(&[root.path()], metadata, "ghost", "kick").result.paths;
-    assert!(contains_path(&narrowed, &ghost), "file query dropped {ghost:?}");
+    assert!(contains_path(&found("ghost"), &ghost), "file query dropped {ghost:?}");
+    assert!(found("shot").contains(&audio), "matching query dropped {audio:?}");
+    assert!(found("zzzz").is_empty(), "non-matching query still returned results");
 }
 
 #[test]
-fn tag_only_search_finds_tagged_file_under_an_unwalked_root() {
-    let (root, audio, metadata) = library_with_tagged_kick();
-    let result = search(&[root.path()], metadata, "", "kick");
-    assert!(result.result.paths.contains(&audio), "tag-only search missed {audio:?}");
-    assert!(
-        result.walked_roots.is_empty(),
-        "tag-only must not walk the library when the metadata index can answer, got {:?}",
-        result.walked_roots.keys().collect::<Vec<_>>()
-    );
-}
+fn tag_only_search_answers_from_the_index_and_walks_only_cold_roots() {
+    let (known, audio, metadata) = library_with_tagged_kick();
+    let result = search(&[known.path()], Arc::clone(&metadata), "", "KICK");
+    assert!(result.result.paths.contains(&audio), "uppercase filter missed {audio:?}");
+    assert!(result.walked_roots.is_empty(), "the index can answer, so nothing is walked");
 
-#[test]
-fn tag_only_search_walks_a_root_with_no_cache_or_metadata() {
-    let (known, _, metadata) = library_with_tagged_kick();
     let cold = ScratchDir::new("tag-cold");
     std::fs::write(cold.path().join("snare.wav"), b"RIFF").unwrap();
-
-    let result = search(&[known.path(), cold.path()], metadata, "", "kick");
-    assert!(!result.walked_roots.contains_key(known.path()), "root with metadata should not be walked");
-    assert!(
-        result.walked_roots.contains_key(cold.path()),
-        "root with no cache and no metadata must be walked, got {:?}",
-        result.walked_roots.keys().collect::<Vec<_>>()
-    );
-}
-
-#[test]
-fn tag_filter_matches_regardless_of_query_case() {
-    let (root, audio, metadata) = library_with_tagged_kick();
-    let paths = search(&[root.path()], metadata, "", "KICK").result.paths;
-    assert!(paths.contains(&audio), "uppercase filter missed {audio:?}");
-}
-
-#[test]
-fn file_query_narrows_an_active_tag_filter() {
-    let (root, audio, metadata) = library_with_tagged_kick();
-    let hit = search(&[root.path()], Arc::clone(&metadata), "shot", "kick");
-    assert!(hit.result.paths.contains(&audio), "matching query dropped {audio:?}");
-    let miss = search(&[root.path()], metadata, "zzzz", "kick").result.paths;
-    assert!(miss.is_empty(), "non-matching query still returned {miss:?}");
+    let walked = search(&[known.path(), cold.path()], metadata, "", "kick").walked_roots;
+    assert!(!walked.contains_key(known.path()), "root with metadata should not be walked");
+    assert!(walked.contains_key(cold.path()), "root with no cache and no metadata must be walked");
 }
 
 /// `cached_paths_for_root` over listings given as `(dir, files)`.

@@ -10,7 +10,7 @@ use lofty::config::WriteOptions;
 use lofty::id3::v2::Id3v2Tag;
 use lofty::tag::TagExt;
 
-use super::read::{WAV_GENRE_KEY, WAV_NATIVE_KEYS, WAV_TITLE_KEY};
+use super::read::WAV_NATIVE_KEYS;
 use super::write::{TagEdit, apply_id3_edit};
 use crate::path_util::path_io_error;
 
@@ -166,7 +166,7 @@ pub(crate) fn write_wav_tags(path: &Path, edit: &TagEdit) -> Result<(), String> 
 
     let info_index = chunks.iter().position(|(id, data)| is_info_list(id, data));
     let mut fields = info_index.map(|index| parse_info_fields(&chunks[index].1[4..])).unwrap_or_default();
-    for (key, value) in edit.keyed(WAV_NATIVE_KEYS, &[WAV_TITLE_KEY, WAV_GENRE_KEY]) {
+    for (key, value) in edit.keyed(WAV_NATIVE_KEYS, &["INAM", "IGNR"]) {
         set_info_field(&mut fields, key, value);
     }
     let info = (!fields.is_empty()).then(|| {

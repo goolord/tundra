@@ -3,8 +3,8 @@ use std::path::Path;
 use super::fields::TagFields;
 use super::hints::artist_hint_from_path;
 use super::read::{
-    NativeTags, TUNDRA_TAG_VERSION, durable_instrument, file_tundra_tag_version, instrument_from_marked_comment,
-    is_audio, parse_tundra_comment_version, read_native_tags, tundra_tagged_file,
+    NativeTags, TUNDRA_TAG_VERSION, durable_instrument, instrument_from_marked_comment, is_audio,
+    parse_tundra_comment_version, probe_tags, read_container_tags,
 };
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -38,9 +38,17 @@ impl AutoTagFieldStatus {
         comment: &str,
         native_writable: bool,
     ) -> Self {
-        let tundra_tagged = tundra_tagged_file(path, comment, native_instrument);
+        // Tundra may replace tags it wrote. A sidecar row only speaks for files
+        // with no native instrument: it never claims the user's own tag.
+        let sidecar_counts = native_instrument.trim().is_empty();
+        let comment_version = parse_tundra_comment_version(comment);
+        let tundra_tagged = comment_version.is_some()
+            || instrument_from_marked_comment(comment).is_some()
+            || (sidecar_counts && crate::tag_store::tundra_instrument(path).is_some());
+        let tag_version =
+            comment_version.or_else(|| sidecar_counts.then(|| crate::tag_store::tag_version(path)).flatten());
+        let current_tag = tag_version == Some(TUNDRA_TAG_VERSION);
         let has_instrument = !explicit_instrument.trim().is_empty();
-        let current_tag = file_tundra_tag_version(path, comment, native_instrument) == Some(TUNDRA_TAG_VERSION);
         Self {
             needs_instrument: !has_instrument,
             can_retag_instrument: tundra_tagged && has_instrument && !current_tag,
@@ -61,10 +69,11 @@ pub(crate) struct NativeInspection {
 }
 
 pub(crate) fn inspect_native(path: &Path) -> NativeInspection {
-    let native = read_native_tags(path);
-    let native_writable = native.is_some();
-    let native = native.unwrap_or_default();
-    let durable_instrument = durable_instrument(path, &native, None);
+    let container = read_container_tags(path);
+    let native_writable = container.is_some();
+    let tags = container.or_else(|| probe_tags(path)).unwrap_or_default();
+    let durable_instrument = durable_instrument(path, &tags);
+    let native = tags.native;
     let status = AutoTagFieldStatus::from_parts(
         path,
         durable_instrument.as_deref().unwrap_or_default(),
@@ -84,7 +93,7 @@ pub fn auto_tag_field_status(path: &Path) -> Option<AutoTagFieldStatus> {
 /// (which include tag store values) and still reads the file for its native
 /// instrument and whether it can hold tags.
 pub fn auto_tag_field_status_from_fields(path: &Path, fields: &TagFields) -> AutoTagFieldStatus {
-    let native = read_native_tags(path);
+    let native = read_container_tags(path).map(|tags| tags.native);
     let native_instrument = native.as_ref().and_then(|tags| tags.instrument.as_deref());
     AutoTagFieldStatus::from_parts(
         path,

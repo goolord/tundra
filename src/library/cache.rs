@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use super::AllowedDirectories;
 use crate::locks::{lock, read, write};
-use crate::metadata::{CachedMetadata, TagFields, refresh_cached_metadata};
+use crate::metadata::{CachedMetadata, MetadataLookup, TagFields};
 
 pub type Listings = HashMap<PathBuf, Vec<PathBuf>>;
 pub type MetadataMap = HashMap<PathBuf, CachedMetadata>;
@@ -197,27 +197,16 @@ impl MetadataCache {
         self.merge(HashMap::from([(crate::path_util::cache_key(path), entry)]));
     }
 
-    fn cached(&self, path: &Path) -> Option<CachedMetadata> {
-        let map = self.snapshot();
-        crate::path_util::cache_lookup_keys(path).iter().find_map(|key| map.get(key)).cloned()
-    }
-
     /// Indexed tags without touching the disk, for display.
     pub fn cached_fields(&self, path: &Path) -> Option<TagFields> {
-        self.cached(path).map(|cached| cached.fields)
+        MetadataLookup::new(self.snapshot()).indexed_tag_fields(path).cloned()
     }
 
     /// Tags for `path`, re-read when the file changed since it was indexed.
     pub fn tag_fields_for(&mut self, path: &Path) -> TagFields {
-        let mtime_secs = crate::path_util::file_mtime_secs(path);
-        if let Some(cached) = self.cached(path).filter(|cached| Some(cached.mtime_secs) == mtime_secs) {
-            return cached.fields;
-        }
-        let Some(entry) = refresh_cached_metadata(path) else {
-            return TagFields::default();
-        };
-        let fields = entry.fields.clone();
-        self.merge_path(path, entry);
+        let mut lookup = MetadataLookup::new(self.snapshot());
+        let fields = lookup.tag_fields(path);
+        self.merge(lookup.into_new_entries());
         fields
     }
 }

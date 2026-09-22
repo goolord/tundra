@@ -291,7 +291,6 @@ impl App {
             tag_filters: selector.tag_filters.clone(),
             case_sensitive: selector.search_case_sensitive,
             show_directories: selector.search_show_directories,
-            tag_only,
             favorites,
         };
         let generation = self.search_generation;

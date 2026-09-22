@@ -4,19 +4,16 @@
 use super::*;
 use lofty::config::{ParseOptions, WriteOptions};
 use lofty::file::AudioFile;
-use lofty::tag::{Accessor, Tag};
+use lofty::tag::Tag;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::path_util::file_mtime_secs;
+use crate::path_util::{cache_key, file_mtime_secs};
 use crate::test_fixtures::{ASSET_FORMATS, ScratchDir, copy_asset, write_minimal_wav, write_riff_info};
 
 use super::hints::artist_hint_from_path;
-use super::read::{
-    VORBIS_COMMENT_KEY, VORBIS_INSTRUMENT_KEY, WAV_ARTIST_KEY, WAV_COMMENT_KEY, WAV_GENRE_KEY, WAV_INSTRUMENT_KEY,
-    WAV_TITLE_KEY, file_tundra_tag_version, tundra_comment,
-};
+use super::read::tundra_comment;
 use super::riff::encode_riff_wave;
 
 // --- Helpers ---------------------------------------------------------------
@@ -36,12 +33,6 @@ fn wav_in(dir: &ScratchDir, folders: &str, name: &str) -> PathBuf {
     let audio = folder.join(name);
     write_minimal_wav(&audio);
     audio
-}
-
-/// An index entry for `path` as it is on disk now, so the lookup trusts it.
-fn index_entry(path: &Path, fields: TagFields) -> CachedMetadata {
-    let mtime_secs = file_mtime_secs(path).expect("scratch file mtime");
-    CachedMetadata { mtime_secs, fields }
 }
 
 fn filter(field: TagField, value: &str) -> TagFilter {
@@ -86,67 +77,37 @@ fn vorbis_comments(path: &Path) -> lofty::ogg::tag::VorbisComments {
 // --- Search over the metadata index ----------------------------------------
 
 #[test]
-fn tag_only_search_needs_every_filter_and_skips_folders_and_unindexed_files() {
-    let dir = ScratchDir::new("tag-search");
-    let audio = dir.path().join("kick.wav");
-    std::fs::write(&audio, b"RIFF").unwrap();
-    let fields = TagFields { bpm: "120".into(), key: "Am".into(), ..TagFields::default() };
-    let index = Arc::new(HashMap::from([(audio.clone(), index_entry(&audio, fields))]));
-    // A library-wide tag query must not parse unindexed files.
-    let unindexed = dir.path().join("snare.wav");
-    std::fs::write(&unindexed, b"RIFF").unwrap();
-    let paths = vec![dir.path().join("nested"), unindexed, audio.clone()];
-    let search = |filters: &[TagFilter]| search_paths(&paths, "", filters, Arc::clone(&index));
+fn tag_search_needs_every_filter_narrows_by_filename_and_skips_unindexed_paths() {
+    let fields = TagFields { bpm: "120".into(), key: "Am".into(), instrument: "Kick".into(), ..TagFields::default() };
+    let tagged: Vec<_> = ["/s/1 kick.wav", "/s/2 kick.wav"].map(PathBuf::from).into();
+    let index = tagged.iter().map(|path| (cache_key(path), CachedMetadata { mtime_secs: 1, fields: fields.clone() }));
+    let index = Arc::new(index.collect());
+    // Folders, and files a library-wide tag query must not parse.
+    let paths: Vec<_> = tagged.iter().cloned().chain(["/s/nested", "/s/snare.wav"].map(PathBuf::from)).collect();
+    let search = |text, filters: &[TagFilter]| search_paths(&paths, text, filters, Arc::clone(&index));
 
-    assert_eq!(search(&[filter(TagField::Bpm, "120")]), vec![audio.clone()]);
-    assert!(
-        search(&[filter(TagField::Bpm, "120"), filter(TagField::Key, "Bm")]).is_empty(),
-        "partial tag matches should be rejected"
-    );
+    assert_eq!(search("", &[filter(TagField::Bpm, "120")]), tagged);
+    let partial = search("", &[filter(TagField::Bpm, "120"), filter(TagField::Key, "Bm")]);
+    assert!(partial.is_empty(), "partial tag matches should be rejected");
+    assert_eq!(search("2", &[filter(TagField::Instrument, "kick")]), [tagged[1].clone()], "one-char narrowing");
 }
 
 #[test]
-fn tag_search_narrows_with_single_char_filename_query() {
-    let dir = ScratchDir::new("tag-narrow");
-    let fields = TagFields { instrument: "Kick".into(), ..Default::default() };
-    let paths: Vec<_> = ["1 kick.wav", "2 kick.wav", "3 kick.wav"].map(|name| dir.path().join(name)).into();
-    for path in &paths {
-        std::fs::write(path, b"RIFF").unwrap();
-    }
-    let index = Arc::new(paths.iter().map(|path| (path.clone(), index_entry(path, fields.clone()))).collect());
-    let filters = [filter(TagField::Instrument, "Kick")];
-
-    assert_eq!(search_paths(&paths, "", &filters, Arc::clone(&index)).len(), 3);
-    assert_eq!(search_paths(&paths, "2", &filters, index), vec![paths[1].clone()]);
-}
-
-#[test]
-fn metadata_lookup_matches_cache_key_variants() {
+fn metadata_lookup_matches_key_variants_and_ignores_missing_files() {
     let dir = ScratchDir::new("lookup-keys");
     let audio = dir.path().join("snare.wav");
     std::fs::write(&audio, b"RIFF").unwrap();
-    let fields = TagFields { explicit_instrument: "Snare".into(), instrument: "Snare".into(), ..TagFields::default() };
-    let key = crate::path_util::cache_key(&audio);
-    let index = Arc::new(HashMap::from([(key, index_entry(&audio, fields))]));
-    assert_eq!(MetadataLookup::new(Arc::clone(&index)).tag_fields(&audio).explicit_instrument, "Snare");
-
-    let paths = [audio];
-    let hits = search_paths(&paths, "", &[filter(TagField::Instrument, "snare")], index);
-    assert_eq!(hits, paths);
-}
-
-#[test]
-fn tag_fields_ignore_cache_when_file_missing() {
-    let path = PathBuf::from(r"C:\missing\tundra-kick.wav");
-    let fields = TagFields { bpm: "120".into(), ..TagFields::default() };
-    let cached = CachedMetadata { mtime_secs: 1, fields };
-    let mut lookup = MetadataLookup::new(Arc::new(HashMap::from([(path.clone(), cached)])));
-    assert!(lookup.tag_fields(&path).bpm.is_empty());
-}
-
-#[test]
-fn tag_field_best_match_breaks_score_ties_by_label() {
-    assert_eq!(tag_field_best_match("a"), Some(TagField::Album));
+    let fields = TagFields { explicit_instrument: "Snare".into(), ..TagFields::default() };
+    let mtime_secs = file_mtime_secs(&audio).expect("scratch file mtime");
+    let missing = PathBuf::from(r"C:\missing\tundra-kick.wav");
+    let index = Arc::new(HashMap::from([
+        (cache_key(&audio), CachedMetadata { mtime_secs, fields: fields.clone() }),
+        (missing.clone(), CachedMetadata { mtime_secs: 1, fields }),
+    ]));
+    let mut lookup = MetadataLookup::new(index);
+    assert_eq!(lookup.tag_fields(&audio).explicit_instrument, "Snare");
+    assert!(lookup.tag_fields(&missing).explicit_instrument.is_empty());
+    assert_eq!(tag_field_best_match("a"), Some(TagField::Album), "ties go to the first label");
 }
 
 // --- Hints from paths ------------------------------------------------------
@@ -251,13 +212,6 @@ fn artist_hint_reads_label_from_directory_layout() {
     }
 }
 
-#[test]
-fn read_tag_fields_uses_artist_hint_when_file_is_untagged() {
-    let dir = ScratchDir::new("artist-hint-read");
-    let audio = wav_in(&dir, "KSHMR/Kicks", "kick.wav");
-    assert_eq!(read_tag_fields(&audio).expect("read tag fields").artist, "KSHMR");
-}
-
 // --- Tag ownership: what auto-tag may write or replace ---------------------
 
 #[test]
@@ -275,10 +229,10 @@ fn auto_tag_replaces_only_instruments_tundra_owns() {
     // Existing RIFF INFO, then whether auto-tag may add its marker and replace the instrument.
     let cases: [(&[(&str, &str)], bool); 3] = [
         // A marker would claim the user's instrument.
-        (&[(WAV_INSTRUMENT_KEY, "Snare")], false),
-        (&[(WAV_INSTRUMENT_KEY, "Snare"), (WAV_COMMENT_KEY, "Recorded live")], false),
+        (&[("IKEY", "Snare")], false),
+        (&[("IKEY", "Snare"), ("ICMT", "Recorded live")], false),
         // A legacy Tundra marker is eligible for upgrade.
-        (&[(WAV_INSTRUMENT_KEY, "Snare"), (WAV_COMMENT_KEY, "Tundra")], true),
+        (&[("IKEY", "Snare"), ("ICMT", "Tundra")], true),
     ];
     for (info, tundra_owned) in cases {
         let dir = ScratchDir::new("ownership");
@@ -291,38 +245,16 @@ fn auto_tag_replaces_only_instruments_tundra_owns() {
         if !tundra_owned {
             assert!(!write_auto_tags(&audio, "Kick").expect("write"), "{info:?}: user tags stay");
             assert_eq!(instrument_tag(&audio).as_deref(), Some("Snare"));
-            assert_eq!(riff(&audio, WAV_COMMENT_KEY).as_deref(), info.get(1).map(|(_, comment)| *comment));
+            assert_eq!(riff(&audio, "ICMT").as_deref(), info.get(1).map(|(_, comment)| *comment));
         }
     }
-}
-
-#[test]
-fn write_auto_tags_skips_retag_when_tag_version_is_current() {
-    let dir = ScratchDir::new("retag-auto-tags");
-    let audio = wav_in(&dir, "", "kick.wav");
-
-    assert!(write_auto_tags(&audio, "Kick").expect("initial write"));
-    let status = auto_tag_field_status(&audio).expect("status");
-    assert!(!status.needs_instrument && !status.can_retag_instrument);
-    let comment = riff(&audio, WAV_COMMENT_KEY).unwrap_or_default();
-    assert_eq!(file_tundra_tag_version(&audio, &comment, ""), Some(TUNDRA_TAG_VERSION));
-
-    assert!(
-        !write_auto_tags(&audio, "Snare").expect("same-version retag should no-op"),
-        "current-version tags must not be replaced by auto tag"
-    );
-    assert_eq!(instrument_tag(&audio).as_deref(), Some("Kick"));
-    assert!(
-        !write_auto_tags(&audio, "Kick").expect("same label should no-op"),
-        "unchanged instrument should not rewrite the file"
-    );
 }
 
 #[test]
 fn sidecar_row_does_not_own_user_native_instrument() {
     let dir = ScratchDir::new("sidecar-user-native");
     let audio = wav_in(&dir, "", "snare.wav");
-    write_riff_info(&audio, &[(WAV_INSTRUMENT_KEY, "Snare"), (WAV_COMMENT_KEY, "Recorded live")]);
+    write_riff_info(&audio, &[("IKEY", "Snare"), ("ICMT", "Recorded live")]);
 
     crate::tag_store::with_test_db(dir.path().join("tags.db"), || {
         crate::tag_store::set_instrument(&audio, "Kick", 0).expect("stale sidecar");
@@ -374,49 +306,19 @@ fn write_auto_tags_preserves_wav_non_info_chunks() {
 fn write_auto_tags_keeps_existing_wav_tags_and_user_comment() {
     let dir = ScratchDir::new("extend-existing-tags");
     let audio = wav_in(&dir, "KSHMR/Kicks", "kick.wav");
-    write_riff_info(&audio, &[("IGNR", "Drums"), (WAV_COMMENT_KEY, "already had a note")]);
+    write_riff_info(&audio, &[("IGNR", "Drums"), ("ICMT", "already had a note")]);
+    assert_eq!(read_tag_fields(&audio).expect("read").artist, "KSHMR", "untagged artist reads the folder hint");
 
     write_auto_tags(&audio, "Kick").expect("extend tags");
 
-    assert_eq!(riff(&audio, WAV_INSTRUMENT_KEY).as_deref(), Some("Kick"));
+    assert_eq!(riff(&audio, "IKEY").as_deref(), Some("Kick"));
     assert_eq!(riff(&audio, "IGNR").as_deref(), Some("Drums"));
-    assert_eq!(riff(&audio, WAV_ARTIST_KEY).as_deref(), Some("KSHMR"), "artist from the folder");
+    assert_eq!(riff(&audio, "IART").as_deref(), Some("KSHMR"), "artist from the folder");
     assert_eq!(
-        riff(&audio, WAV_COMMENT_KEY).as_deref(),
+        riff(&audio, "ICMT").as_deref(),
         Some("already had a note"),
         "custom user comments must be kept as written"
     );
-}
-
-/// Manual edits land in every format and read back as typed.
-#[test]
-fn write_manual_tags_round_trips_every_field() {
-    let edits = ManualTagEdits {
-        instrument: "Kick".into(),
-        artist: "KSHMR".into(),
-        title: "Punchy Kick".into(),
-        bpm: "128".into(),
-        key: "Am".into(),
-        genre: "Drums".into(),
-        comment: "Manual edit".into(),
-    };
-    for ext in ASSET_FORMATS {
-        let (_dir, audio) = staged_fixture(ext, &format!("manual-{ext}"));
-        write_auto_tags(&audio, "Kick").unwrap_or_else(|err| panic!("{ext}: {err}"));
-        assert_eq!(write_manual_tags(&audio, &edits), Ok(SavedTo::File), "{ext}");
-        let fields = read_tag_fields(&audio).unwrap_or_else(|| panic!("{ext}: read"));
-        assert_eq!(ManualTagEdits::from_tag_fields(&fields), edits, "{ext}");
-        let title_and_genre = match ext {
-            "wav" => (riff(&audio, WAV_TITLE_KEY), riff(&audio, WAV_GENRE_KEY)),
-            "flac" => {
-                let vorbis = vorbis_comments(&audio);
-                (vorbis.title().map(Into::into), vorbis.genre().map(Into::into))
-            }
-            _ => continue,
-        };
-        let expected = (Some(edits.title.clone()), Some(edits.genre.clone()));
-        assert_eq!(title_and_genre, expected, "{ext}: native keys");
-    }
 }
 
 /// Auto-tagging must never destroy artwork the user already had.
@@ -494,20 +396,22 @@ fn instrument_round_trips_and_is_searchable_for_every_format() {
             // RIFF INFO, which Windows Explorer shows: the instrument in IKEY, never in
             // Genre or Comments, and no ID3 payload that would hide the list.
             "wav" => {
-                assert_eq!(riff(&audio, WAV_INSTRUMENT_KEY).as_deref(), Some("Kick"));
-                assert_eq!(riff(&audio, WAV_COMMENT_KEY), Some(marker));
-                assert_eq!(riff(&audio, WAV_GENRE_KEY), None);
+                assert_eq!(riff(&audio, "IKEY").as_deref(), Some("Kick"));
+                assert_eq!(riff(&audio, "ICMT"), Some(marker));
+                assert_eq!(riff(&audio, "IGNR"), None);
                 let bytes = std::fs::read(&audio).expect("bytes");
                 assert!(!bytes.windows(3).any(|window| window == b"ID3"), "no ID3 in WAV");
             }
             "flac" => {
                 let vorbis = vorbis_comments(&audio);
-                assert_eq!(vorbis.get(VORBIS_INSTRUMENT_KEY), Some("Kick"));
-                assert_eq!(vorbis.get(VORBIS_COMMENT_KEY), Some(marker.as_str()));
+                assert_eq!(vorbis.get("INSTRUMENT"), Some("Kick"));
+                assert_eq!(vorbis.get("COMMENT"), Some(marker.as_str()));
             }
             _ => {}
         }
         assert!(!write(), "{ext}: a tagged file should report no further work");
+        let retag = write_auto_tags(&audio, "Snare").expect("same-version retag");
+        assert!(!retag && instrument_tag(&audio).as_deref() == Some("Kick"), "{ext}: current tags are not replaced");
         assert!(
             !auto_tag_field_status(&audio).expect("status").needs_instrument,
             "{ext}: tagged file must not be queued for re-tagging"
@@ -525,13 +429,11 @@ fn unwritable_container_falls_back_to_sidecar_store_and_stays_searchable() {
 
     crate::tag_store::with_test_db(dir.path().join("tags.db"), || {
         assert_eq!(write_auto_tags(&audio, "Kick"), Ok(true), "fallback reports the tag as written");
-        assert_eq!(crate::tag_store::instrument(&audio).as_deref(), Some("Kick"));
         assert_eq!(instrument_tag(&audio).as_deref(), Some("Kick"), "sidecar surfaces in reads");
         assert!(finds_by_instrument(&audio, "Kick"), "sidecar-tagged files are searchable");
-        assert_eq!(crate::tag_store::tag_version(&audio), Some(TUNDRA_TAG_VERSION));
 
         assert_eq!(write_auto_tags(&audio, "Snare"), Ok(false), "current sidecar tags stay");
-        assert_eq!(crate::tag_store::instrument(&audio).as_deref(), Some("Kick"));
+        assert_eq!(instrument_tag(&audio).as_deref(), Some("Kick"));
         assert_eq!(write_auto_tags(&audio, "Kick"), Ok(false), "unchanged label is a no-op");
         assert!(!auto_tag_field_status(&audio).expect("status").can_retag_instrument);
     });

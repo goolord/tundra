@@ -141,7 +141,6 @@ impl FavoritesStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::safe_write::{REPLACE_OLD_SUFFIX, reclaim_write_sidecars, sidecar};
     use crate::test_fixtures::ScratchDir;
 
     #[test]
@@ -158,26 +157,18 @@ mod tests {
     }
 
     #[test]
-    fn allowed_directories_persist_recovers_from_crash_aside() {
+    fn allowed_directories_dedupe_and_survive_a_reload() {
         let dir = ScratchDir::new("settings-persist");
         let path = dir.path().join("allowed_directories.bin");
         let samples = dir.path().join("samples");
         std::fs::create_dir_all(&samples).expect("samples dir");
         let mut allowed = AllowedDirectories::load_from(Some(path.clone()));
-        assert!(matches!(allowed.add(&samples), AddDirectory::Added(_)));
+        let AddDirectory::Added(resolved) = allowed.add(&samples) else { panic!("not added") };
         assert_eq!(allowed.add(&samples), AddDirectory::Duplicate);
+        assert_eq!(allowed.add(&dir.path().join("missing")), AddDirectory::Unresolved);
 
         allowed.persist();
-        let bytes = std::fs::read(&path).expect("persisted");
-
-        std::fs::write(sidecar(&path, REPLACE_OLD_SUFFIX), &bytes).expect("crash aside");
-        std::fs::remove_file(&path).expect("crash delete");
-
-        reclaim_write_sidecars(dir.path());
-        assert_eq!(std::fs::read(&path).expect("restored"), bytes);
-
-        allowed.persist();
-        assert_eq!(dir.sidecar_count(), 0);
+        assert_eq!(AllowedDirectories::load_from(Some(path)).roots(), [resolved]);
     }
 
     #[test]

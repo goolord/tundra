@@ -124,9 +124,12 @@ fn prepare_schema(connection: &Connection) -> Result<(), String> {
     Ok(())
 }
 
-/// Every column, in the order `load_rows` reads and `write_row` binds them.
+/// Every column, in the order `load_rows` reads and `write_row` binds them: the
+/// row's own columns, then one per `ManualTagEdits::EDITOR_FIELDS` entry, each
+/// named by `TagField::as_str`.
 const ROW_COLUMNS: &str =
-    "path, instrument, tag_version, mtime_secs, size, title, artist, bpm, key, genre, comment, user_owned";
+    "path, tag_version, mtime_secs, size, user_owned, instrument, artist, title, bpm, key, genre, comment";
+const FIRST_FIELD_COLUMN: usize = 5;
 
 fn load_rows(connection: &Connection) -> Result<HashMap<PathBuf, Row>, String> {
     let fail = |err: rusqlite::Error| format!("Failed to read tag store: {err}");
@@ -134,18 +137,13 @@ fn load_rows(connection: &Connection) -> Result<HashMap<PathBuf, Row>, String> {
     let rows = statement
         .query_map([], |row| {
             let unsigned = |index| row.get::<_, i64>(index).map(|value| value.max(0) as u64);
-            let fields = ManualTagEdits {
-                instrument: row.get(1)?,
-                title: row.get(5)?,
-                artist: row.get(6)?,
-                bpm: row.get(7)?,
-                key: row.get(8)?,
-                genre: row.get(9)?,
-                comment: row.get(10)?,
-            };
+            let mut fields = ManualTagEdits::default();
+            for (index, field) in ManualTagEdits::EDITOR_FIELDS.into_iter().enumerate() {
+                fields.set_field(field, row.get(FIRST_FIELD_COLUMN + index)?);
+            }
             let path: String = row.get(0)?;
             let stored =
-                Row { fields, tag_version: row.get(2)?, stamp: (unsigned(3)?, unsigned(4)?), user_owned: row.get(11)? };
+                Row { fields, tag_version: row.get(1)?, stamp: (unsigned(2)?, unsigned(3)?), user_owned: row.get(4)? };
             Ok((cache_key(Path::new(&path)), stored))
         })
         .map_err(fail)?;
@@ -181,24 +179,14 @@ fn write_row(connection: &Connection, key: &Path, change: &Change) -> rusqlite::
     let Change::Put(row) = change else {
         return connection.execute("DELETE FROM instrument_tags WHERE path = ?1", [&stored]);
     };
-    let fields = &row.fields;
-    let values = "?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12";
+    let (secs, size) = (row.stamp.0 as i64, row.stamp.1 as i64);
+    let head: [&dyn rusqlite::ToSql; FIRST_FIELD_COLUMN] = [&stored, &row.tag_version, &secs, &size, &row.user_owned];
+    let fields = ManualTagEdits::EDITOR_FIELDS.map(|field| row.fields.field_value(field));
+    let values: Vec<&dyn rusqlite::ToSql> = head.into_iter().chain(fields.iter().map(|value| value as _)).collect();
+    let placeholders = (1..=values.len()).map(|index| format!("?{index}")).collect::<Vec<_>>().join(", ");
     connection.execute(
-        &format!("INSERT OR REPLACE INTO instrument_tags ({ROW_COLUMNS}) VALUES ({values})"),
-        rusqlite::params![
-            stored,
-            fields.instrument,
-            row.tag_version,
-            row.stamp.0 as i64,
-            row.stamp.1 as i64,
-            fields.title,
-            fields.artist,
-            fields.bpm,
-            fields.key,
-            fields.genre,
-            fields.comment,
-            row.user_owned,
-        ],
+        &format!("INSERT OR REPLACE INTO instrument_tags ({ROW_COLUMNS}) VALUES ({placeholders})"),
+        values.as_slice(),
     )
 }
 
@@ -387,6 +375,8 @@ mod tests {
 
         prepare_schema(&connection).expect("migrate");
         prepare_schema(&connection).expect("migrate is idempotent");
+        let field_columns: Vec<_> = ROW_COLUMNS.split(", ").skip(FIRST_FIELD_COLUMN).collect();
+        assert_eq!(field_columns, ManualTagEdits::EDITOR_FIELDS.map(|field| field.as_str()));
 
         let rows = load_rows(&connection).expect("rows");
         let auto = &rows[&cache_key(Path::new("c:/auto.wav"))];

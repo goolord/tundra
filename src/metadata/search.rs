@@ -50,10 +50,15 @@ pub fn file_search_active(file_query: &str, tag_filters: &[TagFilter]) -> bool {
     !tag_filters.is_empty() || file_query.trim().len() >= FILE_SEARCH_MIN_QUERY_LEN
 }
 
+/// Tag filters and no filename query: answered from the tag index alone.
+pub fn tag_only_search(file_query: &str, tag_filters: &[TagFilter]) -> bool {
+    !tag_filters.is_empty() && file_query.trim().is_empty()
+}
+
 /// Ranks `paths` against `query`, reading tags from `lookup`, whose new entries
 /// (freshly indexed files) overlay the shared index without copying it.
 pub fn search(paths: &[PathBuf], query: &SearchQuery, lookup: MetadataLookup) -> SearchResult {
-    if !query.tag_filters.is_empty() && query.text.trim().is_empty() {
+    if tag_only_search(query.text, query.tag_filters) {
         return tag_matches(paths, query.tag_filters, lookup);
     }
     file_matches(paths, query, lookup)
