@@ -10,11 +10,9 @@ use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use crate::path_util::file_name_lossy;
-
-pub const TAG_TMP_SUFFIX: &str = ".tundra-tag.tmp";
-/// Legacy only: older builds wrote this, reclaim still deletes it.
-pub const TAG_BAK_SUFFIX: &str = ".tundra-tag.bak";
+/// Legacy only: older builds wrote these fixed names; reclaim still cleans them up.
+const TAG_TMP_SUFFIX: &str = ".tundra-tag.tmp";
+const TAG_BAK_SUFFIX: &str = ".tundra-tag.bak";
 /// The original, moved aside during a replace. The only sidecar ever restored.
 pub const REPLACE_OLD_SUFFIX: &str = ".tundra-replace-old";
 
@@ -47,23 +45,25 @@ fn parse_write_sidecar(name: &str) -> Option<(&str, SidecarKind, Option<u32>)> {
         (TAG_BAK_SUFFIX, SidecarKind::Bak),
         (TAG_TMP_SUFFIX, SidecarKind::Tmp),
     ];
-    for (suffix, kind) in fixed {
-        if let Some(dest) = name.strip_suffix(suffix) {
-            return (!dest.is_empty()).then_some((dest, kind, None));
-        }
-    }
-    // `unique_sidecar` names: `<dest>.tundra-<kind>-<pid>-<seq>.tmp`.
-    let rest = name.strip_suffix(".tmp")?;
-    let (index, marker) = [".tundra-tag-", ".tundra-atomic-"]
+    let (dest, kind, pid) = match fixed
         .into_iter()
-        .find_map(|marker| rest.rfind(marker).map(|index| (index, marker)))?;
-    let dest = &rest[..index];
-    let pid = rest[index + marker.len()..].split('-').next()?.parse().ok();
-    (!dest.is_empty()).then_some((dest, SidecarKind::Tmp, pid))
+        .find_map(|(suffix, kind)| Some((name.strip_suffix(suffix)?, kind)))
+    {
+        Some((dest, kind)) => (dest, kind, None),
+        None => {
+            // `unique_sidecar` names: `<dest>.tundra-<kind>-<pid>-<seq>.tmp`.
+            let rest = name.strip_suffix(".tmp")?;
+            let (index, marker) = [".tundra-tag-", ".tundra-atomic-"]
+                .into_iter()
+                .find_map(|marker| rest.rfind(marker).map(|index| (index, marker)))?;
+            let pid = rest[index + marker.len()..].split('-').next()?.parse().ok();
+            (&rest[..index], SidecarKind::Tmp, pid)
+        }
+    };
+    (!dest.is_empty()).then_some((dest, kind, pid))
 }
 
-/// True for temp and recovery files Tundra's writers leave beside a file.
-pub fn is_write_sidecar(path: &Path) -> bool {
+fn is_write_sidecar(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| parse_write_sidecar(name).is_some())
@@ -77,96 +77,75 @@ fn pid_is_alive(pid: u32) -> bool {
         return true;
     }
     #[cfg(windows)]
-    {
-        windows_pid_is_alive(pid)
-    }
+    let alive = win::pid_is_alive(pid);
     #[cfg(target_os = "macos")]
-    {
-        let mut command = std::process::Command::new("kill");
-        command.args(["-0", &pid.to_string()]);
-        command.status().is_ok_and(|status| status.success())
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        Path::new(&format!("/proc/{pid}")).exists()
-    }
-    #[cfg(not(any(windows, unix)))]
-    {
-        false
-    }
+    let alive = std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .status()
+        .is_ok_and(|status| status.success());
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let alive = Path::new(&format!("/proc/{pid}")).exists();
+    alive
 }
 
 #[cfg(windows)]
-fn windows_pid_is_alive(pid: u32) -> bool {
-    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
-    const ERROR_ACCESS_DENIED: u32 = 5;
-
-    #[link(name = "kernel32")]
-    unsafe extern "system" {
-        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut core::ffi::c_void;
-        fn CloseHandle(handle: *mut core::ffi::c_void) -> i32;
-        fn GetLastError() -> u32;
-    }
-
-    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
-    if !handle.is_null() {
-        unsafe { CloseHandle(handle) };
-        return true;
-    }
-    unsafe { GetLastError() == ERROR_ACCESS_DENIED }
-}
-
-/// Same-directory replace. POSIX `rename` overwrites atomically. Windows uses
-/// `ReplaceFileW` with no backup file. Never moves the dest aside.
-pub fn replace_file(from: &Path, to: &Path) -> io::Result<()> {
-    match std::fs::rename(from, to) {
-        Ok(()) => Ok(()),
-        #[cfg(windows)]
-        Err(_) if to.exists() => replace_existing_windows(from, to),
-        Err(err) => Err(err),
-    }
-}
-
-#[cfg(windows)]
-fn replace_existing_windows(from: &Path, to: &Path) -> io::Result<()> {
+mod win {
+    use std::ffi::c_void;
     use std::os::windows::ffi::OsStrExt;
-
-    fn wide(path: &Path) -> Vec<u16> {
-        path.as_os_str().encode_wide().chain(Some(0)).collect()
-    }
+    use std::path::Path;
 
     #[link(name = "kernel32")]
     unsafe extern "system" {
+        fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut c_void;
+        fn CloseHandle(handle: *mut c_void) -> i32;
+        fn GetLastError() -> u32;
         fn ReplaceFileW(
-            lp_replaced_file_name: *const u16,
-            lp_replacement_file_name: *const u16,
-            lp_backup_file_name: *const u16,
-            dw_replace_flags: u32,
-            lp_exclude: *mut core::ffi::c_void,
-            lp_reserved: *mut core::ffi::c_void,
+            replaced: *const u16,
+            replacement: *const u16,
+            backup: *const u16,
+            flags: u32,
+            exclude: *mut c_void,
+            reserved: *mut c_void,
         ) -> i32;
     }
 
-    let (replaced, replacement) = (wide(to), wide(from));
-    let ok = unsafe {
-        ReplaceFileW(
-            replaced.as_ptr(),
-            replacement.as_ptr(),
-            std::ptr::null(),
-            0,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
-    };
-    if ok == 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
+    pub fn pid_is_alive(pid: u32) -> bool {
+        const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+        const ERROR_ACCESS_DENIED: u32 = 5;
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if !handle.is_null() {
+            unsafe { CloseHandle(handle) };
+            return true;
+        }
+        // Another user's process exists but cannot be opened.
+        unsafe { GetLastError() == ERROR_ACCESS_DENIED }
+    }
+
+    /// `ReplaceFileW` with no backup file.
+    pub fn replace_existing(from: &Path, to: &Path) -> std::io::Result<()> {
+        let wide = |path: &Path| path.as_os_str().encode_wide().chain(Some(0)).collect::<Vec<u16>>();
+        let (replaced, replacement) = (wide(to), wide(from));
+        let null = std::ptr::null_mut();
+        match unsafe { ReplaceFileW(replaced.as_ptr(), replacement.as_ptr(), std::ptr::null(), 0, null, null) } {
+            0 => Err(std::io::Error::last_os_error()),
+            _ => Ok(()),
+        }
     }
 }
 
-/// Clear the read-only attribute (Windows) or grant the owner write permission
-/// (Unix) so writes and fsync succeed.
+/// Same-directory replace. POSIX `rename` overwrites atomically; Windows falls
+/// back to `ReplaceFileW`. Never moves the dest aside.
+pub fn replace_file(from: &Path, to: &Path) -> io::Result<()> {
+    match std::fs::rename(from, to) {
+        #[cfg(windows)]
+        Err(_) if to.exists() => win::replace_existing(from, to),
+        result => result,
+    }
+}
+
+/// Clear the read-only attribute (Windows) or grant only the owner write
+/// permission (Unix; `set_readonly(false)` would make it world-writable) so
+/// writes and fsync succeed.
 pub fn ensure_writable(path: &Path) -> io::Result<()> {
     let mut perms = std::fs::metadata(path)?.permissions();
     if !perms.readonly() {
@@ -177,7 +156,6 @@ pub fn ensure_writable(path: &Path) -> io::Result<()> {
         use std::os::unix::fs::PermissionsExt;
         perms.set_mode(perms.mode() | 0o200);
     }
-    // Off Unix this only clears the read-only attribute, which is what we want.
     #[cfg(not(unix))]
     #[allow(clippy::permissions_set_readonly_false)]
     perms.set_readonly(false);
@@ -199,26 +177,15 @@ pub fn sync_parent_dir(path: &Path) -> io::Result<()> {
         .parent()
         .filter(|dir| !dir.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
-
-    #[cfg(unix)]
-    {
-        std::fs::File::open(parent)?.sync_all()
-    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
         const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-        std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-            .open(parent)?
-            .sync_all()
+        options.custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
     }
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = parent;
-        Ok(())
-    }
+    options.open(parent)?.sync_all()
 }
 
 /// Restore a missing dest from `.tundra-replace-old` only (crash-aside).
@@ -234,14 +201,10 @@ pub fn reclaim_write_sidecars(dir: &Path) -> Vec<PathBuf> {
 
     let mut groups: HashMap<PathBuf, Vec<(PathBuf, SidecarKind, Option<u32>)>> = HashMap::new();
     for path in entries.flatten().map(|entry| entry.path()) {
-        let Some(name) = file_name_lossy(&path) else {
-            continue;
-        };
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
         if let Some((dest_name, kind, pid)) = parse_write_sidecar(&name) {
-            groups
-                .entry(path.with_file_name(dest_name))
-                .or_default()
-                .push((path, kind, pid));
+            let dest = path.with_file_name(dest_name);
+            groups.entry(dest).or_default().push((path, kind, pid));
         }
     }
 
@@ -303,11 +266,12 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     let tmp = unique_sidecar(path, "atomic");
-    let written = std::fs::File::create(&tmp).and_then(|mut file| {
-        file.write_all(bytes)?;
-        file.sync_all()
-    });
-    let result = written.and_then(|()| replace_file(&tmp, path));
+    let result = std::fs::File::create(&tmp)
+        .and_then(|mut file| {
+            file.write_all(bytes)?;
+            file.sync_all()
+        })
+        .and_then(|()| replace_file(&tmp, path));
     if result.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
@@ -317,92 +281,101 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_fixtures::{DEAD_PID, ScratchDir, dead_pid_tag_tmp};
+    use crate::test_fixtures::{DEAD_PID, ScratchDir, with_replace_blocked};
     use std::fs;
 
-    fn read_only(path: &Path) {
-        let mut perms = fs::metadata(path).unwrap().permissions();
-        perms.set_readonly(true);
-        fs::set_permissions(path, perms).unwrap();
-    }
-
     #[test]
-    fn replace_works_when_dest_readonly() {
-        let dir = ScratchDir::new("replace-readonly");
+    fn readonly_files_can_be_replaced_and_synced() {
+        let dir = ScratchDir::new("readonly");
         let dest = dir.path().join("kick.wav");
-        fs::write(&dest, b"audio").unwrap();
         let tmp = sidecar(&dest, TAG_TMP_SUFFIX);
-        fs::write(&tmp, b"tagged").unwrap();
-        read_only(&dest);
-
-        ensure_writable(&dest).unwrap();
-        replace_file(&tmp, &dest).unwrap();
-        assert_eq!(fs::read(&dest).unwrap(), b"tagged");
-    }
-
-    #[test]
-    fn sync_file_works_on_readonly_copy() {
-        let dir = ScratchDir::new("sync-readonly");
-        let dest = dir.path().join("kick.wav");
-        fs::write(&dest, b"audio").unwrap();
-        let tmp = sidecar(&dest, TAG_TMP_SUFFIX);
-        fs::copy(&dest, &tmp).unwrap();
-        read_only(&tmp);
-
-        ensure_writable(&tmp).unwrap();
+        for path in [&dest, &tmp] {
+            fs::write(path, b"audio").unwrap();
+            let mut perms = fs::metadata(path).unwrap().permissions();
+            perms.set_readonly(true);
+            fs::set_permissions(path, perms).unwrap();
+            ensure_writable(path).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = fs::metadata(path).unwrap().permissions().mode();
+                assert_eq!(mode & 0o222, 0o200, "only the owner may gain write access");
+            }
+        }
         fs::write(&tmp, b"tagged").unwrap();
         sync_file(&tmp).unwrap();
+        replace_file(&tmp, &dest).unwrap();
+        assert_eq!(fs::read(&dest).unwrap(), b"tagged");
+        #[cfg(unix)]
+        sync_parent_dir(&dest).unwrap();
     }
 
+    /// Each case seeds a directory, reclaims it, and checks each file's contents
+    /// afterwards (`None`: absent). `LIVE`/`DEAD` in a name become this
+    /// process's id and a dead one.
     #[test]
-    fn reclaim_keeps_live_pid_tmp_when_dest_exists() {
-        let dir = ScratchDir::new("reclaim-live");
-        let dest = dir.path().join("kick.wav");
-        fs::write(&dest, b"original").unwrap();
-        let tmp = unique_sidecar(&dest, "tag");
-        fs::write(&tmp, b"tmp").unwrap();
-        fs::write(sidecar(&dest, TAG_BAK_SUFFIX), b"bak").unwrap();
-        fs::write(sidecar(&dest, REPLACE_OLD_SUFFIX), b"old").unwrap();
-
-        reclaim_write_sidecars(dir.path());
-
-        assert_eq!(fs::read(&dest).unwrap(), b"original");
-        assert!(tmp.exists(), "in-progress tmp for this process must stay");
-        assert!(!sidecar(&dest, TAG_BAK_SUFFIX).exists());
-        assert!(!sidecar(&dest, REPLACE_OLD_SUFFIX).exists());
-    }
-
-    #[test]
-    fn reclaim_deletes_dead_pid_tmp() {
-        let dir = ScratchDir::new("reclaim-dead");
-        let dest = dir.path().join("kick.wav");
-        fs::write(&dest, b"original").unwrap();
-        let tmp = dead_pid_tag_tmp(&dest);
-        fs::write(&tmp, b"stale").unwrap();
-
-        reclaim_write_sidecars(dir.path());
-
-        assert!(!tmp.exists());
-        assert_eq!(fs::read(&dest).unwrap(), b"original");
-    }
-
-    #[test]
-    fn reclaim_restores_replace_old_only_when_dest_missing() {
-        let dir = ScratchDir::new("reclaim-restore");
-        let dest = dir.path().join("snare.wav");
-        fs::write(sidecar(&dest, TAG_TMP_SUFFIX), b"tmp-maybe-corrupt").unwrap();
-        fs::write(sidecar(&dest, TAG_BAK_SUFFIX), b"bak-original").unwrap();
-        fs::write(sidecar(&dest, REPLACE_OLD_SUFFIX), b"aside-original").unwrap();
-
-        reclaim_write_sidecars(dir.path());
-
-        assert_eq!(fs::read(&dest).unwrap(), b"aside-original");
-        assert!(
-            !sidecar(&dest, TAG_TMP_SUFFIX).exists(),
-            "legacy tmp is deleted once dest is present"
-        );
-        assert!(!sidecar(&dest, TAG_BAK_SUFFIX).exists());
-        assert!(!sidecar(&dest, REPLACE_OLD_SUFFIX).exists());
+    fn reclaim_restores_only_crash_asides_and_keeps_possible_last_copies() {
+        type Case<'a> = (&'a str, &'a [(&'a str, Option<&'a str>, Option<&'a str>)]);
+        let cases: [Case; 4] = [
+            (
+                "dest present: live tmps stay, everything else goes",
+                &[
+                    ("kick.wav", Some("original"), Some("original")),
+                    ("kick.wav.tundra-tag-LIVE-1.tmp", Some("tmp"), Some("tmp")),
+                    ("kick.wav.tundra-atomic-LIVE-2.tmp", Some("tmp"), Some("tmp")),
+                    ("kick.wav.tundra-tag-DEAD-1.tmp", Some("stale"), None),
+                    ("kick.wav.tundra-atomic-DEAD-7.tmp", Some("stale"), None),
+                    ("kick.wav.tundra-tag.tmp", Some("legacy"), None),
+                    ("kick.wav.tundra-tag.bak", Some("bak"), None),
+                    ("kick.wav.tundra-replace-old", Some("old"), None),
+                ],
+            ),
+            (
+                "dest missing: restored from the aside, never from tmp or bak",
+                &[
+                    ("snare.wav.tundra-tag.tmp", Some("tmp"), None),
+                    ("snare.wav.tundra-tag.bak", Some("bak"), None),
+                    ("snare.wav.tundra-replace-old", Some("aside"), None),
+                    ("snare.wav", None, Some("aside")),
+                    ("kick.wav.tundra-replace-old", Some("kick-aside"), None),
+                    ("kick.wav", None, Some("kick-aside")),
+                ],
+            ),
+            (
+                "dest deleted by the user: not resurrected, and no possible last copy deleted",
+                &[
+                    ("gone.wav", None, None),
+                    ("gone.wav.tundra-tag.tmp", Some("tmp"), Some("tmp")),
+                    ("gone.wav.tundra-tag.bak", Some("bak"), Some("bak")),
+                    ("gone.wav.tundra-tag-DEAD-1.tmp", Some("stale"), Some("stale")),
+                    ("gone.wav.tundra-tag-LIVE-1.tmp", Some("tmp"), Some("tmp")),
+                ],
+            ),
+            (
+                "not sidecars: untouched",
+                &[
+                    (".tundra-tag.tmp", Some("no dest name"), Some("no dest name")),
+                    ("hat.wav.tundra-other-DEAD-1.tmp", Some("unknown"), Some("unknown")),
+                ],
+            ),
+        ];
+        let name = |name: &str| {
+            name.replace("LIVE", &std::process::id().to_string())
+                .replace("DEAD", &DEAD_PID.to_string())
+        };
+        for (case, files) in cases {
+            let dir = ScratchDir::new("reclaim");
+            for (file, before, _) in files {
+                if let Some(contents) = before {
+                    fs::write(dir.path().join(name(file)), contents).unwrap();
+                }
+            }
+            reclaim_write_sidecars(dir.path());
+            for (file, _, after) in files {
+                let actual = fs::read_to_string(dir.path().join(name(file))).ok();
+                assert_eq!(actual.as_deref(), *after, "{case}: {file}");
+            }
+        }
     }
 
     #[cfg(unix)]
@@ -446,92 +419,34 @@ mod tests {
     }
 
     #[test]
-    fn atomic_temps_are_recognised_and_reclaimed() {
-        let dir = ScratchDir::new("atomic-temps");
-        let dest = dir.path().join("favorites.bin");
-        fs::write(&dest, b"current").unwrap();
-        let live = unique_sidecar(&dest, "atomic");
-        let dead = sidecar(&dest, &format!(".tundra-atomic-{DEAD_PID}-7.tmp"));
-        fs::write(&live, b"in flight").unwrap();
-        fs::write(&dead, b"crashed").unwrap();
-        assert!(is_write_sidecar(&live) && is_write_sidecar(&dead));
-        assert!(!is_write_sidecar(&dest));
-
-        reclaim_write_sidecars(dir.path());
-
-        assert!(live.exists());
-        assert!(!dead.exists());
-        assert_eq!(fs::read(&dest).unwrap(), b"current");
-    }
-
-    #[test]
-    fn write_atomic_replaces_and_creates_parents_without_leaving_tmp() {
+    fn write_atomic_replaces_whole_files_and_never_leaves_temps() {
         let dir = ScratchDir::new("atomic-write");
         let dest = dir.path().join("deep").join("cache.bin");
         write_atomic(&dest, b"one").unwrap();
         write_atomic(&dest, b"two").unwrap();
         assert_eq!(fs::read(&dest).unwrap(), b"two");
         assert_eq!(crate::test_fixtures::count_tundra_sidecars(dest.parent().unwrap()), 0);
+
+        // A failed replace keeps the old file and deletes the temp.
+        let dest = dir.path().join("cache.bin");
+        fs::write(&dest, b"stable").unwrap();
+        assert!(with_replace_blocked(dir.path(), &dest, || write_atomic(&dest, b"new")).is_err());
+        assert_eq!(fs::read(&dest).unwrap(), b"stable");
+        let dir_dest = dir.path().join("settings");
+        fs::create_dir(&dir_dest).unwrap();
+        assert!(
+            write_atomic(&dir_dest, b"partial").is_err(),
+            "replacing a directory must fail"
+        );
+        assert!(dir_dest.is_dir());
+        assert_eq!(dir.sidecar_count(), 0);
     }
 
     #[test]
     fn unique_sidecar_names_differ_for_same_dest() {
         let dest = Path::new("kick.wav");
         assert_ne!(unique_sidecar(dest, "tag"), unique_sidecar(dest, "tag"));
+        assert!(is_write_sidecar(&unique_sidecar(dest, "atomic")) && !is_write_sidecar(dest));
         assert_eq!(sidecar(dest, TAG_TMP_SUFFIX), Path::new("kick.wav.tundra-tag.tmp"));
-    }
-
-    #[test]
-    fn reclaim_handles_multiple_files_in_one_directory() {
-        let dir = ScratchDir::new("reclaim-many");
-        let kick = dir.path().join("kick.wav");
-        let snare = dir.path().join("snare.wav");
-        fs::write(sidecar(&kick, REPLACE_OLD_SUFFIX), b"k-aside").unwrap();
-        fs::write(sidecar(&snare, REPLACE_OLD_SUFFIX), b"s-aside").unwrap();
-        fs::write(sidecar(&kick, TAG_TMP_SUFFIX), b"stale").unwrap();
-
-        reclaim_write_sidecars(dir.path());
-
-        assert_eq!(fs::read(&kick).unwrap(), b"k-aside");
-        assert_eq!(fs::read(&snare).unwrap(), b"s-aside");
-        assert!(!sidecar(&kick, TAG_TMP_SUFFIX).exists());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn sync_parent_dir_succeeds_for_existing_directory() {
-        let dir = ScratchDir::new("sync-parent");
-        sync_parent_dir(&dir.path().join("child.bin")).unwrap();
-    }
-
-    #[test]
-    fn reclaim_keeps_tmps_when_dest_missing_whatever_their_pid() {
-        let dir = ScratchDir::new("reclaim-missing");
-        let dest = dir.path().join("missing.wav");
-        let dead = dead_pid_tag_tmp(&dest);
-        let live = unique_sidecar(&dest, "tag");
-        fs::write(&dead, b"stale").unwrap();
-        fs::write(&live, b"tmp").unwrap();
-
-        reclaim_write_sidecars(dir.path());
-
-        assert!(!dest.exists());
-        assert!(dead.exists(), "may be the only copy of the audio");
-        assert!(live.exists(), "live pid tmp must stay when dest is missing");
-    }
-
-    #[test]
-    fn write_atomic_preserves_existing_file_when_replace_fails() {
-        use crate::test_fixtures::with_replace_blocked;
-
-        let dir = ScratchDir::new("atomic-preserve");
-        let dest = dir.path().join("cache.bin");
-        fs::write(&dest, b"stable").unwrap();
-
-        let err = with_replace_blocked(dir.path(), &dest, || write_atomic(&dest, b"new"));
-
-        assert!(err.is_err());
-        assert_eq!(fs::read(&dest).unwrap(), b"stable");
-        assert_eq!(dir.sidecar_count(), 0);
     }
 }
