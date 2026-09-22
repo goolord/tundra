@@ -1,10 +1,10 @@
 //! The sidebar: the file list with its custom scrollbar, and the filter dock
 //! (file search and tag filters) under it.
 
-use super::message::{AutoTagMsg, FilterMsg, Message, TagEditorMsg};
+use super::message::{FilterMsg, Message};
 use super::selection::Selection;
 use super::style::{self, ACCENT, MUTED_ICON};
-use super::widgets::{FileMenuExtras, bar, file_context_menu, icon, selection_stripe, spacer};
+use super::widgets::{bar, file_context_menu, icon, selection_stripe, spacer};
 use crate::library::FavoritesStore;
 use crate::metadata::{TagFilter, is_audio, tag_field_best_match, tag_field_suggestions};
 use crate::path_util::cache_key;
@@ -585,18 +585,7 @@ fn file_row(
 
     let path = entry.file_path.clone();
     let menu = iced_aw::ContextMenu::new(clickable, move || {
-        let favorite_label = if favorite { "Remove from favorites" } else { "Add to favorites" };
-        let extras = FileMenuExtras {
-            auto_tag: search_enabled.then(|| AutoTagMsg::OpenFor(path.clone()).into()),
-            edit_tags: Some(TagEditorMsg::OpenFor(path.clone()).into()),
-            favorite: Some((favorite_label, Message::ToggleFavorite(path.clone()))),
-        };
-        file_context_menu(
-            Message::FileCopyName(path.clone()),
-            Message::FileCopyPath(path.clone()),
-            Message::FileRevealInFileManager(path.clone()),
-            if audio { extras } else { FileMenuExtras::default() },
-        )
+        file_context_menu(&path, audio && search_enabled, audio, audio.then_some(favorite))
     })
     .style(super::widgets::context_menu_style);
 

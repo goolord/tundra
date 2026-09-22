@@ -6,7 +6,6 @@ use super::widgets::spacer;
 use iced::widget::{button, container, mouse_area, row, stack, text};
 use iced::{Alignment, Border, Color, Element, Length, Padding, Shadow, Theme, alignment};
 use iced_aw::menu::{self, Item, Menu, MenuBar};
-use iced_aw::style::Status;
 
 const TITLE_BAR_HEIGHT: f32 = 24.0;
 const WINDOW_BUTTON_WIDTH: f32 = 28.0;
@@ -28,12 +27,17 @@ pub fn title_bar(always_on_top: bool, active_file: Option<&str>) -> Element<'sta
         .width(Length::Fill)
         .align_x(alignment::Horizontal::Center)
         .align_y(alignment::Vertical::Center);
+    let window_controls = row![
+        window_button("−", WindowMsg::Minimize.into(), false),
+        window_button("□", WindowMsg::ToggleMaximize.into(), false),
+        window_button("×", Message::Quit, true),
+    ];
 
     container(
         row![
             over_drag_area(fill(menu_bar_widget(always_on_top)).into()),
             fill(drag_area(fill(title.into()).align_y(Alignment::Center))).width(Length::FillPortion(2)),
-            over_drag_area(fill(window_controls()).align_x(alignment::Horizontal::Right).into()),
+            over_drag_area(fill(window_controls.into()).align_x(alignment::Horizontal::Right).into()),
         ]
         .align_y(Alignment::Center)
         .width(Length::Fill)
@@ -59,15 +63,6 @@ fn drag_area(content: impl Into<Element<'static, Message>>) -> Element<'static, 
         .into()
 }
 
-fn window_controls() -> Element<'static, Message> {
-    row![
-        window_button("−", WindowMsg::Minimize.into(), false),
-        window_button("□", WindowMsg::ToggleMaximize.into(), false),
-        window_button("×", Message::Quit, true),
-    ]
-    .into()
-}
-
 fn window_button(label: &'static str, message: Message, close: bool) -> Element<'static, Message> {
     button(
         text(label)
@@ -82,24 +77,32 @@ fn window_button(label: &'static str, message: Message, close: bool) -> Element<
     .padding(Padding::ZERO)
     .on_press(message)
     .style(move |theme, status| {
-        let text_color = style::text_alpha(theme, 0.82);
         if !close {
-            return style::solid_button(text_color, Border::default(), ghost_hover_fill(theme, status));
+            return ghost_button(0.82)(theme, status);
         }
         let red = style::by_status(
             status,
-            Color::TRANSPARENT,
-            Color::from_rgb8(0xc4, 0x2b, 0x1c),
-            Color::from_rgb8(0x9a, 0x1f, 0x12),
+            None,
+            Some(Color::from_rgb8(0xc4, 0x2b, 0x1c)),
+            Some(Color::from_rgb8(0x9a, 0x1f, 0x12)),
         );
-        let text_color = if red == Color::TRANSPARENT { text_color } else { Color::WHITE };
-        style::solid_button(text_color, Border::default(), red)
+        let text_color = if red.is_some() { Color::WHITE } else { style::text_alpha(theme, 0.82) };
+        style::solid_button(text_color, Border::default(), red.unwrap_or(Color::TRANSPARENT))
     })
     .into()
 }
 
-fn ghost_hover_fill(theme: &Theme, status: button::Status) -> Color {
-    style::by_status(status, Color::TRANSPARENT, style::text_alpha(theme, 0.08), style::text_alpha(theme, 0.14))
+/// A borderless button in body text at `alpha` that only shows a fill on hover.
+fn ghost_button(alpha: f32) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |theme, status| {
+        let fill = style::by_status(
+            status,
+            Color::TRANSPARENT,
+            style::text_alpha(theme, 0.08),
+            style::text_alpha(theme, 0.14),
+        );
+        style::solid_button(style::text_alpha(theme, alpha), Border::default(), fill)
+    }
 }
 
 fn menu_bar_widget(always_on_top: bool) -> Element<'static, Message> {
@@ -110,8 +113,21 @@ fn menu_bar_widget(always_on_top: bool) -> Element<'static, Message> {
             .padding(Padding::from([MENU_DROPDOWN_PADDING, 6.0]))
             .offset(MENU_DROPDOWN_PADDING)
             .spacing(2.0);
-        Item::with_menu(menu_root(label), items)
+        // `NoOp` enables the hover style; the menu bar handles the click itself.
+        let root = button(text(label).size(12).align_y(alignment::Vertical::Center))
+            .height(Length::Fixed(TITLE_BAR_HEIGHT))
+            .padding([0, 8])
+            .style(|theme, status| button::Style {
+                border: Border::default().rounded(2.0),
+                ..ghost_button(1.0)(theme, status)
+            })
+            .on_press(Message::NoOp);
+        Item::with_menu(root, items)
     };
+    let menu_button = |content: Element<'static, Message>, message| {
+        button(content).width(Length::Fill).padding([3, 10]).style(ghost_button(1.0)).on_press(message)
+    };
+    let menu_item = |label, message| menu_button(text(label).size(13).width(Length::Fill).into(), message);
     let file = [
         ("Open File…", Message::OpenFile),
         ("Open Folder…", Message::OpenFolder),
@@ -127,14 +143,12 @@ fn menu_bar_widget(always_on_top: bool) -> Element<'static, Message> {
         .size(13)
         .width(Length::Fixed(12.0))
         .align_x(alignment::Horizontal::Center);
-    let on_top = menu_button(
-        row![on_top_mark, text("Always On Top").size(13).width(Length::Fill)].spacing(6).align_y(Alignment::Center),
-        Message::SetAlwaysOnTop(!always_on_top),
-    );
+    let on_top =
+        row![on_top_mark, text("Always On Top").size(13).width(Length::Fill)].spacing(6).align_y(Alignment::Center);
 
     MenuBar::new(vec![
         menu("File", file.into_iter().map(|(label, message)| menu_item(label, message)).collect()),
-        menu("View", vec![on_top]),
+        menu("View", vec![menu_button(on_top.into(), Message::SetAlwaysOnTop(!always_on_top))]),
         menu("Help", vec![menu_item("About Tundra", Message::About)]),
     ])
     .height(Length::Fill)
@@ -142,47 +156,18 @@ fn menu_bar_widget(always_on_top: bool) -> Element<'static, Message> {
     .spacing(0.0)
     .draw_path(menu::DrawPath::FakeHovering)
     .close_on_item_click_global(true)
-    .style(menu_bar_style)
+    .style(|theme: &Theme, _status| {
+        let palette = theme.extended_palette();
+        iced_aw::style::menu_bar::Style {
+            bar_background: palette.background.weak.color.into(),
+            bar_border: Border::default(),
+            bar_shadow: Shadow::default(),
+            menu_background: palette.background.base.color.into(),
+            menu_border: style::outline(palette.background.strong.color, 4.0),
+            menu_shadow: style::drop_shadow(palette.background.base.text.scale_alpha(0.15), 2.0, 8.0),
+            path: palette.background.weak.color.into(),
+            path_border: Border::default(),
+        }
+    })
     .into()
-}
-
-fn menu_bar_style(theme: &Theme, _status: Status) -> iced_aw::style::menu_bar::Style {
-    let palette = theme.extended_palette();
-    iced_aw::style::menu_bar::Style {
-        bar_background: palette.background.weak.color.into(),
-        bar_border: Border::default(),
-        bar_shadow: Shadow::default(),
-        menu_background: palette.background.base.color.into(),
-        menu_border: style::outline(palette.background.strong.color, 4.0),
-        menu_shadow: style::drop_shadow(palette.background.base.text.scale_alpha(0.15), 2.0, 8.0),
-        path: palette.background.weak.color.into(),
-        path_border: Border::default(),
-    }
-}
-
-fn flat_button_style(theme: &Theme, status: button::Status) -> button::Style {
-    style::solid_button(
-        theme.extended_palette().background.base.text,
-        Border::default(),
-        ghost_hover_fill(theme, status),
-    )
-}
-
-fn menu_item(label: &'static str, message: Message) -> button::Button<'static, Message> {
-    menu_button(text(label).size(13).width(Length::Fill), message)
-}
-
-fn menu_button(content: impl Into<Element<'static, Message>>, message: Message) -> button::Button<'static, Message> {
-    button(content).width(Length::Fill).padding([3, 10]).style(flat_button_style).on_press(message)
-}
-
-fn menu_root(label: &'static str) -> button::Button<'static, Message> {
-    button(text(label).size(12).align_y(alignment::Vertical::Center))
-        .height(Length::Fixed(TITLE_BAR_HEIGHT))
-        .padding([0, 8])
-        .style(|theme, status| button::Style {
-            border: Border::default().rounded(2.0),
-            ..flat_button_style(theme, status)
-        })
-        .on_press(Message::NoOp)
 }

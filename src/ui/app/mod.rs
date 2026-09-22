@@ -18,7 +18,7 @@ use super::bulk_auto_tag::BulkAutoTagState;
 use super::dialog::Dialog;
 use super::file_selector::FileSelector;
 use super::menu::window_title;
-use super::message::{AutoTagMsg, Message, TagEditorMsg, WaveformMsg, WindowMsg};
+use super::message::{Message, WaveformMsg, WindowMsg};
 use super::player::Player;
 use super::tag_editor::TagEditorState;
 use super::waveform::WaveFormView;
@@ -34,7 +34,7 @@ use input::{FileDrag, ScrollbarDrag, SidebarResize};
 use prefs::on_window;
 use std::cell::RefCell;
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub fn run() {
@@ -102,7 +102,6 @@ pub struct App {
     /// A file is dragged over the window from outside.
     drag_over: bool,
     waveform_hovered: bool,
-    waveform_scrubbing: bool,
     last_scrub_progress: f64,
     /// The file list, not a filter input, gets unmodified key presses.
     file_list_focused: bool,
@@ -129,22 +128,17 @@ fn startup_directory() -> PathBuf {
     })
 }
 
-/// Runs blocking work on its own thread. `Err` means it panicked.
-async fn run_blocking<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static) -> Result<T, ()> {
-    let (tx, rx) = oneshot::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(work());
-    });
-    rx.await.map_err(|_| ())
-}
-
 /// Runs `work` on its own thread and reports it with `done`; `panicked` stands in for its result if it panics.
 fn background<T: Send + 'static>(
     work: impl FnOnce() -> T + Send + 'static,
     panicked: impl FnOnce() -> T + Send + 'static,
     done: impl FnOnce(T) -> Message + Send + 'static,
 ) -> Task<Message> {
-    Task::perform(run_blocking(work), move |result| done(result.unwrap_or_else(|()| panicked())))
+    let (tx, rx) = oneshot::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(work());
+    });
+    Task::perform(rx, move |result| done(result.unwrap_or_else(|_| panicked())))
 }
 
 impl App {
@@ -176,7 +170,6 @@ impl App {
             last_cursor: Point::ORIGIN,
             drag_over: false,
             waveform_hovered: false,
-            waveform_scrubbing: false,
             last_scrub_progress: 0.0,
             file_list_focused: false,
             file_drag: None,
@@ -198,13 +191,16 @@ impl App {
             (Arc::clone(&app.player.controls.is_playing), Arc::clone(&app.player.controls.looping));
         let volume = app.player.controls.volume;
         let tasks = [
-            Task::perform(run_blocking(move || load_startup_caches(allowed)), |caches| {
-                Message::StartupCachesReady(caches.expect("loading caches panicked"))
-            }),
-            Task::perform(run_blocking(move || PlayerWorker::spawn(is_playing, looping, volume)), |spawned| {
-                let (worker, events) = spawned.expect("starting the audio thread panicked");
-                Message::PlayerWorkerReady(worker, Arc::new(events))
-            }),
+            background(
+                move || load_startup_caches(allowed),
+                || panic!("loading caches panicked"),
+                Message::StartupCachesReady,
+            ),
+            background(
+                move || PlayerWorker::spawn(is_playing, looping, volume),
+                || panic!("starting the audio thread panicked"),
+                |(worker, events)| Message::PlayerWorkerReady(worker, Arc::new(events)),
+            ),
             app.open_pending_launch(),
             on_window(|id| window::is_maximized(id).map(|maximized| WindowMsg::MaximizedChanged(maximized).into())),
         ];
@@ -230,7 +226,7 @@ impl App {
                     waveform.set_modifiers(modifiers);
                 }
             }
-            Message::FileDropped(path) => {
+            Message::OpenPath(path) => {
                 self.drag_over = false;
                 return self.open_path(&path);
             }
@@ -258,11 +254,9 @@ impl App {
             Message::FileRevealInFileManager(path) => crate::platform::reveal_in_file_manager(&path),
             Message::ToggleFavorite(path) => return self.toggle_favorite(&path),
             Message::ChangeDirectory(dir) => return self.navigate_directory(dir),
-            Message::OpenFolder => return pick_folder(self.file_selector.current_dir.clone(), Message::FolderPicked),
-            Message::OpenFile => return pick_audio_file(self.file_selector.current_dir.clone(), Message::FilePicked),
-            Message::FolderPicked(Some(dir)) => return self.navigate_directory(dir),
-            Message::FilePicked(Some(path)) => return self.open_path(&path),
-            Message::FolderPicked(None) | Message::FilePicked(None) | Message::NoOp => {}
+            Message::OpenFolder => return pick_path(&self.file_selector.current_dir, false, Message::ChangeDirectory),
+            Message::OpenFile => return pick_path(&self.file_selector.current_dir, true, Message::OpenPath),
+            Message::NoOp => {}
             Message::GoHome => {
                 if let Some(home) = self.allowed_directories.startup_directory().or_else(dirs::home_dir) {
                     return self.navigate_directory(home);
@@ -305,8 +299,7 @@ impl App {
             Message::StopPlayback => self.player.stop(),
             Message::VolumeChanged(volume) => self.player.set_volume(volume),
             Message::VolumeCommit => prefs::VOLUME.save(self.player.controls.volume),
-            Message::PlaybackTick => self.player.sync_playback_ui(),
-            Message::Waveform(message) => return self.update_waveform(message),
+            Message::Waveform(message) => self.update_waveform(message),
 
             Message::Window(message) => return self.update_window(message),
             Message::SetAlwaysOnTop(always_on_top) => {
@@ -341,7 +334,6 @@ impl App {
                 self.show_error("Audio output unavailable. Check your sound device.".into());
             }
             PlayerEvent::Ended(id) if self.player.is_current_track(id) => self.player.on_ended(),
-            PlayerEvent::Looped(id) if self.player.is_current_track(id) => self.player.set_progress(0.0),
             PlayerEvent::WaveformPeaksReady(id) if self.player.is_current_track(id) => {
                 self.player.on_waveform_peaks_ready();
             }
@@ -349,19 +341,15 @@ impl App {
                 self.show_error(format!("Couldn't play this file. {err}"));
             }
             // Events for a track that has since been replaced.
-            PlayerEvent::Ended(_)
-            | PlayerEvent::Looped(_)
-            | PlayerEvent::WaveformPeaksReady(_)
-            | PlayerEvent::FileFailed(..) => {}
+            PlayerEvent::Ended(_) | PlayerEvent::WaveformPeaksReady(_) | PlayerEvent::FileFailed(..) => {}
         }
     }
 
-    fn update_waveform(&mut self, message: WaveformMsg) -> Task<Message> {
+    fn update_waveform(&mut self, message: WaveformMsg) {
         match message {
             WaveformMsg::Scrub(progress) => {
                 self.last_scrub_progress = progress;
                 self.set_scrubbing(Some(progress));
-                self.player.set_progress(progress);
             }
             WaveformMsg::ScrubEnd(progress) => self.finish_scrub(progress),
             WaveformMsg::FileDragStart => {
@@ -388,13 +376,7 @@ impl App {
             WaveformMsg::ZoomOut => self.edit_waveform_view(WaveFormView::zoom_out),
             WaveformMsg::Help => self.dialog = Some(Dialog::waveform_help()),
             WaveformMsg::HoverChanged(hovered) => self.waveform_hovered = hovered,
-            WaveformMsg::CopyName => return self.on_current_file(Message::FileCopyName),
-            WaveformMsg::CopyPath => return self.on_current_file(Message::FileCopyPath),
-            WaveformMsg::RevealInFileManager => return self.on_current_file(Message::FileRevealInFileManager),
-            WaveformMsg::OpenAutoTag => return self.on_current_file(|path| AutoTagMsg::OpenFor(path).into()),
-            WaveformMsg::EditTags => return self.on_current_file(|path| TagEditorMsg::OpenFor(path).into()),
         }
-        Task::none()
     }
 
     /// Changes the loaded waveform's zoom and pan; `change` also gets its sample count.
@@ -409,7 +391,6 @@ impl App {
     /// Starts or moves a scrub at `progress`, or ends it with `None`.
     fn set_scrubbing(&mut self, progress: Option<f64>) {
         let scrubbing = progress.is_some();
-        self.waveform_scrubbing = scrubbing;
         self.player.controls.scrubbing = scrubbing;
         if let Some(waveform) = &mut self.player.waveform {
             waveform.set_ui_scrubbing(scrubbing);
@@ -418,17 +399,9 @@ impl App {
     }
 
     fn finish_scrub(&mut self, progress: f64) {
-        if self.waveform_scrubbing {
+        if self.player.controls.scrubbing {
             self.set_scrubbing(None);
             self.player.seek(progress);
-        }
-    }
-
-    /// Handles `message` for the playing file, if there is one.
-    fn on_current_file(&mut self, message: impl FnOnce(PathBuf) -> Message) -> Task<Message> {
-        match self.player.current_file.clone() {
-            Some(path) => self.update(message(path)),
-            None => Task::none(),
         }
     }
 
@@ -442,20 +415,16 @@ impl App {
     }
 }
 
-/// Asks for a folder, starting in `start_dir`.
-fn pick_folder(start_dir: PathBuf, done: fn(Option<PathBuf>) -> Message) -> Task<Message> {
-    let dialog = rfd::AsyncFileDialog::new().set_title("Select Folder");
-    Task::perform(async move { dialog.set_directory(&start_dir).pick_folder().await }, move |folder| {
-        done(folder.map(|folder| folder.path().to_path_buf()))
-    })
-}
-
-/// Asks for an audio file, starting in `start_dir`.
-fn pick_audio_file(start_dir: PathBuf, done: fn(Option<PathBuf>) -> Message) -> Task<Message> {
-    let dialog = rfd::AsyncFileDialog::new()
-        .set_title("Select audio file")
-        .add_filter("Audio", crate::metadata::AUDIO_EXTENSIONS);
-    Task::perform(async move { dialog.set_directory(&start_dir).pick_file().await }, move |file| {
-        done(file.map(|file| file.path().to_path_buf()))
-    })
+/// Asks for a folder, or an audio file, starting in `start_dir`. Cancelling sends `NoOp`.
+fn pick_path(start_dir: &Path, audio_file: bool, done: fn(PathBuf) -> Message) -> Task<Message> {
+    let dialog = rfd::AsyncFileDialog::new().set_directory(start_dir);
+    let picked = async move {
+        if audio_file {
+            let dialog = dialog.set_title("Select audio file");
+            dialog.add_filter("Audio", crate::metadata::AUDIO_EXTENSIONS).pick_file().await
+        } else {
+            dialog.set_title("Select Folder").pick_folder().await
+        }
+    };
+    Task::perform(picked, move |picked| picked.map_or(Message::NoOp, |picked| done(picked.path().to_path_buf())))
 }

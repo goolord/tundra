@@ -4,7 +4,7 @@
 use super::message::{Message, WaveformMsg};
 use super::style;
 use super::waveform::WaveForm;
-use super::widgets::{FileMenuExtras, context_menu_style, file_context_menu, icon, spacer};
+use super::widgets::{context_menu_style, file_context_menu, icon, spacer};
 use crate::metadata::TagField;
 use crate::playback::{PlaybackPosition, PlayerCommand, PlayerEvent, PlayerWorker, clamp_volume, probe_decoder};
 use crate::waveform_peaks::{WaveformPeaks, spawn_peak_build};
@@ -36,8 +36,6 @@ pub struct Player {
 pub struct Controls {
     pub is_playing: Arc<AtomicBool>,
     pub looping: Arc<AtomicBool>,
-    /// Last known playhead, 0 to 1; `None` when nothing is loaded.
-    pub playback_progress: Option<f64>,
     pub playback_position: Option<Arc<PlaybackPosition>>,
     pub track_duration: Option<f64>,
     pub scrubbing: bool,
@@ -52,7 +50,6 @@ impl Player {
             controls: Controls {
                 is_playing: Arc::new(AtomicBool::new(false)),
                 looping: Arc::new(AtomicBool::new(looping)),
-                playback_progress: None,
                 playback_position: None,
                 track_duration: None,
                 scrubbing: false,
@@ -103,7 +100,6 @@ impl Player {
         );
         self.controls.playback_position = Some(Arc::clone(&position));
         self.controls.track_duration = Some(info.total_frames as f64 / f64::from(info.sample_rate));
-        self.controls.playback_progress = Some(0.0);
         self.current_file = Some(file_path.to_path_buf());
         self.waveform = Some(waveform);
 
@@ -161,15 +157,7 @@ impl Player {
         if let Some(position) = &self.controls.playback_position {
             position.set_frame(position.total_frames());
         }
-        self.set_progress(1.0);
         self.pause();
-    }
-
-    /// Updates the shown progress, if a track is loaded.
-    pub fn set_progress(&mut self, progress: f64) {
-        if let Some(shown) = &mut self.controls.playback_progress {
-            *shown = progress;
-        }
     }
 
     pub fn toggle_loop(&mut self) -> bool {
@@ -180,7 +168,6 @@ impl Player {
         if let Some(position) = &self.controls.playback_position {
             position.reset();
         }
-        self.set_progress(0.0);
         if let Some(waveform) = &mut self.waveform {
             waveform.set_scrub_progress(None);
         }
@@ -190,7 +177,6 @@ impl Player {
     pub fn seek(&mut self, progress: f64) {
         let resume = self.is_playing();
         let progress = progress.clamp(0.0, 1.0);
-        self.set_progress(progress);
         // Move the shared position now instead of waiting for the audio thread to drain the
         // command queue. The playhead reads this atomic directly, so leaving it stale would snap
         // the head back to the old spot for a frame or two before the seek lands. Only safe once
@@ -213,22 +199,12 @@ impl Player {
         self.send(PlayerCommand::SetVolume(self.controls.volume));
     }
 
-    /// Copies the audio thread's playhead into the time label.
-    pub fn sync_playback_ui(&mut self) {
-        if !self.controls.scrubbing
-            && let Some(progress) = self.controls.playback_position.as_ref().map(|position| position.progress())
-        {
-            self.set_progress(progress);
-        }
-    }
-
     pub fn reset_on_error(&mut self) {
         self.send(PlayerCommand::Stop);
         self.controls.is_playing.store(false, Ordering::SeqCst);
         if let Some(position) = self.controls.playback_position.take() {
             position.reset();
         }
-        self.controls.playback_progress = None;
         self.controls.track_duration = None;
         self.current_file = None;
         self.waveform = None;
@@ -243,19 +219,9 @@ impl Player {
                     Canvas::new(waveform).width(Length::Fill).height(Length::Fill),
                 ]
                 .spacing(4);
-                let menu = ContextMenu::new(underlay, || {
-                    file_context_menu(
-                        WaveformMsg::CopyName.into(),
-                        WaveformMsg::CopyPath.into(),
-                        WaveformMsg::RevealInFileManager.into(),
-                        FileMenuExtras {
-                            auto_tag: Some(WaveformMsg::OpenAutoTag.into()),
-                            edit_tags: Some(WaveformMsg::EditTags.into()),
-                            favorite: None,
-                        },
-                    )
-                })
-                .style(context_menu_style);
+                let path = self.current_file.as_deref().unwrap_or(Path::new(""));
+                let menu = ContextMenu::new(underlay, move || file_context_menu(path, true, true, None))
+                    .style(context_menu_style);
                 container(menu).width(Length::Fill).height(Length::Fill).padding(2).into()
             }
             None => spacer(Length::Fill, Length::Fill).into(),
@@ -345,10 +311,7 @@ fn toolbar_tags(tags: Vec<(TagField, String)>) -> Element<'static, Message> {
 
 impl Controls {
     fn time_labels(&self) -> (String, String) {
-        let progress = self
-            .playback_progress
-            .map(|shown| self.playback_position.as_ref().map_or(shown, |position| position.progress()))
-            .unwrap_or(0.0);
+        let progress = self.playback_position.as_ref().map_or(0.0, |position| position.progress());
         let label = |secs: Option<f64>| secs.map(format_duration).unwrap_or_else(|| "--:--".into());
         (label(self.track_duration.map(|duration| progress.clamp(0.0, 1.0) * duration)), label(self.track_duration))
     }
@@ -505,7 +468,6 @@ mod tests {
         let mut player = Player::new(1.0, false);
         let position = PlaybackPosition::new(1_000);
         player.controls.playback_position = Some(Arc::clone(&position));
-        player.controls.playback_progress = Some(0.0);
         let (worker, _commands) = PlayerWorker::detached();
         if with_worker {
             player.worker = Some(worker);

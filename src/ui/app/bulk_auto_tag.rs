@@ -1,7 +1,7 @@
 //! The Bulk Auto Tag modal's handlers. The scan and the writes run on
 //! background threads; see `crate::bulk_auto_tag`.
 
-use super::{App, Modal, background, pick_folder};
+use super::{App, Modal, background, pick_path};
 use crate::bulk_auto_tag::{self, BulkApplySummary, BulkPhase, ScanError};
 use crate::ui::bulk_auto_tag::BulkAutoTagPhase;
 use crate::ui::message::{BulkAutoTagMsg, Message};
@@ -15,9 +15,7 @@ impl App {
         let state = &mut self.bulk_auto_tag;
         match message {
             BulkAutoTagMsg::Open => {
-                if !self.first_run_settings_open() {
-                    self.dialog = None;
-                    self.modal = Modal::None;
+                if self.open_modal(Modal::None) {
                     self.bulk_auto_tag.open();
                 }
             }
@@ -32,9 +30,9 @@ impl App {
             }
             BulkAutoTagMsg::PickDirectory => {
                 let start_dir = state.root.clone().unwrap_or_else(|| self.file_selector.current_dir.clone());
-                return pick_folder(start_dir, |picked| BulkAutoTagMsg::DirectoryPicked(picked).into());
+                return pick_path(&start_dir, false, |picked| BulkAutoTagMsg::DirectoryPicked(picked).into());
             }
-            BulkAutoTagMsg::DirectoryPicked(Some(dir)) => {
+            BulkAutoTagMsg::DirectoryPicked(dir) => {
                 if self.allowed_directories.contains_path(&dir) {
                     state.root = Some(dir);
                     state.error = None;
@@ -42,7 +40,6 @@ impl App {
                     state.set_error(FOLDER_OUTSIDE_ALLOWED);
                 }
             }
-            BulkAutoTagMsg::DirectoryPicked(None) => {}
             BulkAutoTagMsg::RunScan => return self.start_bulk_scan(),
             BulkAutoTagMsg::ProgressTick => state.update_progress(),
             BulkAutoTagMsg::ScanCompleted(generation, result) => {

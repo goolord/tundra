@@ -3,7 +3,7 @@
 use super::{App, Modal};
 use crate::ui::auto_tag::auto_tag_view;
 use crate::ui::bulk_auto_tag::bulk_auto_tag_view;
-use crate::ui::dialog::{with_dialog, with_dim_overlay};
+use crate::ui::dialog::with_overlay;
 use crate::ui::menu::title_bar;
 use crate::ui::message::{Message, WindowMsg};
 use crate::ui::settings::settings_view;
@@ -57,8 +57,8 @@ impl App {
             Modal::None => None,
         };
         let workspace = match (modal, &self.dialog) {
-            (Some(modal), _) => with_dim_overlay(workspace.into(), modal),
-            (None, Some(dialog)) => with_dialog(workspace.into(), dialog),
+            (Some(modal), _) => with_overlay(workspace.into(), modal, false),
+            (None, Some(dialog)) => with_overlay(workspace.into(), dialog.view(), true),
             (None, None) => workspace.into(),
         };
 

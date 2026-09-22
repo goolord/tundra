@@ -1,7 +1,7 @@
 //! Browsing the library: opening files and folders, directory walks, search
 //! and tag filters, favorites, and keeping the caches in step.
 
-use super::{App, Modal, run_blocking};
+use super::{App, Modal, background};
 use crate::library::cache::PersistedCaches;
 use crate::library::search::SearchOutput;
 use crate::library::search::{SearchRequest, execute_file_search};
@@ -11,7 +11,7 @@ use crate::metadata::{
     parse_tag_filter, refresh_cached_metadata, tag_field_best_match,
 };
 use crate::ui::file_selector::{
-    FILE_LIST_SCROLL_ID, FILE_SEARCH_INPUT_ID, FileButton, FilterFocus, TAG_SEARCH_INPUT_ID, list_buttons,
+    FILE_LIST_SCROLL_ID, FILE_SEARCH_INPUT_ID, FileButton, FileSelector, FilterFocus, TAG_SEARCH_INPUT_ID, list_buttons,
 };
 use crate::ui::message::{FilterMsg, Message};
 use crate::ui::settings::{FILE_OUTSIDE_ALLOWED, UNSUPPORTED_AUDIO};
@@ -21,10 +21,6 @@ use iced::widget::Id;
 use iced::widget::operation;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-
-fn focus(id: &'static str) -> Task<Message> {
-    operation::focus(Id::new(id))
-}
 
 impl App {
     pub(super) fn select_file_row(&mut self, index: usize) -> Task<Message> {
@@ -42,7 +38,7 @@ impl App {
     pub(super) fn open_path(&mut self, path: &Path) -> Task<Message> {
         let listings = self.dir_cache.snapshot();
         let path = crate::path_util::resolve_open_path(path, listings.values().flatten().map(PathBuf::as_path));
-        let defocus = self.release_filter_focus();
+        let defocus = self.focus_filter(FilterFocus::None);
         let open = if path.is_dir() {
             self.navigate_directory(path)
         } else if is_audio(&path) {
@@ -67,11 +63,6 @@ impl App {
             Some(path) => self.open_path(&path),
             None => Task::none(),
         }
-    }
-
-    fn release_filter_focus(&mut self) -> Task<Message> {
-        self.file_selector.filter_focus = FilterFocus::None;
-        focus(FILE_LIST_SCROLL_ID)
     }
 
     /// Whether the current folder is inside an allowed root. Memoized per folder
@@ -196,12 +187,10 @@ impl App {
         if !self.walks_in_progress.insert(key.clone()) {
             return Task::none();
         }
-        Task::perform(
-            run_blocking(move || {
-                let children = walk_directory(&dir);
-                (dir, children)
-            }),
-            move |walked| walked.map_or_else(|()| Message::WalkFailed(key.clone()), Message::InsertDircache),
+        background(
+            move || Message::InsertDircache((dir.clone(), walk_directory(&dir))),
+            move || Message::WalkFailed(key),
+            |message| message,
         )
     }
 
@@ -305,45 +294,31 @@ impl App {
     pub(super) fn update_filter(&mut self, message: FilterMsg) -> Task<Message> {
         match message {
             FilterMsg::Search(value) => {
-                self.focus_filter(FilterFocus::FileSearch);
+                let focus = self.focus_filter(FilterFocus::FileSearch);
                 self.file_selector.search_value = value;
-                Task::batch([self.start_file_search(), focus(FILE_SEARCH_INPUT_ID)])
+                Task::batch([self.start_file_search(), focus])
             }
-            FilterMsg::SearchFocused(true) => {
-                self.focus_filter(FilterFocus::FileSearch);
-                focus(FILE_SEARCH_INPUT_ID)
-            }
+            FilterMsg::SearchFocused(true) => self.focus_filter(FilterFocus::FileSearch),
             FilterMsg::SearchFocused(false) => Task::none(),
             FilterMsg::TagSearchInput(input) => {
-                self.focus_filter(FilterFocus::TagSearch);
                 self.file_selector.tag_search_error = None;
                 self.file_selector.tag_search_value = input;
-                focus(TAG_SEARCH_INPUT_ID)
+                self.focus_filter(FilterFocus::TagSearch)
             }
             FilterMsg::TagSearchSubmit => self.submit_tag_search(),
-            FilterMsg::TagSearchFocused(true) => {
-                self.focus_filter(FilterFocus::TagSearch);
-                focus(TAG_SEARCH_INPUT_ID)
-            }
+            FilterMsg::TagSearchFocused(true) => self.focus_filter(FilterFocus::TagSearch),
             // Only Tab from the tag search sends this; the file list keeps focus.
-            FilterMsg::TagSearchFocused(false) => self.release_filter_focus(),
+            FilterMsg::TagSearchFocused(false) => self.focus_filter(FilterFocus::None),
             FilterMsg::TagFilterRemove(field) => {
                 self.file_selector.tag_filters.retain(|filter| filter.field != field);
                 self.start_file_search()
             }
             FilterMsg::TagSuggestionSelect(field) => self.select_tag_field(field),
-            FilterMsg::ToggleCaseSensitive => {
-                self.file_selector.search_case_sensitive = !self.file_selector.search_case_sensitive;
-                self.start_file_search()
-            }
+            FilterMsg::ToggleCaseSensitive => self.toggle_search_flag(|selector| &mut selector.search_case_sensitive),
             FilterMsg::ToggleShowDirectories => {
-                self.file_selector.search_show_directories = !self.file_selector.search_show_directories;
-                self.start_file_search()
+                self.toggle_search_flag(|selector| &mut selector.search_show_directories)
             }
-            FilterMsg::ToggleFavoritesOnly => {
-                self.file_selector.favorites_only = !self.file_selector.favorites_only;
-                self.start_file_search()
-            }
+            FilterMsg::ToggleFavoritesOnly => self.toggle_search_flag(|selector| &mut selector.favorites_only),
             FilterMsg::SearchCompleted(generation, result) => {
                 if generation == self.search_generation
                     && self.search_enabled()
@@ -357,9 +332,21 @@ impl App {
         }
     }
 
-    fn focus_filter(&mut self, filter: FilterFocus) {
+    fn toggle_search_flag(&mut self, flag: fn(&mut FileSelector) -> &mut bool) -> Task<Message> {
+        let flag = flag(&mut self.file_selector);
+        *flag = !*flag;
+        self.start_file_search()
+    }
+
+    /// Gives the keyboard to a filter input, or with `FilterFocus::None` back to the file list.
+    fn focus_filter(&mut self, filter: FilterFocus) -> Task<Message> {
         self.file_selector.filter_focus = filter;
-        self.file_list_focused = false;
+        self.file_list_focused &= filter == FilterFocus::None;
+        operation::focus(Id::new(match filter {
+            FilterFocus::None => FILE_LIST_SCROLL_ID,
+            FilterFocus::FileSearch => FILE_SEARCH_INPUT_ID,
+            FilterFocus::TagSearch => TAG_SEARCH_INPUT_ID,
+        }))
     }
 
     fn show_search_result(&mut self, SearchOutput { result, walked_roots }: SearchOutput) {
@@ -390,18 +377,14 @@ impl App {
 
     /// Enter in the tag search: complete a bare field name, or add `field:value` as a filter.
     fn submit_tag_search(&mut self) -> Task<Message> {
-        self.focus_filter(FilterFocus::TagSearch);
+        let focus = self.focus_filter(FilterFocus::TagSearch);
         let input = self.file_selector.tag_search_value.clone();
         if input.trim().is_empty() {
-            return if self.file_selector.tag_filters.is_empty() {
-                focus(TAG_SEARCH_INPUT_ID)
-            } else {
-                self.start_file_search()
-            };
+            return if self.file_selector.tag_filters.is_empty() { focus } else { self.start_file_search() };
         }
         let parsed = match (input.contains(':'), tag_field_best_match(&input)) {
             (true, _) => parse_tag_filter(&input),
-            (false, Some(_)) => return self.autocomplete_tag_field(),
+            (false, Some(field)) => return self.select_tag_field(field),
             (false, None) => Err(TagParseError::UnknownField),
         };
         match parsed {
@@ -409,11 +392,11 @@ impl App {
                 self.file_selector.tag_search_error = None;
                 self.file_selector.add_tag_filter(filter);
                 self.file_selector.tag_search_value.clear();
-                Task::batch([self.start_file_search(), focus(TAG_SEARCH_INPUT_ID)])
+                Task::batch([self.start_file_search(), focus])
             }
             Err(err) => {
                 self.file_selector.tag_search_error = Some(err.to_string());
-                focus(TAG_SEARCH_INPUT_ID)
+                focus
             }
         }
     }
@@ -430,7 +413,7 @@ impl App {
         self.file_selector.filter_focus = FilterFocus::TagSearch;
         self.file_selector.tag_search_error = None;
         self.file_selector.tag_search_value = format!("{}:", field.as_str());
-        focus(TAG_SEARCH_INPUT_ID)
+        operation::focus(Id::new(TAG_SEARCH_INPUT_ID))
     }
 }
 

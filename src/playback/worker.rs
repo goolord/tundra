@@ -34,7 +34,6 @@ pub enum PlayerCommand {
 #[derive(Debug, Clone)]
 pub enum PlayerEvent {
     Ended(u64),
-    Looped(u64),
     WaveformPeaksReady(u64),
     DeviceUnavailable,
     FileFailed(u64, String),
@@ -225,7 +224,6 @@ impl AudioWorker {
                 if self.looping.load(Ordering::Acquire) {
                     track.position.reset();
                     self.start(0.0, true);
-                    self.handle.emit(PlayerEvent::Looped(id));
                 } else {
                     self.sink = None;
                     self.set_playing(false);
