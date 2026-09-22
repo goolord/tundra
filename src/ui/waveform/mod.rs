@@ -28,11 +28,10 @@ type CacheKey = (u32, u32, u32, u32, u32);
 /// Per-widget interaction state that iced keeps between frames.
 #[derive(Default)]
 pub struct WaveFormState {
-    /// A Shift+drag pan's starting view and the last cursor x; `last_pan_view` is the live view.
+    /// During a Shift+drag pan, the live view and the last cursor x.
     pan: Option<(WaveFormView, f32)>,
-    last_pan_view: Option<WaveFormView>,
-    scrub_active: bool,
-    last_scrub_progress: f64,
+    /// During a scrub, the last progress it reported.
+    scrub: Option<f64>,
     /// Ctrl+press position, until the drag passes the threshold.
     file_drag_origin: Option<Point>,
     /// Scroll-wheel lines not yet turned into zoom.
@@ -41,16 +40,17 @@ pub struct WaveFormState {
 }
 
 pub struct WaveForm {
-    sample_count: usize,
     peaks: Arc<Mutex<WaveformPeaks>>,
-    view: WaveFormView,
-    sample_rate: u32,
-    playback_position: Arc<PlaybackPosition>,
+    pub view: WaveFormView,
+    pub sample_rate: u32,
+    /// The playhead; its total frame count is also the waveform's length.
+    pub position: Arc<PlaybackPosition>,
     is_playing: Arc<AtomicBool>,
-    scrub_progress: Option<f64>,
-    ui_scrubbing: Cell<bool>,
-    modifiers: Modifiers,
-    pan_active: bool,
+    /// Draws the playhead here instead of at the playback position while scrubbing.
+    pub scrub_progress: Option<f64>,
+    pub ui_scrubbing: Cell<bool>,
+    pub modifiers: Modifiers,
+    pub pan_active: bool,
     cache: Cache,
     content_cache_key: Cell<Option<CacheKey>>,
     two_outline_armed: Cell<bool>,
@@ -81,18 +81,16 @@ impl PlotArea {
 impl WaveForm {
     /// A waveform for a track that `peaks` fills in as it decodes.
     pub fn new(
-        sample_count: usize,
         sample_rate: u32,
         peaks: Arc<Mutex<WaveformPeaks>>,
-        playback_position: Arc<PlaybackPosition>,
+        position: Arc<PlaybackPosition>,
         is_playing: Arc<AtomicBool>,
     ) -> Self {
         Self {
-            sample_count,
             peaks,
             view: WaveFormView::default(),
             sample_rate,
-            playback_position,
+            position,
             is_playing,
             scrub_progress: None,
             ui_scrubbing: Cell::new(false),
@@ -105,99 +103,35 @@ impl WaveForm {
     }
 
     pub fn sample_count(&self) -> usize {
-        self.sample_count
+        self.position.total_frames() as usize
     }
 
-    /// Adopts the peak builder's exact sample count once it finishes.
-    pub fn apply_peaks_ready(&mut self) -> Option<usize> {
-        let count = self
-            .peaks
-            .lock()
-            .ok()
-            .filter(|peaks| peaks.complete && peaks.sample_count > 0)
-            .map(|peaks| peaks.sample_count)?;
-        if self.sample_count != count {
-            self.sample_count = count;
-            self.invalidate_cache();
-        }
-        Some(count)
-    }
-
-    pub fn invalidate_cache(&mut self) {
-        self.cache.clear();
-        self.content_cache_key.set(None);
-    }
-
+    /// Everything the cached drawing depends on. New peaks flip `complete`, which changes it.
     fn content_cache_key(&self, theme: &Theme, plot_width: f32) -> CacheKey {
         let peaks_complete = self.peaks.lock().is_ok_and(|peaks| peaks.complete);
-        let (start, zoom, phase) = self.view.window_cache_key(self.sample_count);
+        let (start, zoom, phase) = self.view.window_cache_key(self.sample_count());
         let theme_key = draw::theme_cache_key(theme) ^ u32::from(peaks_complete);
         (start, zoom, phase, plot_width.round() as u32, theme_key)
     }
 
-    pub fn sample_rate(&self) -> u32 {
-        self.sample_rate
-    }
-
-    /// Draws the playhead at `progress` instead of the playback position while scrubbing.
-    pub fn set_scrub_progress(&mut self, progress: Option<f64>) {
-        self.scrub_progress = progress;
-    }
-
-    pub fn set_ui_scrubbing(&self, scrubbing: bool) {
-        self.ui_scrubbing.set(scrubbing);
-    }
-
-    pub fn set_modifiers(&mut self, modifiers: Modifiers) {
-        self.modifiers = modifiers;
-    }
-
-    pub fn set_pan_active(&mut self, active: bool) {
-        self.pan_active = active;
-    }
-
-    pub fn pan_active(&self) -> bool {
-        self.pan_active
-    }
-
-    pub fn view_state(&self) -> WaveFormView {
-        self.view
-    }
-
-    pub fn set_view(&mut self, view: WaveFormView) {
-        self.view = view;
-    }
-
-    /// The rubber-band stretch as drawn: `(x scale, x translation, x origin)`. The origin depends
-    /// on the overscroll; a fixed `width / 2.0` here would put the playhead and the click-to-seek
-    /// mapping on a different transform than the waveform underneath them.
-    fn content_transform(&self, view: WaveFormView, width: f32) -> (f32, f32, f32) {
-        let origin_x = view.content_transform_origin_x(width, self.sample_count);
-        (view.content_scale().0, view.content_translate_x(width), origin_x)
-    }
-
-    fn map_content_x(&self, view: WaveFormView, width: f32, x: f32) -> f32 {
-        let (scale_x, translate_x, origin_x) = self.content_transform(view, width);
-        (x - origin_x) * scale_x + origin_x + translate_x
-    }
-
-    fn unmap_content_x(&self, view: WaveFormView, width: f32, x: f32) -> f32 {
-        let (scale_x, translate_x, origin_x) = self.content_transform(view, width);
-        if scale_x.abs() < 1e-6 {
-            return origin_x;
+    /// Maps plot x through the rubber-band stretch `draw` applies, or back with `unmap`.
+    fn map_content_x(&self, view: WaveFormView, width: f32, x: f32, unmap: bool) -> f32 {
+        let (scale_x, _, translate_x, origin_x) = view.content_transform(width, self.sample_count());
+        if !unmap {
+            (x - origin_x) * scale_x + origin_x + translate_x
+        } else if scale_x.abs() < 1e-6 {
+            origin_x
+        } else {
+            (x - translate_x - origin_x) / scale_x + origin_x
         }
-        (x - translate_x - origin_x) / scale_x + origin_x
     }
 
-    /// Frames in the track by the playback clock, and the visible `(start, visible, phase)`
-    /// window; `None` when there is nothing to map.
+    /// Frames in the track, and the visible `(start, visible, phase)` window; `None` when there
+    /// is nothing to map.
     fn timeline(&self, view: WaveFormView, plot_width: f32) -> Option<(usize, usize, usize, f32)> {
-        if self.sample_count == 0 || plot_width <= 0.0 {
-            return None;
-        }
-        let frame_count = self.playback_position.total_frames() as usize;
-        let (start, visible, phase) = view.sample_window(self.sample_count);
-        (frame_count > 0 && visible > 0).then_some((frame_count, start, visible, phase))
+        let frame_count = self.sample_count();
+        let (start, visible, phase) = view.sample_window(frame_count);
+        (visible > 0 && plot_width > 0.0).then_some((frame_count, start, visible, phase))
     }
 
     fn playhead_content_x(&self, view: WaveFormView, plot_width: f32, progress: f64) -> Option<f32> {
@@ -212,40 +146,16 @@ impl WaveForm {
 
     fn playhead_screen_x(&self, view: WaveFormView, plot: PlotArea, progress: f64) -> Option<f32> {
         let x = self.playhead_content_x(view, plot.width, progress)?;
-        Some(self.map_content_x(view, plot.width, x) + plot.x)
+        Some(self.map_content_x(view, plot.width, x, false) + plot.x)
     }
 
     fn progress_at_x(&self, view: WaveFormView, plot: PlotArea, x: f32) -> Option<f64> {
         let (frame_count, start, visible, phase) = self.timeline(view, plot.width)?;
         let px_per_sample = plot.width / visible as f32;
-        let content_x = self.unmap_content_x(view, plot.width, x - plot.x);
+        let content_x = self.map_content_x(view, plot.width, x - plot.x, true);
         let sample_pos = (content_x / px_per_sample + phase).clamp(0.0, visible as f32);
         let progress_frame = (start as f32 + sample_pos).round() as usize;
         Some(progress_frame.min(frame_count - 1) as f64 / frame_count as f64)
-    }
-
-    /// Scroll-wheel zoom, or pan with Shift. Returns the new view if it changed.
-    fn wheel(
-        &self,
-        state: &mut WaveFormState,
-        delta: mouse::ScrollDelta,
-        bounds: Rectangle,
-        cursor: Cursor,
-    ) -> Option<WaveFormView> {
-        let mut view = self.view;
-        let (x, y) = view::scroll_lines(delta);
-        if self.modifiers.shift() {
-            let pan_delta = if x.abs() > y.abs() { -x } else { -y };
-            if pan_delta == 0.0 {
-                return None;
-            }
-            view.apply_pan_delta(f64::from(pan_delta * view::PAN_STEP), self.sample_count);
-            return Some(view);
-        }
-        let plot = PlotArea::from_size(bounds.size());
-        let anchor_x =
-            cursor.position_in(bounds).map_or(0.5, |point| ((point.x - plot.x) / plot.width).clamp(0.0, 1.0));
-        view.accumulate_wheel(y, anchor_x, self.sample_count, &mut state.wheel_lines).then_some(view)
     }
 }
 
@@ -265,8 +175,9 @@ impl Program<Message> for WaveForm {
         _cursor: Cursor,
     ) -> Vec<Geometry> {
         let size = bounds.size();
-        let progress = self.scrub_progress.unwrap_or_else(|| self.playback_position.progress());
-        let view = state.last_pan_view.unwrap_or(self.view);
+        let progress = self.scrub_progress.unwrap_or_else(|| self.position.progress());
+        let panning = state.pan.is_some();
+        let view = state.pan.map_or(self.view, |(view, _)| view);
         let transformed = view.overscroll_active();
         let plot = PlotArea::from_size(size);
         let plot_size = Size::new(plot.width, plot.height);
@@ -281,10 +192,10 @@ impl Program<Message> for WaveForm {
                     return self.draw_waveform_content(frame, theme, view, plot_size);
                 }
                 // While rubber-banding, the playhead has to share the stretch transform.
-                let (scale_x, translate_x, origin_x) = self.content_transform(view, plot.width);
+                let (scale_x, scale_y, translate_x, origin_x) = view.content_transform(plot.width, self.sample_count());
                 let origin = Vector::new(origin_x, plot.height / 2.0);
                 frame.translate(Vector::new(translate_x, 0.0) + origin);
-                frame.scale_nonuniform(Vector::new(scale_x, view.content_scale().1));
+                frame.scale_nonuniform(Vector::new(scale_x, scale_y));
                 frame.translate(-origin);
                 self.draw_waveform_content(frame, theme, view, plot_size);
                 if let Some(x) = self.playhead_content_x(view, plot.width, progress) {
@@ -298,7 +209,7 @@ impl Program<Message> for WaveForm {
         let mut layers = vec![background.into_geometry()];
 
         // Panning and rubber-banding change every frame; everything else draws from the cache.
-        if state.last_pan_view.is_some() || transformed {
+        if panning || transformed {
             let mut frame = Frame::new(renderer, size);
             draw_plot(&mut frame);
             layers.push(frame.into_geometry());
@@ -336,31 +247,29 @@ impl Program<Message> for WaveForm {
         if let Event::Window(iced::window::Event::RedrawRequested(_)) = event {
             return self.is_playing.load(Ordering::Relaxed).then(Action::request_redraw);
         }
-        if state.tracked_samples != self.sample_count {
-            state.tracked_samples = self.sample_count;
+        if state.tracked_samples != self.sample_count() {
+            state.tracked_samples = self.sample_count();
             state.wheel_lines = 0.0;
         }
         if !self.ui_scrubbing.get() {
-            state.scrub_active = false;
+            state.scrub = None;
         }
         let Event::Mouse(event) = event else {
             return None;
         };
         let plot = PlotArea::from_size(bounds.size());
-        let current_view = state.last_pan_view.unwrap_or(self.view);
+        let current_view = state.pan.map_or(self.view, |(view, _)| view);
 
         match *event {
             mouse::Event::CursorEntered => publish(WaveformMsg::HoverChanged(true)),
             mouse::Event::CursorLeft => publish(WaveformMsg::HoverChanged(false)),
             mouse::Event::ButtonReleased(mouse::Button::Left) => {
                 state.file_drag_origin = None;
-                if state.scrub_active {
-                    state.scrub_active = false;
+                if let Some(progress) = state.scrub.take() {
                     self.ui_scrubbing.set(false);
-                    return publish(WaveformMsg::ScrubEnd(state.last_scrub_progress));
+                    return publish(WaveformMsg::ScrubEnd(progress));
                 }
-                state.pan.take()?;
-                publish(WaveformMsg::PanEnded(state.last_pan_view.take().unwrap_or(self.view)))
+                publish(WaveformMsg::PanEnded(state.pan.take()?.0))
             }
             mouse::Event::ButtonPressed(mouse::Button::Left) => {
                 let position = cursor.position_in(bounds)?;
@@ -370,7 +279,6 @@ impl Program<Message> for WaveForm {
                 }
                 if self.modifiers.shift() {
                     state.pan = Some((self.view, position.x));
-                    state.last_pan_view = None;
                     return publish(WaveformMsg::PanStarted);
                 }
                 // The amplitude gutter is not part of the timeline; a press there would otherwise
@@ -379,8 +287,7 @@ impl Program<Message> for WaveForm {
                     return None;
                 }
                 let progress = self.progress_at_x(current_view, plot, position.x)?;
-                state.scrub_active = true;
-                state.last_scrub_progress = progress;
+                state.scrub = Some(progress);
                 self.ui_scrubbing.set(true);
                 publish(WaveformMsg::Scrub(progress))
             }
@@ -392,22 +299,31 @@ impl Program<Message> for WaveForm {
                     state.file_drag_origin = None;
                     return publish(WaveformMsg::FileDragStart);
                 }
-                if state.scrub_active
+                if state.scrub.is_some()
                     && let Some(progress) = self.progress_at_x(current_view, plot, position.x)
                 {
-                    state.last_scrub_progress = progress;
+                    state.scrub = Some(progress);
                     return publish(WaveformMsg::Scrub(progress));
                 }
-                let (anchor, last_x) = state.pan.as_mut()?;
+                let (view, last_x) = state.pan.as_mut()?;
                 let dx = position.x - std::mem::replace(last_x, position.x);
-                let visible = view::visible_fraction_of(self.sample_count, self.view.zoom);
-                let mut view = state.last_pan_view.unwrap_or(WaveFormView { zoom: self.view.zoom, ..*anchor });
-                view.apply_pan_delta(-f64::from(dx) / f64::from(plot.width) * visible, self.sample_count);
-                state.last_pan_view = Some(view);
+                let visible = view::visible_fraction_of(self.sample_count(), view.zoom);
+                view.apply_pan_delta(-f64::from(dx) / f64::from(plot.width) * visible, self.sample_count());
                 Some(Action::request_redraw().and_capture())
             }
+            // Zoom around the cursor, or pan with Shift.
             mouse::Event::WheelScrolled { delta } if cursor.is_over(bounds) => {
-                self.wheel(state, delta, bounds, cursor).and_then(|view| publish(WaveformMsg::ViewChanged(view)))
+                let (mut view, sample_count) = (self.view, self.sample_count());
+                let (x, y) = view::scroll_lines(delta);
+                let changed = if self.modifiers.shift() {
+                    let pan_delta = if x.abs() > y.abs() { -x } else { -y };
+                    view.apply_pan_delta(f64::from(pan_delta * view::PAN_STEP), sample_count);
+                    pan_delta != 0.0
+                } else {
+                    let anchor_x = cursor.position_in(bounds).map_or(0.5, |point| (point.x - plot.x) / plot.width);
+                    view.accumulate_wheel(y, anchor_x.clamp(0.0, 1.0), sample_count, &mut state.wheel_lines)
+                };
+                changed.then(|| publish(WaveformMsg::ViewChanged(view))).flatten()
             }
             _ => None,
         }
@@ -416,7 +332,7 @@ impl Program<Message> for WaveForm {
     fn mouse_interaction(&self, state: &Self::State, bounds: Rectangle, cursor: Cursor) -> mouse::Interaction {
         if !cursor.is_over(bounds) {
             mouse::Interaction::default()
-        } else if state.scrub_active {
+        } else if state.scrub.is_some() {
             mouse::Interaction::Pointer
         } else if state.pan.is_some() {
             mouse::Interaction::Grabbing
@@ -437,7 +353,7 @@ mod tests {
     fn waveform(sample_count: usize, zoom: f32, offset: f64, overscroll: f32) -> WaveForm {
         let peaks = Arc::new(Mutex::new(WaveformPeaks::empty()));
         let position = PlaybackPosition::new(sample_count as u64);
-        let mut waveform = WaveForm::new(sample_count, 48_000, peaks, position, Default::default());
+        let mut waveform = WaveForm::new(48_000, peaks, position, Default::default());
         waveform.view = WaveFormView { zoom, offset, overscroll };
         waveform
     }
@@ -465,15 +381,13 @@ mod tests {
         for (offset, overscroll) in [(0.0_f64, -0.1_f32), (0.9, 0.1), (0.4, 0.05), (0.4, 0.0)] {
             let wf = waveform(SAMPLES, 8.0, offset, overscroll);
             let view = wf.view;
-            let (scale_x, _) = view.content_scale();
-            let translate_x = view.content_translate_x(width);
-            let origin_x = view.content_transform_origin_x(width, SAMPLES);
+            let (scale_x, _, translate_x, origin_x) = view.content_transform(width, SAMPLES);
             for step in 0..=10 {
                 let x = width * (step as f32 / 10.0);
                 let drawn = (x - origin_x) * scale_x + origin_x + translate_x;
-                let mapped = wf.map_content_x(view, width, x);
+                let mapped = wf.map_content_x(view, width, x, false);
                 assert!((mapped - drawn).abs() < 1e-3, "{offset}/{overscroll}: {x} drawn at {drawn}, mapped {mapped}");
-                let back = wf.unmap_content_x(view, width, mapped);
+                let back = wf.map_content_x(view, width, mapped, true);
                 assert!((back - x).abs() < 1e-2, "{offset}/{overscroll}: {x} round-tripped to {back}");
             }
         }

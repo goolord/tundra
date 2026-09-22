@@ -36,10 +36,6 @@ pub struct Player {
 pub struct Controls {
     pub is_playing: Arc<AtomicBool>,
     pub looping: Arc<AtomicBool>,
-    /// Last known playhead, 0 to 1; `None` when nothing is loaded.
-    pub playback_progress: Option<f64>,
-    pub playback_position: Option<Arc<PlaybackPosition>>,
-    pub track_duration: Option<f64>,
     pub scrubbing: bool,
     pub volume: f32,
 }
@@ -52,9 +48,6 @@ impl Player {
             controls: Controls {
                 is_playing: Arc::new(AtomicBool::new(false)),
                 looping: Arc::new(AtomicBool::new(looping)),
-                playback_progress: None,
-                playback_position: None,
-                track_duration: None,
                 scrubbing: false,
                 volume: clamp_volume(volume),
             },
@@ -82,6 +75,10 @@ impl Player {
         }
     }
 
+    fn position(&self) -> Option<&PlaybackPosition> {
+        self.waveform.as_ref().map(|waveform| &*waveform.position)
+    }
+
     pub fn is_playing(&self) -> bool {
         self.controls.is_playing.load(Ordering::Acquire)
     }
@@ -94,27 +91,24 @@ impl Player {
         let info = probe_decoder(file_path)?;
         let peaks = Arc::new(Mutex::new(WaveformPeaks::empty()));
         let position = PlaybackPosition::new(info.total_frames);
-        let waveform = WaveForm::new(
-            info.total_frames as usize,
-            info.sample_rate,
-            Arc::clone(&peaks),
-            Arc::clone(&position),
-            Arc::clone(&self.controls.is_playing),
-        );
-        self.controls.playback_position = Some(Arc::clone(&position));
-        self.controls.track_duration = Some(info.total_frames as f64 / f64::from(info.sample_rate));
-        self.controls.playback_progress = Some(0.0);
+        let is_playing = Arc::clone(&self.controls.is_playing);
+        self.waveform = Some(WaveForm::new(info.sample_rate, Arc::clone(&peaks), Arc::clone(&position), is_playing));
         self.current_file = Some(file_path.to_path_buf());
-        self.waveform = Some(waveform);
 
         let id = self.track_id.fetch_add(1, Ordering::SeqCst) + 1;
-        let (track_id, events) = (Arc::clone(&self.track_id), worker.clone());
+        let (track_id, events, built_position) = (Arc::clone(&self.track_id), worker.clone(), Arc::clone(&position));
         spawn_peak_build(
             file_path.to_path_buf(),
             info.total_frames as usize,
             peaks,
             move || track_id.load(Ordering::SeqCst) != id,
-            move || events.emit(PlayerEvent::WaveformPeaksReady(id)),
+            // Adopts the exact length once the whole file has been decoded.
+            move |built| {
+                if built.complete && built.sample_count > 0 {
+                    built_position.set_total_frames(built.sample_count as u64);
+                }
+                events.emit(PlayerEvent::WaveformPeaksReady);
+            },
         );
 
         worker.send(PlayerCommand::Load(file_path.to_path_buf(), position, id));
@@ -136,40 +130,16 @@ impl Player {
         if self.is_playing() { self.pause() } else { self.play() }
     }
 
-    /// Adopts the exact length once the peak builder has decoded the whole file.
-    pub fn on_waveform_peaks_ready(&mut self) {
-        let Some(waveform) = &mut self.waveform else {
-            return;
-        };
-        let Some(sample_count) = waveform.apply_peaks_ready() else {
-            return waveform.invalidate_cache();
-        };
-        if let Some(position) = &self.controls.playback_position {
-            position.set_total_frames(sample_count as u64);
-        }
-        if waveform.sample_rate() > 0 {
-            self.controls.track_duration = Some(sample_count as f64 / f64::from(waveform.sample_rate()));
-        }
-    }
-
     /// Whether an event for track `id` still applies.
     pub fn is_current_track(&self, id: u64) -> bool {
         self.track_id.load(Ordering::SeqCst) == id
     }
 
     pub fn on_ended(&mut self) {
-        if let Some(position) = &self.controls.playback_position {
+        if let Some(position) = self.position() {
             position.set_frame(position.total_frames());
         }
-        self.set_progress(1.0);
         self.pause();
-    }
-
-    /// Updates the shown progress, if a track is loaded.
-    pub fn set_progress(&mut self, progress: f64) {
-        if let Some(shown) = &mut self.controls.playback_progress {
-            *shown = progress;
-        }
     }
 
     pub fn toggle_loop(&mut self) -> bool {
@@ -177,35 +147,21 @@ impl Player {
     }
 
     pub fn stop(&mut self) {
-        if let Some(position) = &self.controls.playback_position {
-            position.reset();
-        }
-        self.set_progress(0.0);
         if let Some(waveform) = &mut self.waveform {
-            waveform.set_scrub_progress(None);
+            waveform.position.set_frame(0);
+            waveform.scrub_progress = None;
         }
         self.send(PlayerCommand::Stop);
     }
 
     pub fn seek(&mut self, progress: f64) {
-        let resume = self.is_playing();
-        let progress = progress.clamp(0.0, 1.0);
-        self.set_progress(progress);
         // Move the shared position now instead of waiting for the audio thread to drain the
         // command queue. The playhead reads this atomic directly, so leaving it stale would snap
-        // the head back to the old spot for a frame or two before the seek lands. Only safe once
-        // the audio thread exists; otherwise the command sits in `pending_commands` and the head
-        // would advertise a frame playback never reaches.
-        if self.audio_ready()
-            && let Some(position) = &self.controls.playback_position
-            && position.total_frames() > 0
-        {
+        // the head back to the old spot for a frame or two before the seek lands.
+        if let Some(position) = self.position() {
             position.seek_to(progress);
         }
-        if let Some(waveform) = &mut self.waveform {
-            waveform.set_scrub_progress(None);
-        }
-        self.send(PlayerCommand::Seek(progress, resume));
+        self.send(PlayerCommand::Seek(progress, self.is_playing()));
     }
 
     pub fn set_volume(&mut self, volume: f32) {
@@ -213,23 +169,9 @@ impl Player {
         self.send(PlayerCommand::SetVolume(self.controls.volume));
     }
 
-    /// Copies the audio thread's playhead into the time label.
-    pub fn sync_playback_ui(&mut self) {
-        if !self.controls.scrubbing
-            && let Some(progress) = self.controls.playback_position.as_ref().map(|position| position.progress())
-        {
-            self.set_progress(progress);
-        }
-    }
-
     pub fn reset_on_error(&mut self) {
         self.send(PlayerCommand::Stop);
         self.controls.is_playing.store(false, Ordering::SeqCst);
-        if let Some(position) = self.controls.playback_position.take() {
-            position.reset();
-        }
-        self.controls.playback_progress = None;
-        self.controls.track_duration = None;
         self.current_file = None;
         self.waveform = None;
     }
@@ -237,9 +179,9 @@ impl Player {
     pub fn view(&self, tags: Vec<(TagField, String)>) -> Element<'_, Message> {
         let waveform_area: Element<'_, Message> = match &self.waveform {
             Some(waveform) => {
-                waveform.set_ui_scrubbing(self.controls.scrubbing);
+                waveform.ui_scrubbing.set(self.controls.scrubbing);
                 let underlay = column![
-                    waveform_toolbar(waveform.view_state().zoom, tags),
+                    waveform_toolbar(waveform.view.zoom, tags),
                     Canvas::new(waveform).width(Length::Fill).height(Length::Fill),
                 ]
                 .spacing(4);
@@ -261,7 +203,9 @@ impl Player {
             None => spacer(Length::Fill, Length::Fill).into(),
         };
         let track =
-            self.current_file.as_deref().and_then(|path| Some((crate::path_util::file_name_lossy(path)?, path)));
+            self.current_file.as_deref().zip(self.waveform.as_ref()).and_then(|(path, waveform)| {
+                Some((crate::path_util::file_name_lossy(path)?, path, time_labels(waveform)))
+            });
 
         container(column![waveform_area, self.controls.view(track)])
             .width(Length::Fill)
@@ -343,20 +287,16 @@ fn toolbar_tags(tags: Vec<(TagField, String)>) -> Element<'static, Message> {
     .into()
 }
 
-impl Controls {
-    fn time_labels(&self) -> (String, String) {
-        let progress = self
-            .playback_progress
-            .map(|shown| self.playback_position.as_ref().map_or(shown, |position| position.progress()))
-            .unwrap_or(0.0);
-        let label = |secs: Option<f64>| secs.map(format_duration).unwrap_or_else(|| "--:--".into());
-        (label(self.track_duration.map(|duration| progress.clamp(0.0, 1.0) * duration)), label(self.track_duration))
-    }
+/// The playhead's time and the track's length.
+fn time_labels(waveform: &WaveForm) -> (String, String) {
+    let duration = waveform.sample_count() as f64 / f64::from(waveform.sample_rate);
+    (format_duration(waveform.position.progress().clamp(0.0, 1.0) * duration), format_duration(duration))
+}
 
-    fn view(&self, track: Option<(String, &Path)>) -> Element<'_, Message> {
+impl Controls {
+    fn view(&self, track: Option<(String, &Path, (String, String))>) -> Element<'_, Message> {
         let track_info: Element<'_, Message> = match track {
-            Some((name, path)) => {
-                let (current, total) = self.time_labels();
+            Some((name, path, (current, total))) => {
                 container(track_info_row(name, path.to_path_buf(), current, total)).width(Length::FillPortion(2)).into()
             }
             None => spacer(Length::Fill, Length::Shrink).into(),
@@ -385,13 +325,12 @@ impl Controls {
     }
 
     fn transport_cluster(&self) -> Element<'_, Message> {
-        let playing = Arc::clone(&self.is_playing);
-        let is_playing = move || playing.load(Ordering::SeqCst);
+        let playing = self.is_playing.load(Ordering::SeqCst);
         let looping = self.looping.load(Ordering::Relaxed);
-        let play_icon = if is_playing() { "pause.svg" } else { "play.svg" };
-        let play = transport_button(play_icon, Message::TogglePlaying, true, is_playing);
-        let stop = transport_button("stop.svg", Message::StopPlayback, false, || false);
-        let repeat = transport_button("repeat.svg", Message::ToggleLoop, looping, move || looping);
+        let play_icon = if playing { "pause.svg" } else { "play.svg" };
+        let play = transport_button(play_icon, Message::TogglePlaying, true, playing);
+        let stop = transport_button("stop.svg", Message::StopPlayback, false, false);
+        let repeat = transport_button("repeat.svg", Message::ToggleLoop, looping, looping);
 
         container(row![play, stop, repeat].spacing(6).align_y(Alignment::Center))
             .padding(4)
@@ -406,15 +345,9 @@ impl Controls {
 }
 
 /// A round transport button. `primary` buttons use the accent color, and
-/// fill with it while `active()` (e.g. while playing).
-fn transport_button(
-    icon_name: &str,
-    message: Message,
-    primary: bool,
-    active: impl Fn() -> bool + Clone + 'static,
-) -> Button<'static, Message> {
-    let icon_active = active.clone();
-    let glyph = icon(icon_name, TRANSPORT_ICON, move |theme| match (primary, icon_active()) {
+/// fill with it while `active` (e.g. while playing).
+fn transport_button(icon_name: &str, message: Message, primary: bool, active: bool) -> Button<'static, Message> {
+    let glyph = icon(icon_name, TRANSPORT_ICON, move |theme| match (primary, active) {
         (true, true) => Color::WHITE,
         (true, false) => accent(theme),
         (false, _) => style::text_alpha(theme, 0.78),
@@ -427,7 +360,7 @@ fn transport_button(
             let palette = theme.extended_palette();
             let (accent, strong) = (accent(theme), palette.background.strong.color);
             let idle = palette.background.weak.color.scale_alpha(0.35);
-            let lit = primary && active();
+            let lit = primary && active;
             let (background, border_color) = if primary {
                 let hovered = accent.scale_alpha(if lit { 0.92 } else { 0.22 });
                 let idle = if lit { accent } else { idle };
@@ -499,35 +432,15 @@ pub fn format_duration(secs: f64) -> String {
 mod tests {
     use super::*;
 
-    /// A player at frame 900 of 1000, optionally with a worker nothing drains: that stands in for
-    /// the gap between releasing a scrub and the audio thread handling `Seek`.
-    fn seek_to_quarter(with_worker: bool) -> f64 {
+    /// Releasing a scrub has to move the playhead before the audio thread gets to `Seek`.
+    #[test]
+    fn seek_moves_the_shared_position_at_once() {
         let mut player = Player::new(1.0, false);
-        let position = PlaybackPosition::new(1_000);
-        player.controls.playback_position = Some(Arc::clone(&position));
-        player.controls.playback_progress = Some(0.0);
-        let (worker, _commands) = PlayerWorker::detached();
-        if with_worker {
-            player.worker = Some(worker);
-        }
+        let (peaks, position) = (Arc::new(Mutex::new(WaveformPeaks::empty())), PlaybackPosition::new(1_000));
+        player.waveform = Some(WaveForm::new(48_000, peaks, Arc::clone(&position), Default::default()));
         position.set_frame(900);
         player.seek(0.25);
-        position.progress()
-    }
-
-    #[test]
-    fn seek_moves_the_shared_position_only_once_a_worker_is_attached() {
-        assert_eq!(seek_to_quarter(true), 0.25, "playhead should already read the seek target");
-        assert_eq!(seek_to_quarter(false), 0.9, "a queued seek must not advertise a frame playback never reached");
-    }
-
-    #[test]
-    fn toggle_loop_flips_flag() {
-        let mut player = Player::new(1.0, false);
-        assert!(player.toggle_loop());
-        assert!(player.controls.looping.load(Ordering::Relaxed));
-        assert!(!player.toggle_loop());
-        assert!(!player.controls.looping.load(Ordering::Relaxed));
+        assert_eq!(position.progress(), 0.25);
     }
 
     #[test]

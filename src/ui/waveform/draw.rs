@@ -119,7 +119,7 @@ pub(super) fn stroke_playhead(frame: &mut Frame, x: f32, height: f32, theme: &Th
 
 impl WaveForm {
     pub(super) fn draw_waveform_content(&self, frame: &mut Frame, theme: &Theme, view: WaveFormView, size: Size) {
-        let window = view.sample_window(self.sample_count);
+        let window = view.sample_window(self.sample_count());
         if window.1 == 0 || size.width <= 0.0 || size.height <= 0.0 {
             return;
         }

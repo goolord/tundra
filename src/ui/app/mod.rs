@@ -227,7 +227,7 @@ impl App {
             Message::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers;
                 if let Some(waveform) = &mut self.player.waveform {
-                    waveform.set_modifiers(modifiers);
+                    waveform.modifiers = modifiers;
                 }
             }
             Message::FileDropped(path) => {
@@ -305,7 +305,8 @@ impl App {
             Message::StopPlayback => self.player.stop(),
             Message::VolumeChanged(volume) => self.player.set_volume(volume),
             Message::VolumeCommit => prefs::VOLUME.save(self.player.controls.volume),
-            Message::PlaybackTick => self.player.sync_playback_ui(),
+            // The time label reads the shared playhead; the tick only rebuilds the view.
+            Message::PlaybackTick => {}
             Message::Waveform(message) => return self.update_waveform(message),
 
             Message::Window(message) => return self.update_window(message),
@@ -341,18 +342,11 @@ impl App {
                 self.show_error("Audio output unavailable. Check your sound device.".into());
             }
             PlayerEvent::Ended(id) if self.player.is_current_track(id) => self.player.on_ended(),
-            PlayerEvent::Looped(id) if self.player.is_current_track(id) => self.player.set_progress(0.0),
-            PlayerEvent::WaveformPeaksReady(id) if self.player.is_current_track(id) => {
-                self.player.on_waveform_peaks_ready();
-            }
             PlayerEvent::FileFailed(id, err) if self.player.is_current_track(id) => {
                 self.show_error(format!("Couldn't play this file. {err}"));
             }
-            // Events for a track that has since been replaced.
-            PlayerEvent::Ended(_)
-            | PlayerEvent::Looped(_)
-            | PlayerEvent::WaveformPeaksReady(_)
-            | PlayerEvent::FileFailed(..) => {}
+            // New peaks only need the redraw every update brings; the rest are for replaced tracks.
+            PlayerEvent::Ended(_) | PlayerEvent::WaveformPeaksReady | PlayerEvent::FileFailed(..) => {}
         }
     }
 
@@ -361,7 +355,6 @@ impl App {
             WaveformMsg::Scrub(progress) => {
                 self.last_scrub_progress = progress;
                 self.set_scrubbing(Some(progress));
-                self.player.set_progress(progress);
             }
             WaveformMsg::ScrubEnd(progress) => self.finish_scrub(progress),
             WaveformMsg::FileDragStart => {
@@ -372,13 +365,13 @@ impl App {
             WaveformMsg::ViewChanged(view) => self.edit_waveform_view(|current, _| *current = view),
             WaveformMsg::PanStarted => {
                 if let Some(waveform) = &mut self.player.waveform {
-                    waveform.set_pan_active(true);
+                    waveform.pan_active = true;
                 }
             }
             WaveformMsg::PanEnded(view) => {
                 if let Some(waveform) = &mut self.player.waveform {
-                    waveform.set_pan_active(false);
-                    waveform.set_view(view);
+                    waveform.pan_active = false;
+                    waveform.view = view;
                 }
             }
             WaveformMsg::SpringTick => self.edit_waveform_view(|view, _| {
@@ -400,9 +393,8 @@ impl App {
     /// Changes the loaded waveform's zoom and pan; `change` also gets its sample count.
     fn edit_waveform_view(&mut self, change: impl FnOnce(&mut WaveFormView, usize)) {
         if let Some(waveform) = &mut self.player.waveform {
-            let mut view = waveform.view_state();
-            change(&mut view, waveform.sample_count());
-            waveform.set_view(view);
+            let sample_count = waveform.sample_count();
+            change(&mut waveform.view, sample_count);
         }
     }
 
@@ -412,8 +404,8 @@ impl App {
         self.waveform_scrubbing = scrubbing;
         self.player.controls.scrubbing = scrubbing;
         if let Some(waveform) = &mut self.player.waveform {
-            waveform.set_ui_scrubbing(scrubbing);
-            waveform.set_scrub_progress(progress);
+            waveform.ui_scrubbing.set(scrubbing);
+            waveform.scrub_progress = progress;
         }
     }
 

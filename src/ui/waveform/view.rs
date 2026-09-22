@@ -202,31 +202,23 @@ impl WaveFormView {
         (start as u32, self.zoom.to_bits(), (phase * 8.0).round() as u32)
     }
 
-    /// Horizontal and vertical stretch while rubber-banding.
-    pub(super) fn content_scale(&self) -> (f32, f32) {
-        let stretch = self.overscroll.clamp(-MAX_OVERSCROLL, MAX_OVERSCROLL).abs();
-        (1.0 + stretch * 1.35, 1.0 - stretch * 0.12)
-    }
-
-    pub(super) fn content_translate_x(&self, width: f32) -> f32 {
-        // Pan step is `-dx`, so visual shift is opposite the overscroll sign.
-        -self.overscroll.clamp(-MAX_OVERSCROLL, MAX_OVERSCROLL) * width * 0.55
-    }
-
-    /// Scale anchor for overscroll bounce: pin the visible edge so rubber-band
-    /// stretch does not clip the waveform against the plot boundary.
-    pub(super) fn content_transform_origin_x(&self, width: f32, sample_count: usize) -> f32 {
-        if !self.overscroll_active() {
-            return width / 2.0;
-        }
+    /// The rubber-band stretch as drawn: `(x scale, y scale, x translation, x origin)`. The
+    /// origin pins the visible edge so the stretch does not clip the waveform against the plot
+    /// boundary; the playhead and click-to-seek mapping have to use this same transform.
+    pub(super) fn content_transform(&self, width: f32, sample_count: usize) -> (f32, f32, f32, f32) {
+        let overscroll = self.overscroll.clamp(-MAX_OVERSCROLL, MAX_OVERSCROLL);
         let max = max_left(sample_count, self.zoom);
-        if self.offset <= f64::EPSILON && self.overscroll < 0.0 {
+        let origin_x = if !self.overscroll_active() {
+            width / 2.0
+        } else if self.offset <= f64::EPSILON && self.overscroll < 0.0 {
             0.0
         } else if max > f64::EPSILON && self.offset + f64::EPSILON >= max && self.overscroll > 0.0 {
             width
         } else {
             width / 2.0
-        }
+        };
+        // Pan step is `-dx`, so the visual shift is opposite the overscroll sign.
+        (1.0 + overscroll.abs() * 1.35, 1.0 - overscroll.abs() * 0.12, -overscroll * width * 0.55, origin_x)
     }
 
     /// Keyboard zoom (`+`/`-`) and pan (arrows). True if the key did something.

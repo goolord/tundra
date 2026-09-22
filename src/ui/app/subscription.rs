@@ -33,8 +33,7 @@ fn global_event(event: Event, status: event::Status, _window: window::Id) -> Opt
 impl App {
     pub fn subscription(&self) -> Subscription<Message> {
         let waveform = self.player.waveform.as_ref();
-        let springing =
-            waveform.is_some_and(|waveform| waveform.view_state().overscroll_active() && !waveform.pan_active());
+        let springing = waveform.is_some_and(|waveform| waveform.view.overscroll_active() && !waveform.pan_active);
         let (dragging, bulk_running) = (self.native_drag.is_active(), self.bulk_auto_tag.job.is_some());
         let timers = [
             // The waveform animates its own playhead; this only refreshes the time label.
