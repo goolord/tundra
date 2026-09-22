@@ -77,20 +77,15 @@ pub fn resolve_open_path<'a>(path: &Path, known_paths: impl IntoIterator<Item = 
 
 /// Windows paths missing the separator after the drive letter (`F:Samples\...`) fail
 /// to open. Some cached spellings also carry a stray `|` there from older data.
-#[cfg(windows)]
 fn repair_windows_drive_path(path: &Path) -> PathBuf {
     let rendered = path.to_string_lossy();
     match rendered.as_bytes() {
+        _ if cfg!(not(windows)) => path.to_path_buf(),
         [_, b':', b'\\' | b'/', ..] => path.to_path_buf(),
         [_, b':', b'|', ..] => PathBuf::from(format!(r"{}\{}", &rendered[..2], &rendered[3..])),
         [_, b':', _, ..] => PathBuf::from(format!(r"{}\{}", &rendered[..2], &rendered[2..])),
         _ => path.to_path_buf(),
     }
-}
-
-#[cfg(not(windows))]
-fn repair_windows_drive_path(path: &Path) -> PathBuf {
-    path.to_path_buf()
 }
 
 /// True when `path` is `root` or a descendant, ignoring `\\?\` and case.
@@ -192,22 +187,21 @@ mod tests {
     use std::fs;
 
     #[test]
-    fn is_under_matches_whole_components() {
+    fn is_under_matches_whole_components_ignoring_verbatim_prefix_and_case() {
         let root = Path::new("/Samples");
         assert!(is_under(Path::new("/Samples/Snare/01_Snare.flac"), root));
         assert!(is_under(root, root));
         assert!(!is_under(Path::new("/Samples Old/snare.flac"), root));
         assert!(!is_under(Path::new("/Other/snare.flac"), root));
-    }
-
-    #[test]
-    #[cfg(windows)]
-    fn is_under_ignores_verbatim_prefix_and_case() {
-        let root = PathBuf::from(r"\\?\F:\Samples");
-        let child = PathBuf::from(r"F:\Samples\ADM Samples - Copy\Snare\01_Snare.flac");
-        assert!(is_under(&child, &root));
-        assert!(is_under(&root, &root));
-        assert!(!is_under(Path::new(r"F:\Other\snare.flac"), &root));
+        #[cfg(windows)]
+        {
+            let root = Path::new(r"\\?\F:\Samples");
+            assert!(is_under(
+                Path::new(r"f:\samples\ADM Samples - Copy\Snare\01_Snare.flac"),
+                root
+            ));
+            assert!(!is_under(Path::new(r"F:\Other\snare.flac"), root));
+        }
     }
 
     #[test]

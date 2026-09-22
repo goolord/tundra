@@ -3,11 +3,14 @@
 //! Windows and macOS use the [`drag`] crate. Linux/X11 uses an XDND source adapted
 //! from [guth](https://docs.rs/guth) (Apache-2.0 / MIT).
 
-#[cfg(any(windows, target_os = "macos"))]
-use iced::window::raw_window_handle::{HandleError, WindowHandle};
 use iced::window::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use std::path::PathBuf;
+#[cfg(any(windows, target_os = "macos"))]
+use {
+    iced::window::raw_window_handle::{HandleError, WindowHandle},
+    std::path::PathBuf,
+};
 
+/// `drag::start_drag` needs a sized handle, not a trait object.
 #[cfg(any(windows, target_os = "macos"))]
 struct WindowHandleBorrow<'a>(&'a dyn HasWindowHandle);
 
@@ -21,11 +24,10 @@ impl HasWindowHandle for WindowHandleBorrow<'_> {
 #[cfg(any(windows, target_os = "macos"))]
 pub fn start_blocking(window: &dyn HasWindowHandle, path: PathBuf) -> Result<(), String> {
     let item = drag::DragItem::Files(vec![path.clone()]);
-    let preview = drag::Image::File(path);
     drag::start_drag(
         &WindowHandleBorrow(window),
         item,
-        preview,
+        drag::Image::File(path),
         |_, _| {},
         drag::Options::default(),
     )
@@ -44,8 +46,7 @@ pub fn x11_window_id(window: &dyn HasWindowHandle) -> Option<u32> {
 
 #[cfg(all(unix, not(target_os = "macos")))]
 mod x11 {
-    use super::*;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
     use x11rb::connection::Connection;
     use x11rb::protocol::Event;
@@ -56,8 +57,7 @@ mod x11 {
     use x11rb::rust_connection::RustConnection;
     use x11rb::wrapper::ConnectionExt as _;
 
-    const DRAG_PATH_LIMIT: usize = 1_024;
-    const URI_LIST_BYTES_LIMIT: usize = 128 * 1024;
+    const REPLACE: PropMode = PropMode::REPLACE;
     const EVENT_LIMIT: usize = 64;
     const TIMESTAMP_POLL_LIMIT: usize = 256;
     const WINDOW_HIERARCHY_LIMIT: usize = 64;
@@ -86,9 +86,10 @@ mod x11 {
         }
     }
 
+    /// XDND drag source, driven by polling from the UI's ticks.
     #[derive(Default)]
     pub struct X11Drag {
-        source: Option<X11DragSource>,
+        source: Option<Source>,
     }
 
     impl X11Drag {
@@ -97,68 +98,74 @@ mod x11 {
         }
 
         pub fn init_with_window_id(&mut self, app_window: u32) -> Result<(), String> {
-            if self.source.is_some() {
-                return Ok(());
+            if self.source.is_none() {
+                self.source = Some(Source::new(app_window).map_err(|X11Error(message)| message)?);
             }
-            self.source = Some(X11DragSource::new(app_window).map_err(|X11Error(message)| message)?);
             Ok(())
         }
 
         pub fn is_active(&self) -> bool {
-            self.source.as_ref().is_some_and(X11DragSource::is_active)
+            self.source.as_ref().is_some_and(|source| source.drag.is_some())
         }
 
         pub fn start(&mut self, path: PathBuf) -> Result<(), String> {
-            let Some(source) = self.source.as_mut() else {
-                return Err("X11 drag is unavailable on this display".to_string());
-            };
-            source.start(&[path]).map_err(|X11Error(message)| message)
+            let source = self.source.as_mut().ok_or("X11 drag is unavailable on this display")?;
+            source.start(&path).map_err(|X11Error(message)| message)
         }
 
         pub fn update(&mut self, pointer_down: bool, pointer_released: bool) {
             if let Some(source) = self.source.as_mut() {
-                source.update(pointer_down, pointer_released);
+                source.update(pointer_released || !pointer_down);
             }
         }
     }
 
-    struct X11DragSource {
+    struct Source {
         connection: RustConnection,
         root: Window,
         app_window: Window,
+        /// Small override-redirect window that follows the pointer and owns the selection.
         source_window: Window,
         atoms: Atoms,
         drag: Option<ActiveDrag>,
-        failed_until_release: bool,
     }
 
+    #[derive(Default)]
     struct ActiveDrag {
         uri_list: Vec<u8>,
+        timestamp: u32,
         target: Option<DragTarget>,
         accepted: bool,
+        /// An `XdndPosition` is waiting for its `XdndStatus`.
         position_pending: bool,
+        /// The pointer was released; drop once the pending status arrives.
         release_pending: bool,
         dropped: bool,
         deadline: Option<Instant>,
-        timestamp: u32,
-        owns_selection: bool,
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     struct DragTarget {
         window: Window,
+        /// `window`, or the proxy it names in `XdndProxy`.
         recipient: Window,
         version: u32,
     }
 
-    impl X11DragSource {
-        /// Opens a dedicated X11 connection for XDND. Iced owns the window connection;
-        /// a separate client is standard for drag sources and must target the same display.
+    impl Source {
+        /// Opens a dedicated connection: iced owns the window's, and a separate
+        /// client on the same display is standard for drag sources.
         fn new(app_window: Window) -> Result<Self, X11Error> {
             let (connection, screen_number) = x11rb::connect(None)?;
             let screen = &connection.setup().roots[screen_number];
             let root = screen.root;
             let source_window = connection.generate_id()?;
+            let aux = CreateWindowAux::new()
+                .override_redirect(1)
+                .background_pixel(screen.white_pixel)
+                .border_pixel(screen.black_pixel)
+                .event_mask(EventMask::PROPERTY_CHANGE);
+            let class = WindowClass::INPUT_OUTPUT;
             connection
                 .create_window(
                     screen.root_depth,
@@ -169,286 +176,185 @@ mod x11 {
                     42,
                     28,
                     1,
-                    WindowClass::INPUT_OUTPUT,
+                    class,
                     screen.root_visual,
-                    &CreateWindowAux::new()
-                        .override_redirect(1)
-                        .background_pixel(screen.white_pixel)
-                        .border_pixel(screen.black_pixel)
-                        .event_mask(EventMask::PROPERTY_CHANGE),
+                    &aux,
                 )?
                 .check()?;
             let atoms = Atoms::new(&connection)?.reply()?;
-            connection
-                .change_property32(
-                    PropMode::REPLACE,
-                    source_window,
-                    atoms._NET_WM_WINDOW_TYPE,
-                    AtomEnum::ATOM,
-                    &[atoms._NET_WM_WINDOW_TYPE_DND],
-                )?
-                .check()?;
-            connection.flush()?;
-            Ok(Self {
+            let source = Self {
                 connection,
                 root,
                 app_window,
                 source_window,
                 atoms,
                 drag: None,
-                failed_until_release: false,
-            })
+            };
+            let (window_type, dnd) = (source.atoms._NET_WM_WINDOW_TYPE, source.atoms._NET_WM_WINDOW_TYPE_DND);
+            source.set_atoms(window_type, &[dnd])?;
+            Ok(source)
         }
 
-        fn is_active(&self) -> bool {
-            self.drag.is_some()
-        }
-
-        fn update(&mut self, pointer_down: bool, pointer_released: bool) {
-            if self.poll_events().is_err() {
-                self.reset(true);
-                return;
-            }
-            if self
-                .drag
-                .as_ref()
-                .is_some_and(|drag| drag.deadline.is_some_and(|time| time <= Instant::now()))
-            {
-                self.reset(true);
-                return;
-            }
-            if self.failed_until_release {
-                if !pointer_down {
-                    self.failed_until_release = false;
-                }
-                return;
-            }
-            if self.drag.as_ref().is_some_and(|drag| drag.release_pending) {
-                self.advance_release();
-                return;
-            }
-            if self.drag.as_ref().is_some_and(|drag| drag.dropped) {
-                return;
-            }
-            if self.drag.is_some() && (pointer_released || !pointer_down) {
-                if let Some(drag) = self.drag.as_mut() {
-                    drag.release_pending = true;
-                    drag.deadline = Some(Instant::now() + STATUS_RESPONSE_TIMEOUT);
-                }
-                self.advance_release();
-                return;
-            }
-            if self.drag.is_none() {
-                return;
-            }
-            if self.update_target().is_err() {
-                self.cancel();
-            }
-        }
-
-        fn start(&mut self, paths: &[PathBuf]) -> Result<(), X11Error> {
-            let uri_list = encode_uri_list(paths)?;
+        fn set_atoms(&self, property: Atom, values: &[Atom]) -> Result<(), X11Error> {
+            let window = self.source_window;
             self.connection
-                .change_property32(
-                    PropMode::REPLACE,
-                    self.source_window,
-                    self.atoms.XdndTypeList,
-                    AtomEnum::ATOM,
-                    &[self.atoms.TextUriList],
-                )?
+                .change_property32(REPLACE, window, property, AtomEnum::ATOM, values)?
                 .check()?;
-            self.connection
-                .change_property32(
-                    PropMode::REPLACE,
-                    self.source_window,
-                    self.atoms.XdndActionList,
-                    AtomEnum::ATOM,
-                    &[self.atoms.XdndActionCopy],
-                )?
-                .check()?;
+            Ok(self.connection.flush()?)
+        }
+
+        fn update(&mut self, released: bool) {
+            let expired = |drag: &ActiveDrag| drag.deadline.is_some_and(|time| time <= Instant::now());
+            if self.poll_events().is_err() || self.drag.as_ref().is_some_and(expired) {
+                return self.reset(true);
+            }
+            let Some(drag) = self.drag.as_mut().filter(|drag| !drag.dropped) else {
+                return;
+            };
+            if released && !drag.release_pending {
+                drag.release_pending = true;
+                drag.deadline = Some(Instant::now() + STATUS_RESPONSE_TIMEOUT);
+            }
+            let (release_pending, position_pending) = (drag.release_pending, drag.position_pending);
+            if !release_pending {
+                if self.update_target().is_err() {
+                    self.cancel();
+                }
+            } else if !position_pending {
+                self.drop_or_cancel();
+            }
+        }
+
+        fn start(&mut self, path: &Path) -> Result<(), X11Error> {
+            let uri_list = file_uri(path)?.into_bytes();
+            self.set_atoms(self.atoms.XdndTypeList, &[self.atoms.TextUriList])?;
+            self.set_atoms(self.atoms.XdndActionList, &[self.atoms.XdndActionCopy])?;
             self.connection
                 .set_selection_owner(self.source_window, self.atoms.XdndSelection, x11rb::CURRENT_TIME)?
                 .check()?;
             let timestamp = self.server_timestamp()?;
-            let owner = self
-                .connection
-                .get_selection_owner(self.atoms.XdndSelection)?
-                .reply()?
-                .owner;
-            if owner != self.source_window {
+            let owner = self.connection.get_selection_owner(self.atoms.XdndSelection)?;
+            if owner.reply()?.owner != self.source_window {
                 return Err("could not own the XDND selection".into());
             }
             self.drag = Some(ActiveDrag {
                 uri_list,
-                target: None,
-                accepted: false,
-                position_pending: false,
-                release_pending: false,
-                dropped: false,
-                deadline: None,
                 timestamp,
-                owns_selection: true,
+                ..ActiveDrag::default()
             });
-            self.connection.flush()?;
             let pointer = self.connection.query_pointer(self.root)?.reply()?;
             self.move_icon(pointer.root_x, pointer.root_y)?;
             self.connection.map_window(self.source_window)?.check()?;
-            self.connection.flush()?;
-            Ok(())
+            Ok(self.connection.flush()?)
         }
 
+        /// The server's current time, read from the `PropertyNotify` of a dummy write.
         fn server_timestamp(&self) -> Result<u32, X11Error> {
+            let (window, atom) = (self.source_window, self.atoms.TUNDRA_DRAG_TIMESTAMP);
             self.connection
-                .change_property8(
-                    PropMode::REPLACE,
-                    self.source_window,
-                    self.atoms.TUNDRA_DRAG_TIMESTAMP,
-                    AtomEnum::INTEGER,
-                    &[0],
-                )?
+                .change_property8(REPLACE, window, atom, AtomEnum::INTEGER, &[0])?
                 .check()?;
             self.connection.flush()?;
             for _ in 0..TIMESTAMP_POLL_LIMIT {
-                let Some(event) = self.connection.poll_for_event()? else {
-                    std::thread::sleep(Duration::from_millis(1));
-                    continue;
-                };
-                if let Event::PropertyNotify(event) = event
-                    && event.window == self.source_window
-                    && event.atom == self.atoms.TUNDRA_DRAG_TIMESTAMP
-                {
-                    return Ok(event.time);
+                match self.connection.poll_for_event()? {
+                    Some(Event::PropertyNotify(event)) if event.window == window && event.atom == atom => {
+                        return Ok(event.time);
+                    }
+                    Some(_) => {}
+                    None => std::thread::sleep(Duration::from_millis(1)),
                 }
             }
             Err("timed out waiting for X11 server timestamp".into())
         }
 
-        fn pack_xdnd_coords(x: i16, y: i16) -> u32 {
-            let x = i32::from(x) as u32;
-            let y = i32::from(y) as u32;
-            ((x & 0xFFFF) << 16) | (y & 0xFFFF)
-        }
-
-        fn update_target(&mut self) -> Result<bool, X11Error> {
+        fn update_target(&mut self) -> Result<(), X11Error> {
             let pointer = self.connection.query_pointer(self.root)?.reply()?;
             self.move_icon(pointer.root_x, pointer.root_y)?;
             let target = self.find_target(pointer.child)?;
-            let previous = self.drag.as_ref().and_then(|drag| drag.target);
-            if target != previous {
-                if let Some(previous) = previous {
-                    self.send_target(previous, self.atoms.XdndLeave, [self.source_window, 0, 0, 0, 0])?;
+            let Self {
+                connection,
+                atoms,
+                source_window: me,
+                drag: Some(drag),
+                ..
+            } = self
+            else {
+                return Ok(());
+            };
+            if target != drag.target {
+                if let Some(previous) = drag.target {
+                    send(connection, previous, atoms.XdndLeave, [*me, 0, 0, 0, 0])?;
                 }
                 if let Some(target) = target {
-                    self.send_target(
-                        target,
-                        self.atoms.XdndEnter,
-                        [
-                            self.source_window,
-                            target.version.min(5) << 24,
-                            self.atoms.TextUriList,
-                            0,
-                            0,
-                        ],
-                    )?;
+                    let data = [*me, target.version.min(5) << 24, atoms.TextUriList, 0, 0];
+                    send(connection, target, atoms.XdndEnter, data)?;
                 }
-                if let Some(drag) = self.drag.as_mut() {
-                    drag.target = target;
-                    drag.accepted = false;
-                    drag.position_pending = false;
-                }
+                drag.target = target;
+                drag.accepted = false;
+                drag.position_pending = false;
             }
-            let send_position = target.is_some() && self.drag.as_ref().is_some_and(|drag| !drag.position_pending);
-            if let Some(target) = target.filter(|_| send_position) {
-                let coordinates = Self::pack_xdnd_coords(pointer.root_x, pointer.root_y);
-                let timestamp = self
-                    .drag
-                    .as_ref()
-                    .map(|drag| drag.timestamp)
-                    .unwrap_or(x11rb::CURRENT_TIME);
-                self.send_target(
-                    target,
-                    self.atoms.XdndPosition,
-                    [self.source_window, 0, coordinates, timestamp, self.atoms.XdndActionCopy],
-                )?;
-                if let Some(drag) = self.drag.as_mut() {
-                    drag.accepted = false;
-                    drag.position_pending = true;
-                }
-                return Ok(true);
+            if let Some(target) = target
+                && !drag.position_pending
+            {
+                let coordinates = (u32::from(pointer.root_x as u16) << 16) | u32::from(pointer.root_y as u16);
+                let data = [*me, 0, coordinates, drag.timestamp, atoms.XdndActionCopy];
+                send(connection, target, atoms.XdndPosition, data)?;
+                drag.accepted = false;
+                drag.position_pending = true;
             }
-            Ok(false)
+            Ok(())
         }
 
         fn move_icon(&self, root_x: i16, root_y: i16) -> Result<(), X11Error> {
-            self.connection.configure_window(
-                self.source_window,
-                &ConfigureWindowAux::new()
-                    .x(i32::from(root_x) + 16)
-                    .y(i32::from(root_y) + 16)
-                    .stack_mode(StackMode::ABOVE),
-            )?;
+            let aux = ConfigureWindowAux::new()
+                .x(i32::from(root_x) + 16)
+                .y(i32::from(root_y) + 16)
+                .stack_mode(StackMode::ABOVE);
+            self.connection.configure_window(self.source_window, &aux)?;
             Ok(self.connection.flush()?)
         }
 
-        fn advance_release(&mut self) {
-            let Some(drag) = self.drag.as_ref() else {
+        fn drop_or_cancel(&mut self) {
+            let Some(drag) = self.drag.as_mut() else {
                 return;
             };
-            if drag.position_pending {
-                return;
-            }
-            if !self.initiate_drop() {
-                self.failed_until_release = true;
-            }
-        }
-
-        fn initiate_drop(&mut self) -> bool {
-            let Some(drag) = self.drag.as_ref() else {
-                return false;
-            };
-            let target = drag.target;
-            let accepted = drag.accepted;
-            let timestamp = drag.timestamp;
-            if let Some(target) = target.filter(|_| accepted)
-                && self
-                    .send_target(target, self.atoms.XdndDrop, [self.source_window, 0, timestamp, 0, 0])
-                    .is_ok()
-            {
-                if let Some(drag) = self.drag.as_mut() {
-                    drag.release_pending = false;
+            if let Some(target) = drag.target.filter(|_| drag.accepted) {
+                let data = [self.source_window, 0, drag.timestamp, 0, 0];
+                if send(&self.connection, target, self.atoms.XdndDrop, data).is_ok() {
                     drag.dropped = true;
                     drag.deadline = Some(Instant::now() + DROP_RESPONSE_TIMEOUT);
+                    return;
                 }
-                return true;
             }
             self.cancel();
-            false
         }
 
         fn cancel(&mut self) {
-            if let Some(target) = self
-                .drag
-                .as_ref()
-                .filter(|drag| !drag.dropped)
-                .and_then(|drag| drag.target)
-            {
-                let _ = self.send_target(target, self.atoms.XdndLeave, [self.source_window, 0, 0, 0, 0]);
+            let drag = self.drag.as_ref().filter(|drag| !drag.dropped);
+            if let Some(target) = drag.and_then(|drag| drag.target) {
+                let _ = send(
+                    &self.connection,
+                    target,
+                    self.atoms.XdndLeave,
+                    [self.source_window, 0, 0, 0, 0],
+                );
             }
             self.reset(true);
         }
 
         fn reset(&mut self, release_selection: bool) {
-            if release_selection && let Some(drag) = self.drag.as_ref().filter(|drag| drag.owns_selection) {
+            if release_selection && let Some(drag) = &self.drag {
                 let _ = self
                     .connection
                     .set_selection_owner(x11rb::NONE, self.atoms.XdndSelection, drag.timestamp);
-                let _ = self.connection.flush();
             }
             let _ = self.connection.unmap_window(self.source_window);
             let _ = self.connection.flush();
             self.drag = None;
         }
 
+        /// The innermost XDND-aware window (or its proxy) under the pointer,
+        /// unless that is Tundra itself.
         fn find_target(&self, child: Window) -> Result<Option<DragTarget>, X11Error> {
             let mut current = if child == x11rb::NONE { self.root } else { child };
             for _ in 0..WINDOW_HIERARCHY_LIMIT {
@@ -473,9 +379,15 @@ mod x11 {
                 }
                 current = tree.parent;
             }
+            let proxy_of = |window| self.property32(window, self.atoms.XdndProxy, AtomEnum::WINDOW);
             for window in ancestors {
-                let recipient = self.xdnd_proxy(window)?.unwrap_or(window);
-                if let Some(version) = self.xdnd_version(recipient)? {
+                // A proxy counts only when it names itself as its own proxy.
+                let recipient = match proxy_of(window)? {
+                    Some(proxy) if proxy_of(proxy)? == Some(proxy) => proxy,
+                    _ => window,
+                };
+                let version = self.property32(recipient, self.atoms.XdndAware, AtomEnum::ATOM)?;
+                if let Some(version) = version.filter(|version| *version >= 3) {
                     return Ok(Some(DragTarget {
                         window,
                         recipient,
@@ -486,41 +398,12 @@ mod x11 {
             Ok(None)
         }
 
-        fn xdnd_version(&self, window: Window) -> Result<Option<u32>, X11Error> {
-            let property = self
-                .connection
-                .get_property(false, window, self.atoms.XdndAware, AtomEnum::ATOM, 0, 1)?
-                .reply()?;
-            if property.type_ != u32::from(AtomEnum::ATOM) || property.format != 32 {
-                return Ok(None);
-            }
-            Ok(property
-                .value32()
-                .and_then(|mut values| values.next())
-                .filter(|version| *version >= 3))
-        }
-
-        fn xdnd_proxy(&self, window: Window) -> Result<Option<Window>, X11Error> {
-            let proxy = self
-                .connection
-                .get_property(false, window, self.atoms.XdndProxy, AtomEnum::WINDOW, 0, 1)?
-                .reply()?;
-            if proxy.type_ != u32::from(AtomEnum::WINDOW) || proxy.format != 32 {
-                return Ok(None);
-            }
-            let Some(proxy) = proxy.value32().and_then(|mut values| values.next()) else {
-                return Ok(None);
-            };
-            let confirmation = self
-                .connection
-                .get_property(false, proxy, self.atoms.XdndProxy, AtomEnum::WINDOW, 0, 1)?
-                .reply()?;
-            Ok(
-                (confirmation.type_ == u32::from(AtomEnum::WINDOW) && confirmation.format == 32)
-                    .then(|| confirmation.value32().and_then(|mut values| values.next()))
-                    .flatten()
-                    .filter(|confirmed| *confirmed == proxy),
-            )
+        /// The first value of a 32-bit property of type `kind`.
+        fn property32(&self, window: Window, property: Atom, kind: AtomEnum) -> Result<Option<u32>, X11Error> {
+            let reply = self.connection.get_property(false, window, property, kind, 0, 1)?;
+            let reply = reply.reply()?;
+            let matches = reply.type_ == u32::from(kind) && reply.format == 32;
+            Ok(reply.value32().filter(|_| matches).and_then(|mut values| values.next()))
         }
 
         fn poll_events(&mut self) -> Result<(), X11Error> {
@@ -529,13 +412,12 @@ mod x11 {
                     break;
                 };
                 match event {
-                    Event::ClientMessage(event)
-                        if event.type_ == self.atoms.XdndStatus
-                            && event.format == 32
-                            && event.window == self.source_window =>
-                    {
+                    Event::ClientMessage(event) if event.format == 32 && event.window == self.source_window => {
                         let data = event.data.as_data32();
-                        if let Some(drag) = self.drag.as_mut()
+                        if event.type_ == self.atoms.XdndFinished {
+                            self.reset(true);
+                        } else if event.type_ == self.atoms.XdndStatus
+                            && let Some(drag) = self.drag.as_mut()
                             && drag.position_pending
                             && drag.target.is_some_and(|target| target.window == data[0])
                         {
@@ -543,17 +425,8 @@ mod x11 {
                             drag.accepted = data[1] & 1 != 0 && data[4] == self.atoms.XdndActionCopy;
                         }
                     }
-                    Event::ClientMessage(event)
-                        if event.type_ == self.atoms.XdndFinished
-                            && event.format == 32
-                            && event.window == self.source_window =>
-                    {
-                        self.reset(true);
-                    }
                     Event::SelectionRequest(event) => self.answer_selection_request(event)?,
-                    Event::SelectionClear(event)
-                        if event.selection == self.atoms.XdndSelection && self.drag.is_some() =>
-                    {
+                    Event::SelectionClear(event) if event.selection == self.atoms.XdndSelection => {
                         self.reset(false);
                     }
                     _ => {}
@@ -562,6 +435,8 @@ mod x11 {
             Ok(())
         }
 
+        /// Hands the URI list to the drop target, only after the drop and only
+        /// for a request no older than the drag.
         fn answer_selection_request(&self, request: SelectionRequestEvent) -> Result<(), X11Error> {
             if request.owner != self.source_window || request.selection != self.atoms.XdndSelection {
                 return Ok(());
@@ -571,34 +446,33 @@ mod x11 {
             } else {
                 request.property
             };
-            let active = self.drag.as_ref().filter(|drag| {
-                drag.dropped && drag.owns_selection && timestamp_not_older(request.time, drag.timestamp)
-            });
-            let written = if request.target == self.atoms.TextUriList {
-                active.is_some_and(|drag| {
-                    self.connection
-                        .change_property8(
-                            PropMode::REPLACE,
-                            request.requestor,
+            let not_older = |drag: &&ActiveDrag| {
+                request.time == x11rb::CURRENT_TIME || request.time.wrapping_sub(drag.timestamp) < (1 << 31)
+            };
+            let written = self
+                .drag
+                .as_ref()
+                .filter(|drag| drag.dropped)
+                .filter(not_older)
+                .is_some_and(|drag| {
+                    let (requestor, atoms) = (request.requestor, &self.atoms);
+                    let cookie = if request.target == atoms.TextUriList {
+                        self.connection.change_property8(
+                            REPLACE,
+                            requestor,
                             property,
-                            self.atoms.TextUriList,
+                            atoms.TextUriList,
                             &drag.uri_list,
                         )
-                        .is_ok_and(|cookie| cookie.check().is_ok())
-                })
-            } else if request.target == self.atoms.TARGETS && active.is_some() {
-                self.connection
-                    .change_property32(
-                        PropMode::REPLACE,
-                        request.requestor,
-                        property,
-                        AtomEnum::ATOM,
-                        &[self.atoms.TextUriList, self.atoms.TARGETS],
-                    )
-                    .is_ok_and(|cookie| cookie.check().is_ok())
-            } else {
-                false
-            };
+                    } else if request.target == atoms.TARGETS {
+                        let targets = [atoms.TextUriList, atoms.TARGETS];
+                        self.connection
+                            .change_property32(REPLACE, requestor, property, AtomEnum::ATOM, &targets)
+                    } else {
+                        return false;
+                    };
+                    cookie.is_ok_and(|cookie| cookie.check().is_ok())
+                });
             let notify = SelectionNotifyEvent {
                 response_type: SELECTION_NOTIFY_EVENT,
                 sequence: 0,
@@ -613,17 +487,9 @@ mod x11 {
                 .check()?;
             Ok(self.connection.flush()?)
         }
-
-        fn send_target(&self, target: DragTarget, message_type: Atom, data: [u32; 5]) -> Result<(), X11Error> {
-            let event = ClientMessageEvent::new(32, target.window, message_type, data);
-            self.connection
-                .send_event(false, target.recipient, EventMask::NO_EVENT, event)?
-                .check()?;
-            Ok(self.connection.flush()?)
-        }
     }
 
-    impl Drop for X11DragSource {
+    impl Drop for Source {
         fn drop(&mut self) {
             self.cancel();
             let _ = self.connection.destroy_window(self.source_window);
@@ -631,45 +497,30 @@ mod x11 {
         }
     }
 
-    fn encode_uri_list(paths: &[PathBuf]) -> Result<Vec<u8>, X11Error> {
-        if paths.is_empty() || paths.len() > DRAG_PATH_LIMIT {
-            return Err(format!("drag must contain between 1 and {DRAG_PATH_LIMIT} paths").into());
-        }
-        let mut output = Vec::new();
-        for path in paths {
-            let uri = file_uri(path)?;
-            if output.len().saturating_add(uri.len()).saturating_add(2) > URI_LIST_BYTES_LIMIT {
-                return Err("drag URI list exceeds the supported size".into());
-            }
-            output.extend_from_slice(uri.as_bytes());
-            output.extend_from_slice(b"\r\n");
-        }
-        Ok(output)
+    fn send(connection: &RustConnection, target: DragTarget, kind: Atom, data: [u32; 5]) -> Result<(), X11Error> {
+        let event = ClientMessageEvent::new(32, target.window, kind, data);
+        connection
+            .send_event(false, target.recipient, EventMask::NO_EVENT, event)?
+            .check()?;
+        Ok(connection.flush()?)
     }
 
-    fn timestamp_not_older(candidate: u32, reference: u32) -> bool {
-        candidate == x11rb::CURRENT_TIME || candidate.wrapping_sub(reference) < (1_u32 << 31)
-    }
-
+    /// `file://` URI with every byte outside the unreserved set percent-encoded (RFC 8089),
+    /// as a `text/uri-list` line.
     fn file_uri(path: &Path) -> Result<String, X11Error> {
+        use std::os::unix::ffi::OsStrExt;
         if !path.is_absolute() {
             return Err("drag path must be absolute".into());
         }
-        // Percent-encode non-unreserved bytes for file:// URIs (RFC 8089).
-        use std::os::unix::ffi::OsStrExt;
-        let bytes = path.as_os_str().as_bytes();
         let mut uri = String::from("file://");
-        for byte in bytes {
-            if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'/') {
-                uri.push(char::from(*byte));
+        for &byte in path.as_os_str().as_bytes() {
+            if byte.is_ascii_alphanumeric() || b"-._~/".contains(&byte) {
+                uri.push(char::from(byte));
             } else {
-                const HEX: &[u8; 16] = b"0123456789ABCDEF";
-                uri.push('%');
-                uri.push(char::from(HEX[usize::from(byte >> 4)]));
-                uri.push(char::from(HEX[usize::from(byte & 0x0f)]));
+                uri.push_str(&format!("%{byte:02X}"));
             }
         }
-        Ok(uri)
+        Ok(uri + "\r\n")
     }
 
     /// Why an X11 request failed. Any displayable error converts with `?`;
@@ -684,11 +535,9 @@ mod x11 {
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
-pub use x11::X11Drag;
+pub type NativeDrag = x11::X11Drag;
 
-#[cfg(all(unix, not(target_os = "macos")))]
-pub type NativeDrag = X11Drag;
-
+/// Windows and macOS drags block in `start_blocking`, so there is nothing to poll.
 #[cfg(not(all(unix, not(target_os = "macos"))))]
 #[derive(Default)]
 pub struct NativeDrag;

@@ -2,32 +2,27 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::safe_write::REPLACE_OLD_SUFFIX;
 use crate::safe_write::sidecar;
 
 /// PID guaranteed dead on all platforms (`u32::MAX - 1`).
 pub const DEAD_PID: u32 = 4294967294;
 
-/// The temp dir as the OS reports it may be a symlink (`/var` on macOS) or an
-/// 8.3 short name (`RUNNER~1` on Windows CI). The app canonicalizes library
-/// roots, so fixtures standing in for a library must use the same spelling.
-pub fn canonical_temp_path(dir: PathBuf) -> PathBuf {
-    crate::path_util::canonical_path(&dir).expect("canonical scratch dir")
-}
-
 pub struct ScratchDir(PathBuf);
 
 impl ScratchDir {
     pub fn new(label: &str) -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let id = COUNTER.fetch_add(1, Ordering::Relaxed);
         // The 8-digit `_<id>` part marks the folder as throwaway to the path
         // hints, so tests that tag files never take it for an artist name.
         let dir = std::env::temp_dir().join(format!("tundra-test-{label}_{}_{id:08}", std::process::id()));
         fs::create_dir_all(&dir).expect("scratch dir");
-        Self(canonical_temp_path(dir))
+        // The temp dir as the OS reports it may be a symlink (`/var` on macOS) or
+        // an 8.3 short name (`RUNNER~1` on Windows CI). The app canonicalizes
+        // library roots, so fixtures standing in for one must match.
+        Self(crate::path_util::canonical_path(&dir).expect("canonical scratch dir"))
     }
 
     pub fn path(&self) -> &Path {
@@ -48,53 +43,38 @@ impl Drop for ScratchDir {
 /// Extensions of the `tests/assets/tone.*` fixtures, one per supported container.
 pub const ASSET_FORMATS: [&str; 5] = ["wav", "flac", "mp3", "ogg", "aiff"];
 
-/// `tests/assets/tone.<ext>`, a short real recording in each format.
-pub fn asset(ext: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/assets")
-        .join(format!("tone.{ext}"))
-}
-
-/// Copies `tone.<ext>` to `dir/<stem>.<ext>` so a test can modify it.
+/// Copies `tests/assets/tone.<ext>` (a short real recording) to `dir/<stem>.<ext>` so a test can modify it.
 pub fn copy_asset(dir: &Path, stem: &str, ext: &str) -> PathBuf {
+    let asset = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("tests/assets/tone.{ext}"));
     let target = dir.join(format!("{stem}.{ext}"));
-    fs::copy(asset(ext), &target).unwrap_or_else(|err| panic!("copy {ext} fixture: {err}"));
+    fs::copy(asset, &target).unwrap_or_else(|err| panic!("copy {ext} fixture: {err}"));
     target
 }
 
 pub fn count_tundra_sidecars(dir: &Path) -> usize {
-    fs::read_dir(dir)
-        .map(|entries| {
-            entries
-                .flatten()
-                .filter(|entry| entry.file_name().to_string_lossy().contains(".tundra-"))
-                .count()
-        })
-        .unwrap_or(0)
+    fs::read_dir(dir).map_or(0, |entries| {
+        entries
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".tundra-"))
+            .count()
+    })
 }
 
+/// 256 silent frames of 16-bit mono 44.1 kHz PCM.
 pub fn minimal_wav_bytes() -> Vec<u8> {
-    let mut fmt = Vec::new();
-    fmt.extend_from_slice(&1u16.to_le_bytes());
-    fmt.extend_from_slice(&1u16.to_le_bytes());
-    fmt.extend_from_slice(&44100u32.to_le_bytes());
-    fmt.extend_from_slice(&88200u32.to_le_bytes());
-    fmt.extend_from_slice(&2u16.to_le_bytes());
-    fmt.extend_from_slice(&16u16.to_le_bytes());
-    let data = vec![0_u8; 512];
-    let chunk = |id: [u8; 4], body: &[u8]| {
-        let mut out = id.to_vec();
-        out.extend_from_slice(&(body.len() as u32).to_le_bytes());
-        out.extend_from_slice(body);
-        out
-    };
-    let mut riff = b"RIFF".to_vec();
-    let mut body = b"WAVE".to_vec();
-    body.extend_from_slice(&chunk(*b"fmt ", &fmt));
-    body.extend_from_slice(&chunk(*b"data", &data));
-    riff.extend_from_slice(&(body.len() as u32).to_le_bytes());
-    riff.extend_from_slice(&body);
-    riff
+    let mut wav = b"RIFF".to_vec();
+    wav.extend(548u32.to_le_bytes());
+    wav.extend(b"WAVEfmt ");
+    // fmt size; PCM, mono; rate; byte rate; block align 2, 16 bits.
+    wav.extend(
+        [16u32, 0x0001_0001, 44_100, 88_200, 0x0010_0002]
+            .iter()
+            .flat_map(|word| word.to_le_bytes()),
+    );
+    wav.extend(b"data");
+    wav.extend(512u32.to_le_bytes());
+    wav.resize(wav.len() + 512, 0);
+    wav
 }
 
 pub fn write_minimal_wav(path: &Path) {
@@ -109,10 +89,9 @@ pub fn write_riff_info(path: &Path, fields: &[(&str, &str)]) {
     use lofty::file::AudioFile;
     use lofty::iff::wav::{RiffInfoList, WavFile};
 
-    let mut wav = {
-        let mut file = fs::File::open(path).expect("open wav");
-        WavFile::read_from(&mut file, ParseOptions::new()).expect("parse wav")
-    };
+    let mut file = fs::File::open(path).expect("open wav");
+    let mut wav = WavFile::read_from(&mut file, ParseOptions::new()).expect("parse wav");
+    drop(file);
     let mut info = RiffInfoList::new();
     for (key, value) in fields {
         info.insert(key.to_string(), value.to_string());
@@ -126,46 +105,34 @@ pub fn dead_pid_tag_tmp(dest: &Path) -> PathBuf {
     sidecar(dest, &format!(".tundra-tag-{DEAD_PID}-1.tmp"))
 }
 
-/// Simulates a crash that left `.tundra-replace-old` and removed the dest file.
-pub fn restore_dest_from_crash_aside(dir: &Path, dest: &Path, aside_bytes: &[u8]) {
-    fs::write(sidecar(dest, REPLACE_OLD_SUFFIX), aside_bytes).expect("crash aside");
-    let _ = fs::remove_file(dest);
-    crate::safe_write::reclaim_write_sidecars(dir);
-}
-
-/// Holds `dest` open so same-directory atomic replace fails cross-platform.
-#[must_use]
-pub struct DestReplaceLock(#[allow(dead_code)] std::fs::File);
-
-pub fn lock_dest_against_replace(dest: &Path) -> DestReplaceLock {
-    use std::fs::OpenOptions;
-    let mut opts = OpenOptions::new();
-    opts.read(true).write(true);
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        // Allow staging reads; block delete/replace while this handle lives.
-        opts.share_mode(1);
-    }
-    DestReplaceLock(opts.open(dest).expect("lock dest"))
-}
-
-#[allow(unused_variables)]
+/// Runs `f` while an atomic replace of `dest` in `dir` cannot succeed: the
+/// directory is read-only on Unix, and `dest` is held open without delete
+/// sharing on Windows.
 pub fn with_replace_blocked<R>(dir: &Path, dest: &Path, f: impl FnOnce() -> R) -> R {
     #[cfg(unix)]
     {
-        let mut perms = fs::metadata(dir).expect("meta").permissions();
-        perms.set_readonly(true);
-        fs::set_permissions(dir, perms).expect("lock parent");
+        let _ = dest;
+        let set_readonly = |readonly| {
+            let mut perms = fs::metadata(dir).expect("meta").permissions();
+            perms.set_readonly(readonly);
+            fs::set_permissions(dir, perms)
+        };
+        set_readonly(true).expect("lock parent");
         let result = f();
-        let mut perms = fs::metadata(dir).expect("meta").permissions();
-        perms.set_readonly(false);
-        let _ = fs::set_permissions(dir, perms);
+        let _ = set_readonly(false);
         result
     }
     #[cfg(windows)]
     {
-        let _lock = lock_dest_against_replace(dest);
+        use std::os::windows::fs::OpenOptionsExt;
+        let _ = dir;
+        // FILE_SHARE_READ: staging may read it; deleting or replacing it fails.
+        let _lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .share_mode(1)
+            .open(dest)
+            .expect("lock dest");
         f()
     }
 }

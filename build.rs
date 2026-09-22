@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// Generates `embedded_resources.rs`, which bakes every `resources/*.svg` icon
 /// into the binary. Models and scripts are not copied anywhere: dev builds find
@@ -15,9 +15,10 @@ fn main() {
         .filter(|name| name.ends_with(".svg"))
         .collect();
     names.sort();
-    if names.is_empty() {
-        panic!("no icons in resources/; run `git lfs pull` or `cargo xtask setup`");
-    }
+    assert!(
+        !names.is_empty(),
+        "no icons in resources/; run `git lfs pull` or `cargo xtask setup`"
+    );
 
     let mut body = String::from(
         "use iced::widget::svg::Handle;\n\npub fn handle(name: &str) -> Option<Handle> {\n    let bytes: &[u8] = match name {\n",
@@ -25,7 +26,9 @@ fn main() {
     for name in &names {
         let src = resources.join(name);
         println!("cargo:rerun-if-changed={}", src.display());
-        warn_if_lfs_pointer(&src, name);
+        if fs::read(&src).is_ok_and(|bytes| bytes.starts_with(b"version https://git-lfs.github.com")) {
+            println!("cargo:warning=Resource {name} is a Git LFS pointer; run `git lfs pull` or `cargo xtask setup`");
+        }
         body.push_str(&format!(
             "        {name:?} => include_bytes!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/resources/{name}\")),\n"
         ));
@@ -35,14 +38,5 @@ fn main() {
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("embedded_resources.rs");
     if fs::read_to_string(&out).ok().as_deref() != Some(body.as_str()) {
         fs::write(&out, body).expect("write embedded_resources.rs");
-    }
-}
-
-fn warn_if_lfs_pointer(path: &Path, name: &str) {
-    let Ok(bytes) = fs::read(path) else {
-        return;
-    };
-    if bytes.starts_with(b"version https://git-lfs.github.com") {
-        println!("cargo:warning=Resource {name} is a Git LFS pointer; run `git lfs pull` or `cargo xtask setup`");
     }
 }
