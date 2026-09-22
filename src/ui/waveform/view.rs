@@ -19,7 +19,7 @@ const WHEEL_SCROLL_PIXELS_PER_LINE: f32 = 28.0;
 const EDGE_RUBBER_BAND: f32 = 0.35;
 
 /// Zooming stops at one sample per plot width.
-pub(super) fn max_zoom(sample_count: usize) -> f32 {
+fn max_zoom(sample_count: usize) -> f32 {
     (sample_count as f32).max(MIN_ZOOM)
 }
 
@@ -33,11 +33,9 @@ fn visible_samples(sample_count: usize, zoom: f32) -> usize {
 
 /// The largest `offset`: the window's start when it shows the track's end.
 fn max_left(sample_count: usize, zoom: f32) -> f64 {
-    let max_start = sample_count.saturating_sub(visible_samples(sample_count, zoom));
-    if max_start == 0 {
-        0.0
-    } else {
-        max_start as f64 / sample_count as f64
+    match sample_count.saturating_sub(visible_samples(sample_count, zoom)) {
+        0 => 0.0,
+        max_start => max_start as f64 / sample_count as f64,
     }
 }
 
@@ -86,6 +84,27 @@ pub(super) struct WaveformLayout {
     pub sample_point_mode: bool,
 }
 
+impl WaveformLayout {
+    pub(super) fn new(width: f32, visible_count: usize) -> Self {
+        let columns = if width <= 0.0 {
+            1
+        } else {
+            (width.ceil() as usize).clamp(1, visible_count.max(1))
+        };
+        let samples_per_col = visible_count.div_ceil(columns).next_power_of_two();
+        let column_count = visible_count.div_ceil(samples_per_col);
+        let per = |count: usize| if count > 0 { width / count as f32 } else { width };
+        Self {
+            width,
+            samples_per_col,
+            column_count,
+            column_width: per(column_count),
+            px_per_sample: per(visible_count),
+            sample_point_mode: samples_per_col == 1,
+        }
+    }
+}
+
 impl WaveFormView {
     pub fn zoom_in(&mut self, sample_count: usize) {
         self.apply_zoom_at(ZOOM_FACTOR, 0.5, sample_count);
@@ -111,35 +130,21 @@ impl WaveFormView {
         true
     }
 
-    /// Pans by `delta` visible widths.
-    pub fn pan(&mut self, delta: f32, sample_count: usize) {
-        self.apply_pan_delta(
-            f64::from(delta) * visible_fraction_of(sample_count, self.zoom),
-            sample_count,
-        );
-    }
-
     /// Moves `offset` by `offset_delta`, stretching into overscroll past either end.
     pub fn apply_pan_delta(&mut self, offset_delta: f64, sample_count: usize) {
         let visible = visible_fraction_of(sample_count, self.zoom).max(1e-12);
         let max = max_left(sample_count, self.zoom);
         let edge_pull = (offset_delta / visible) as f32 * EDGE_RUBBER_BAND;
 
-        if self.overscroll > OVERSCROLL_STOP {
-            self.offset = max;
+        if self.overscroll_active() {
+            // Already stretched past an edge: pull the band, and pan normally once it lets go.
+            let side = self.overscroll.signum();
+            let edge = if side > 0.0 { max } else { 0.0 };
+            self.offset = edge;
             self.overscroll = rubber_band(self.overscroll, edge_pull);
-            if self.overscroll <= OVERSCROLL_STOP {
+            if self.overscroll * side <= OVERSCROLL_STOP {
                 self.overscroll = 0.0;
-                self.offset = (max + offset_delta).clamp(0.0, max);
-            }
-            return;
-        }
-        if self.overscroll < -OVERSCROLL_STOP {
-            self.offset = 0.0;
-            self.overscroll = rubber_band(self.overscroll, edge_pull);
-            if self.overscroll >= -OVERSCROLL_STOP {
-                self.overscroll = 0.0;
-                self.offset = offset_delta.clamp(0.0, max);
+                self.offset = (edge + offset_delta).clamp(0.0, max);
             }
             return;
         }
@@ -157,11 +162,10 @@ impl WaveFormView {
     /// threshold would end the spring ticks yet keep the uncached draw path on.
     pub fn spring_overscroll(&mut self) -> bool {
         self.overscroll *= OVERSCROLL_SPRING;
-        if self.overscroll.abs() <= OVERSCROLL_STOP {
+        if !self.overscroll_active() {
             self.overscroll = 0.0;
-            return false;
         }
-        true
+        self.overscroll != 0.0
     }
 
     /// Whether the rubber-band stretch is visible. A residue at or below the stop
@@ -176,8 +180,7 @@ impl WaveFormView {
             return;
         }
         let anchor_x = f64::from(anchor_x).clamp(0.0, 1.0);
-        let old_visible = visible_samples(sample_count, self.zoom);
-        let (start, _, phase) = self.sample_window(sample_count);
+        let (start, old_visible, phase) = self.sample_window(sample_count);
         let anchor_sample = start as f64 + f64::from(phase) + anchor_x * old_visible as f64;
 
         self.zoom = (self.zoom * factor).clamp(MIN_ZOOM, max_zoom(sample_count));
@@ -189,7 +192,7 @@ impl WaveFormView {
         self.overscroll = 0.0;
     }
 
-    /// Visible sample window: `(start, end, sub-sample phase)`.
+    /// Visible sample window: `(start, visible count, sub-sample phase)`.
     pub(super) fn sample_window(&self, sample_count: usize) -> (usize, usize, f32) {
         let visible = visible_samples(sample_count, self.zoom);
         let max_start = sample_count.saturating_sub(visible);
@@ -198,9 +201,7 @@ impl WaveFormView {
         }
         let raw_start = (self.offset * sample_count as f64).clamp(0.0, max_start as f64);
         let start = raw_start.floor() as usize;
-        let phase = (raw_start - start as f64) as f32;
-        let start = start.min(max_start);
-        (start, (start + visible).min(sample_count), phase)
+        (start.min(max_start), visible, (raw_start - start as f64) as f32)
     }
 
     /// Changes whenever the drawn window moves by more than an eighth of a sample.
@@ -216,9 +217,8 @@ impl WaveFormView {
     }
 
     pub(super) fn content_translate_x(&self, width: f32) -> f32 {
-        let overscroll = self.overscroll.clamp(-MAX_OVERSCROLL, MAX_OVERSCROLL);
         // Pan step is `-dx`, so visual shift is opposite the overscroll sign.
-        -overscroll * width * 0.55
+        -self.overscroll.clamp(-MAX_OVERSCROLL, MAX_OVERSCROLL) * width * 0.55
     }
 
     /// Scale anchor for overscroll bounce: pin the visible edge so rubber-band
@@ -237,40 +237,17 @@ impl WaveFormView {
         }
     }
 
-    pub(super) fn waveform_layout(&self, width: f32, visible_count: usize) -> WaveformLayout {
-        let samples_per_col = if visible_count == 0 {
-            1
-        } else {
-            let columns = if width <= 0.0 {
-                1
-            } else {
-                (width.ceil() as usize).clamp(1, visible_count)
-            };
-            visible_count.div_ceil(columns).next_power_of_two()
-        };
-        let column_count = visible_count.div_ceil(samples_per_col);
-        let per = |count: usize| if count > 0 { width / count as f32 } else { width };
-        WaveformLayout {
-            width,
-            samples_per_col,
-            column_count,
-            column_width: per(column_count),
-            px_per_sample: per(visible_count),
-            sample_point_mode: samples_per_col == 1,
-        }
-    }
-
-    pub(super) fn sample_point_mode(&self, width: f32, visible_samples: usize) -> bool {
-        visible_samples > 0 && width > 0.0 && self.waveform_layout(width, visible_samples).sample_point_mode
-    }
-
     /// Keyboard zoom (`+`/`-`) and pan (arrows). True if the key did something.
     pub fn apply_key(&mut self, key: &Key, sample_count: usize) -> bool {
+        let pan = |view: &mut Self, delta: f32| {
+            let delta = f64::from(delta) * visible_fraction_of(sample_count, view.zoom);
+            view.apply_pan_delta(delta, sample_count);
+        };
         match key.as_ref() {
             Key::Character("+" | "=") => self.zoom_in(sample_count),
             Key::Character("-") => self.zoom_out(sample_count),
-            Key::Named(Named::ArrowLeft) => self.pan(-PAN_STEP, sample_count),
-            Key::Named(Named::ArrowRight) => self.pan(PAN_STEP, sample_count),
+            Key::Named(Named::ArrowLeft) => pan(self, -PAN_STEP),
+            Key::Named(Named::ArrowRight) => pan(self, PAN_STEP),
             _ => return false,
         }
         true
@@ -286,37 +263,44 @@ fn rubber_band(current: f32, additional: f32) -> f32 {
 mod tests {
     use super::*;
 
-    #[test]
-    fn direction_change_does_not_zoom_same_way() {
-        let mut view = WaveFormView::default();
-        let mut pending = 0.0;
-        let samples = 10_000;
+    fn view(zoom: f32, offset: f64) -> WaveFormView {
+        WaveFormView {
+            zoom,
+            offset,
+            overscroll: 0.0,
+        }
+    }
 
+    #[test]
+    fn wheel_zoom_follows_scroll_direction() {
+        let samples = 10_000;
+        let (mut view, mut pending) = (WaveFormView::default(), 0.0);
         view.accumulate_wheel(0.75, 0.5, samples, &mut pending);
         let zoom_before = view.zoom;
         assert!(pending > 0.0, "expected leftover down-scroll pending, got {pending}");
-
         view.accumulate_wheel(-0.05, 0.5, samples, &mut pending);
-        assert!(
-            view.zoom <= zoom_before,
-            "reverse scroll must not zoom further in (before={zoom_before}, after={})",
-            view.zoom
-        );
+        assert!(view.zoom <= zoom_before, "reverse scroll must not zoom further in");
+
+        let (mut view, mut pending) = (WaveFormView::default(), 0.0);
+        for lines in [0.15; 5] {
+            view.accumulate_wheel(lines, 0.5, samples, &mut pending);
+        }
+        let zoom_in = view.zoom;
+        assert!(zoom_in > 1.0);
+        for lines in [-0.15; 5] {
+            view.accumulate_wheel(lines, 0.5, samples, &mut pending);
+        }
+        assert!(view.zoom < zoom_in, "scroll up after scroll down must zoom out");
     }
 
     #[test]
     fn wheel_zoom_keeps_sample_under_cursor() {
-        let mut view = WaveFormView {
-            zoom: 8.0,
-            offset: 0.2,
-            overscroll: 0.0,
-        };
-        let samples = 100_000;
-        let anchor_x = 0.8;
+        let (samples, anchor_x) = (100_000, 0.8);
         let sample_under = |view: &WaveFormView| {
-            let (start, end, phase) = view.sample_window(samples);
-            start as f64 + f64::from(phase) + f64::from(anchor_x) * (end - start) as f64
+            let (start, visible, phase) = view.sample_window(samples);
+            start as f64 + f64::from(phase) + f64::from(anchor_x) * visible as f64
         };
+        let mut view = view(8.0, 0.2);
         let before = sample_under(&view);
         view.apply_zoom_at(2.0, anchor_x, samples);
         let after = sample_under(&view);
@@ -327,23 +311,13 @@ mod tests {
     }
 
     #[test]
-    fn pan_to_max_shows_last_sample() {
-        let mut view = WaveFormView {
-            zoom: 4.0,
-            ..Default::default()
-        };
-        view.offset = max_left(100_000, view.zoom);
-        let (_, end, _) = view.sample_window(100_000);
-        assert_eq!(end, 100_000);
-    }
-
-    #[test]
     fn panning_past_either_end_rubber_bands_then_springs_back() {
         let samples = 100_000;
-        let mut view = WaveFormView {
-            zoom: 4.0,
-            ..Default::default()
-        };
+        let mut view = view(4.0, max_left(samples, 4.0));
+        let (start, visible, _) = view.sample_window(samples);
+        assert_eq!(start + visible, samples, "panned to the end shows the last sample");
+
+        view.offset = 0.0;
         view.apply_pan_delta(-0.1, samples);
         assert_eq!(view.offset, 0.0);
         assert!(view.overscroll < 0.0 && view.overscroll_active());
@@ -356,52 +330,22 @@ mod tests {
     }
 
     #[test]
-    fn playhead_and_first_sample_start_at_plot_origin() {
-        let view = WaveFormView::default();
-        let (start, end, phase) = view.sample_window(48_000);
+    fn layout_columns_and_sample_point_mode() {
+        let (start, visible, phase) = WaveFormView::default().sample_window(48_000);
         assert_eq!((start, phase), (0, 0.0));
-        let layout = view.waveform_layout(800.0, end - start);
+        let layout = WaveformLayout::new(800.0, visible);
         let first_col_left = 0.5 * layout.column_width - phase * layout.px_per_sample - layout.column_width * 0.5;
         assert!(
             first_col_left >= -f32::EPSILON,
             "first column envelope should reach the left plot edge"
         );
-    }
 
-    #[test]
-    fn scroll_down_then_up_changes_zoom_direction() {
-        let mut view = WaveFormView::default();
-        let mut pending = 0.0;
-        let samples = 10_000;
-
-        for _ in 0..5 {
-            view.accumulate_wheel(0.15, 0.5, samples, &mut pending);
-        }
-        let zoom_in = view.zoom;
-        assert!(zoom_in > 1.0);
-
-        for _ in 0..5 {
-            view.accumulate_wheel(-0.15, 0.5, samples, &mut pending);
-        }
-        assert!(
-            view.zoom < zoom_in,
-            "scroll up after scroll down must zoom out (in={zoom_in}, out={})",
-            view.zoom
-        );
-    }
-
-    #[test]
-    fn sample_point_mode_when_one_sample_per_column() {
-        let view = WaveFormView {
-            zoom: 4096.0,
-            ..Default::default()
-        };
-        let layout = view.waveform_layout(900.0, 400);
+        assert!(WaveformLayout::new(900.0, 132_300).column_count <= 900);
+        let layout = WaveformLayout::new(900.0, 400);
         assert_eq!(layout.samples_per_col, 1);
-        assert!(layout.px_per_sample >= 1.0);
-        assert!(layout.sample_point_mode);
+        assert!(layout.px_per_sample >= 1.0 && layout.sample_point_mode);
         // No cap on how many samples can be drawn individually.
-        assert!(view.waveform_layout(5000.0, 5000).sample_point_mode);
+        assert!(WaveformLayout::new(5000.0, 5000).sample_point_mode);
     }
 
     #[test]
@@ -412,19 +356,8 @@ mod tests {
             view.zoom_in(sample_count);
         }
         assert_eq!(view.zoom, max_zoom(sample_count));
-        let (start, end, _) = view.sample_window(sample_count);
-        assert_eq!(end - start, 1);
-        assert!(view.waveform_layout(800.0, 1).sample_point_mode);
-    }
-
-    #[test]
-    fn column_count_stays_at_or_below_width() {
-        let view = WaveFormView {
-            zoom: 28.0,
-            ..Default::default()
-        };
-        let layout = view.waveform_layout(900.0, 132_300);
-        assert!(layout.column_count <= 900, "got {}", layout.column_count);
+        assert_eq!(view.sample_window(sample_count).1, 1);
+        assert!(WaveformLayout::new(800.0, 1).sample_point_mode);
     }
 
     #[test]

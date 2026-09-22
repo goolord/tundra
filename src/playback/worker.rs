@@ -1,14 +1,16 @@
 //! The audio thread. It owns the output stream and plays one track at a time;
 //! the UI talks to it only through `PlayerCommand`s and `PlayerEvent`s.
 
-use super::callback::Callback;
 use super::position::PlaybackPosition;
-use super::stream::append_stream;
+use super::stream::StreamSource;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use rodio::buffer::SamplesBuffer;
+use rodio::source::UniformSourceIterator;
+use rodio::{OutputStream, Sink, Source};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 pub fn clamp_volume(volume: f32) -> f32 {
     if volume.is_finite() {
@@ -29,11 +31,8 @@ pub enum PlayerCommand {
     /// Seek to a fraction of the track, then play if the flag is set.
     Seek(f64, bool),
     SetVolume(f32),
-    /// Sent by the audio callback when `segment` of track `track` runs out.
-    Ended {
-        track: u64,
-        segment: u64,
-    },
+    /// Sent by the audio callback when a segment (the second id) of a track runs out.
+    Ended(u64, u64),
 }
 
 #[derive(Debug, Clone)]
@@ -65,13 +64,29 @@ impl PlayerWorker {
         let handle = Self { commands, events };
         let thread_handle = handle.clone();
         std::thread::spawn(move || {
-            run(
-                thread_handle,
-                command_receiver,
+            let stream = match rodio::OutputStreamBuilder::open_default_stream() {
+                Ok(stream) => stream,
+                Err(err) => {
+                    eprintln!("Audio output unavailable: {err}");
+                    is_playing.store(false, Ordering::SeqCst);
+                    thread_handle.emit(PlayerEvent::DeviceUnavailable);
+                    return;
+                }
+            };
+            let mut worker = AudioWorker {
+                handle: thread_handle,
+                stream,
+                volume: clamp_volume(volume),
+                sink: None,
+                track: None,
+                segment: 0,
+                offset: 0.0,
                 is_playing,
                 looping,
-                clamp_volume(volume),
-            )
+            };
+            for command in futures::executor::block_on_stream(command_receiver) {
+                worker.run_command(command);
+            }
         });
         (handle, event_receiver)
     }
@@ -96,12 +111,6 @@ impl PlayerWorker {
     }
 }
 
-#[derive(Clone, Copy)]
-struct OutputFormat {
-    channels: u16,
-    sample_rate: u32,
-}
-
 /// The loaded track on the audio thread.
 struct Track {
     path: PathBuf,
@@ -114,10 +123,9 @@ struct Track {
 /// drain, and an old segment's end-of-track callback never fires.
 struct AudioWorker {
     handle: PlayerWorker,
-    stream: rodio::OutputStream,
-    output: OutputFormat,
+    stream: OutputStream,
     volume: f32,
-    sink: Option<rodio::Sink>,
+    sink: Option<Sink>,
     track: Option<Track>,
     /// Counts started segments; a late end event from an earlier segment of
     /// the same track (before a seek or restart) is ignored.
@@ -126,43 +134,6 @@ struct AudioWorker {
     offset: f64,
     is_playing: Arc<AtomicBool>,
     looping: Arc<AtomicBool>,
-}
-
-fn run(
-    handle: PlayerWorker,
-    commands: UnboundedReceiver<PlayerCommand>,
-    is_playing: Arc<AtomicBool>,
-    looping: Arc<AtomicBool>,
-    volume: f32,
-) {
-    let stream = match rodio::OutputStreamBuilder::open_default_stream() {
-        Ok(stream) => stream,
-        Err(err) => {
-            eprintln!("Audio output unavailable: {err}");
-            is_playing.store(false, Ordering::SeqCst);
-            handle.emit(PlayerEvent::DeviceUnavailable);
-            return;
-        }
-    };
-    let output = OutputFormat {
-        channels: stream.config().channel_count(),
-        sample_rate: stream.config().sample_rate(),
-    };
-    let mut worker = AudioWorker {
-        handle,
-        stream,
-        output,
-        volume,
-        sink: None,
-        track: None,
-        segment: 0,
-        offset: 0.0,
-        is_playing,
-        looping,
-    };
-    for command in futures::executor::block_on_stream(commands) {
-        worker.run_command(command);
-    }
 }
 
 impl AudioWorker {
@@ -178,33 +149,36 @@ impl AudioWorker {
             return;
         };
         self.offset = offset.clamp(0.0, 1.0);
+        let (channels, sample_rate) = (self.stream.config().channel_count(), self.stream.config().sample_rate());
 
-        let sink = rodio::Sink::connect_new(self.stream.mixer());
+        let sink = Sink::connect_new(self.stream.mixer());
         sink.set_volume(self.volume);
         if !play {
             sink.pause();
         }
-        prime_output_queue(&sink, self.output);
-        if let Err(err) = append_stream(
-            &sink,
-            &track.path,
-            self.offset,
-            track.position.total_frames(),
-            Some(Arc::clone(&track.position)),
-            self.output.channels,
-            self.output.sample_rate,
-        ) {
-            self.set_playing(false);
-            self.handle.emit(PlayerEvent::FileFailed(track.id, err));
-            return;
+        // Tags the rodio queue at the device rate (its default filler is 44100 Hz).
+        if channels > 0 && sample_rate > 0 {
+            sink.append(SamplesBuffer::new(
+                channels,
+                sample_rate,
+                vec![0.0; usize::from(channels)],
+            ));
+        }
+        match StreamSource::open(&track.path, self.offset, Arc::clone(&track.position)) {
+            Ok(source) => sink.append(UniformSourceIterator::new(source, channels, sample_rate)),
+            Err(err) => {
+                self.set_playing(false);
+                self.handle.emit(PlayerEvent::FileFailed(track.id, err));
+                return;
+            }
         }
 
         self.segment += 1;
         let (id, segment, handle) = (track.id, self.segment, self.handle.clone());
-        sink.append(Callback::new(
-            move || handle.send(PlayerCommand::Ended { track: id, segment }),
-            self.output.sample_rate,
-        ));
+        sink.append(Callback {
+            callback: Box::new(move || handle.send(PlayerCommand::Ended(id, segment))),
+            sample_rate,
+        });
         self.sink = Some(sink);
         self.set_playing(play);
     }
@@ -218,13 +192,10 @@ impl AudioWorker {
             }
             PlayerCommand::Play => {
                 let Some(track) = &self.track else {
-                    self.set_playing(false);
-                    return;
+                    return self.set_playing(false);
                 };
                 let total = track.position.total_frames();
-                let finished =
-                    self.sink.as_ref().is_none_or(rodio::Sink::empty) || playback_exhausted(self.offset, total);
-                if finished {
+                if self.sink.as_ref().is_none_or(Sink::empty) || playback_exhausted(self.offset, total) {
                     let restart = playback_exhausted(track.position.progress(), total);
                     self.start(if restart { 0.0 } else { self.offset }, true);
                 } else if let Some(sink) = &self.sink {
@@ -255,14 +226,16 @@ impl AudioWorker {
                 }
                 self.start(progress, resume);
             }
-            PlayerCommand::Ended { track: id, segment } => {
-                if segment != self.segment || self.track.as_ref().is_none_or(|track| track.id != id) {
+            PlayerCommand::Ended(id, segment) => {
+                let Some(track) = self
+                    .track
+                    .as_ref()
+                    .filter(|track| track.id == id && segment == self.segment)
+                else {
                     return;
-                }
+                };
                 if self.looping.load(Ordering::Acquire) {
-                    if let Some(track) = &self.track {
-                        track.position.reset();
-                    }
+                    track.position.reset();
                     self.start(0.0, true);
                     self.handle.emit(PlayerEvent::Looped(id));
                 } else {
@@ -281,13 +254,40 @@ impl AudioWorker {
     }
 }
 
-/// Tags the rodio queue at the device rate (its default filler is 44100 Hz).
-fn prime_output_queue(sink: &rodio::Sink, output: OutputFormat) {
-    if output.channels == 0 || output.sample_rate == 0 {
-        return;
+/// A silent, empty source that runs `callback` when the sink reaches it.
+///
+/// rodio's `EmptyCallback` reports a fixed sample rate; this one reports the
+/// output device's, so the sink's queue never switches rates for it.
+struct Callback {
+    callback: Box<dyn Send + Fn()>,
+    sample_rate: u32,
+}
+
+impl Iterator for Callback {
+    type Item = f32;
+
+    fn next(&mut self) -> Option<f32> {
+        (self.callback)();
+        None
     }
-    let silence = vec![0.0_f32; usize::from(output.channels)];
-    sink.append(SamplesBuffer::new(output.channels, output.sample_rate, silence));
+}
+
+impl Source for Callback {
+    fn current_span_len(&self) -> Option<usize> {
+        None
+    }
+
+    fn channels(&self) -> u16 {
+        1
+    }
+
+    fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
+    fn total_duration(&self) -> Option<Duration> {
+        Some(Duration::ZERO)
+    }
 }
 
 /// Whether resuming at `offset` would play nothing, so play should restart.
@@ -295,11 +295,7 @@ fn playback_exhausted(offset: f64, total_frames: u64) -> bool {
     if !offset.is_finite() || offset >= 1.0 {
         return true;
     }
-    if total_frames == 0 {
-        return false;
-    }
-    let skip_frames = (offset.clamp(0.0, 1.0) * total_frames as f64).round() as u64;
-    skip_frames >= total_frames
+    total_frames > 0 && (offset.clamp(0.0, 1.0) * total_frames as f64).round() as u64 >= total_frames
 }
 
 #[cfg(test)]
@@ -307,16 +303,16 @@ mod tests {
     use super::playback_exhausted;
 
     #[test]
-    fn play_from_start_when_offset_at_end() {
-        assert!(playback_exhausted(1.0, 100));
-        assert!(playback_exhausted(f64::NAN, 100));
-        assert!(!playback_exhausted(0.0, 100));
-        assert!(!playback_exhausted(0.5, 100));
-    }
-
-    #[test]
-    fn play_from_start_when_skip_consumes_all_frames() {
-        assert!(playback_exhausted(0.999, 100));
-        assert!(!playback_exhausted(0.99, 100));
+    fn play_restarts_when_resuming_would_play_nothing() {
+        for (offset, exhausted) in [
+            (1.0, true),
+            (f64::NAN, true),
+            (0.999, true),
+            (0.0, false),
+            (0.5, false),
+            (0.99, false),
+        ] {
+            assert_eq!(playback_exhausted(offset, 100), exhausted, "offset {offset}");
+        }
     }
 }
