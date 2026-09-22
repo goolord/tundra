@@ -180,7 +180,7 @@ impl App {
             last_scrub_progress: 0.0,
             file_list_focused: false,
             file_drag: None,
-            native_drag: NativeDrag::new(),
+            native_drag: Default::default(),
             drag_ready: cfg!(any(windows, target_os = "macos")),
             sidebar_resize: None,
             file_list_scrollbar_drag: None,

@@ -40,18 +40,14 @@ pub fn classify_zcr(zcr: f64) -> Option<(&'static str, f64)> {
 /// Up to `ANALYSIS_SECONDS` of the file, downmixed while decoding and
 /// resampled to `SAMPLE_RATE`.
 fn load_mono_audio(path: &Path) -> Result<Vec<f32>, ClassifyError> {
-    let fail = |what: &str, err: &dyn std::fmt::Display| {
-        ClassifyError::analysis_failed(format!("{what} {}: {err}", crate::path_util::display_path(path)))
-    };
+    let shown = crate::path_util::display_path(path);
+    let fail =
+        |what: &str, err: &dyn std::fmt::Display| ClassifyError::analysis_failed(format!("{what} {shown}: {err}"));
     let file_len = std::fs::metadata(path).map_err(|err| fail("Failed to stat", &err))?.len();
     if file_len > MAX_AUDIO_BYTES {
         let mb = |bytes: u64| bytes / (1024 * 1024);
-        return Err(ClassifyError::analysis_failed(format!(
-            "{} is too large ({} MB; limit is {} MB)",
-            crate::path_util::display_path(path),
-            mb(file_len),
-            mb(MAX_AUDIO_BYTES)
-        )));
+        let sizes = format!("{} MB; limit is {} MB", mb(file_len), mb(MAX_AUDIO_BYTES));
+        return Err(ClassifyError::analysis_failed(format!("{shown} is too large ({sizes})")));
     }
     let file = std::fs::File::open(path).map_err(|err| fail("Failed to open", &err))?;
     let mut decoder = rodio::Decoder::try_from(file).map_err(|err| fail("Cannot decode", &err))?;
@@ -69,10 +65,7 @@ fn load_mono_audio(path: &Path) -> Result<Vec<f32>, ClassifyError> {
         mono.push(sum / channels as f32);
     }
     if mono.is_empty() {
-        return Err(ClassifyError::analysis_failed(format!(
-            "{} contains no audio samples",
-            crate::path_util::display_path(path)
-        )));
+        return Err(ClassifyError::analysis_failed(format!("{shown} contains no audio samples")));
     }
     Ok(resample_linear(&mono, sample_rate, SAMPLE_RATE))
 }

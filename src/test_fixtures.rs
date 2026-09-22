@@ -32,6 +32,11 @@ impl ScratchDir {
     pub fn sidecar_count(&self) -> usize {
         count_tundra_sidecars(self.path())
     }
+
+    /// Runs `f` against a fresh tag store kept in this directory.
+    pub fn with_tag_db<R>(&self, f: impl FnOnce() -> R) -> R {
+        crate::tag_store::with_test_db(self.0.join("tags.db"), f)
+    }
 }
 
 impl Drop for ScratchDir {

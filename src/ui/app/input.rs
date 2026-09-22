@@ -210,7 +210,7 @@ impl App {
             _ => None,
         };
         if self.native_drag.is_active() {
-            self.native_drag.update(true, true);
+            self.native_drag.update(true);
         }
         if !self.native_drag.is_active() {
             self.file_drag = None;
@@ -221,7 +221,7 @@ impl App {
     /// Advances an X11 drag-out, which is driven by polling.
     pub(super) fn tick_native_drag(&mut self) {
         if self.native_drag.is_active() {
-            self.native_drag.update(true, false);
+            self.native_drag.update(false);
             if !self.native_drag.is_active() {
                 self.file_drag = None;
             }

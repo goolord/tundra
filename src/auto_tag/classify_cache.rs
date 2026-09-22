@@ -3,8 +3,8 @@
 
 use super::ClassificationResult;
 use crate::app_data;
+use crate::locks::lock;
 use crate::path_util::{FileStamp, cache_key};
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
@@ -12,16 +12,11 @@ use std::sync::{LazyLock, Mutex};
 // v6: tier 2 is YAMNet; labels from earlier models are not reused.
 const CACHE_FILE: &str = "classify_cache_v6.bin";
 
-/// Bincode writes nested structs inline, so this is still the v6 file layout.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct CachedClassification {
-    stamp: FileStamp,
-    result: ClassificationResult,
-}
-
+/// Bincode writes tuples and structs alike (fields inline), so the tuple
+/// values keep the v6 file layout.
 #[derive(Default)]
 struct ClassifyCache {
-    entries: HashMap<PathBuf, CachedClassification>,
+    entries: HashMap<PathBuf, (FileStamp, ClassificationResult)>,
     dirty: bool,
 }
 
@@ -32,25 +27,9 @@ impl ClassifyCache {
         }
     }
 
-    fn persist(&mut self) {
-        if self.dirty
-            && let Some(path) = app_data::cache_file(CACHE_FILE)
-        {
-            self.persist_to(&path);
-        }
-    }
-
     fn get(&self, path: &Path) -> Option<ClassificationResult> {
-        let cached = self.entries.get(&cache_key(path))?;
-        (Some(cached.stamp) == FileStamp::of(path)).then(|| cached.result.clone())
-    }
-
-    /// Remembers `result` for the file as it was when `stamp` was taken, before
-    /// analysis started. If the file changed since, the entry never matches.
-    fn insert(&mut self, path: &Path, stamp: FileStamp, result: &ClassificationResult) {
-        let result = result.clone();
-        self.entries.insert(cache_key(path), CachedClassification { stamp, result });
-        self.dirty = true;
+        let (stamp, result) = self.entries.get(&cache_key(path))?;
+        (Some(*stamp) == FileStamp::of(path)).then(|| result.clone())
     }
 }
 
@@ -60,22 +39,32 @@ static CACHE: LazyLock<Mutex<ClassifyCache>> = LazyLock::new(|| {
 });
 
 pub fn get_cached(path: &Path) -> Option<ClassificationResult> {
-    crate::locks::lock(&CACHE).get(path)
+    lock(&CACHE).get(path)
 }
 
+/// Remembers `result` for the file as it was when `stamp` was taken, before
+/// analysis started. If the file changed since, the entry never matches.
 pub fn store_cached(path: &Path, stamp: FileStamp, result: &ClassificationResult) {
-    crate::locks::lock(&CACHE).insert(path, stamp, result);
+    let mut cache = lock(&CACHE);
+    cache.entries.insert(cache_key(path), (stamp, result.clone()));
+    cache.dirty = true;
 }
 
 pub fn flush_cache() {
-    crate::locks::lock(&CACHE).persist();
+    let mut cache = lock(&CACHE);
+    if cache.dirty
+        && let Some(path) = app_data::cache_file(CACHE_FILE)
+    {
+        cache.persist_to(&path);
+    }
 }
 
 pub fn clear_cache() {
-    let mut cache = crate::locks::lock(&CACHE);
+    let mut cache = lock(&CACHE);
     cache.entries.clear();
     cache.dirty = true;
-    cache.persist();
+    drop(cache);
+    flush_cache();
 }
 
 #[cfg(test)]
@@ -96,7 +85,8 @@ mod tests {
             summary: "kick".into(),
         };
         let mut cache = ClassifyCache::default();
-        cache.insert(&audio, FileStamp::of(&audio).expect("stamp"), &kick);
+        cache.entries.insert(cache_key(&audio), (FileStamp::of(&audio).expect("stamp"), kick));
+        cache.dirty = true;
 
         let file = dir.path().join(CACHE_FILE);
         cache.persist_to(&file);
