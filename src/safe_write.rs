@@ -16,13 +16,6 @@ const TAG_BAK_SUFFIX: &str = ".tundra-tag.bak";
 /// The original, moved aside during a replace. The only sidecar ever restored.
 pub const REPLACE_OLD_SUFFIX: &str = ".tundra-replace-old";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SidecarKind {
-    Tmp,
-    Bak,
-    ReplaceOld,
-}
-
 /// `path` with `suffix` appended to its file name.
 pub fn sidecar(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
@@ -38,27 +31,21 @@ pub fn unique_sidecar(path: &Path, kind: &str) -> PathBuf {
     sidecar(path, &format!(".tundra-{kind}-{}-{seq}.tmp", std::process::id()))
 }
 
-/// The destination file name, sidecar kind, and writer's process id, if `name` is a sidecar.
-fn parse_write_sidecar(name: &str) -> Option<(&str, SidecarKind, Option<u32>)> {
-    let fixed = [
-        (REPLACE_OLD_SUFFIX, SidecarKind::ReplaceOld),
-        (TAG_BAK_SUFFIX, SidecarKind::Bak),
-        (TAG_TMP_SUFFIX, SidecarKind::Tmp),
-    ];
-    let (dest, kind, pid) = match fixed.into_iter().find_map(|(suffix, kind)| Some((name.strip_suffix(suffix)?, kind)))
-    {
-        Some((dest, kind)) => (dest, kind, None),
-        None => {
-            // `unique_sidecar` names: `<dest>.tundra-<kind>-<pid>-<seq>.tmp`.
-            let rest = name.strip_suffix(".tmp")?;
-            let (index, marker) = [".tundra-tag-", ".tundra-atomic-"]
-                .into_iter()
-                .find_map(|marker| rest.rfind(marker).map(|index| (index, marker)))?;
-            let pid = rest[index + marker.len()..].split('-').next()?.parse().ok();
-            (&rest[..index], SidecarKind::Tmp, pid)
-        }
+/// If `name` is a sidecar: the destination file name, whether it is the
+/// crash-aside original, and the writer's process id (unique temps only).
+fn parse_write_sidecar(name: &str) -> Option<(&str, bool, Option<u32>)> {
+    let (dest, aside, pid) = if let Some(dest) = name.strip_suffix(REPLACE_OLD_SUFFIX) {
+        (dest, true, None)
+    } else if let Some(dest) = name.strip_suffix(TAG_BAK_SUFFIX).or_else(|| name.strip_suffix(TAG_TMP_SUFFIX)) {
+        (dest, false, None)
+    } else {
+        // `unique_sidecar` names: `<dest>.tundra-<kind>-<pid>-<seq>.tmp`.
+        let rest = name.strip_suffix(".tmp")?;
+        let (index, marker) =
+            [".tundra-tag-", ".tundra-atomic-"].into_iter().find_map(|marker| Some((rest.rfind(marker)?, marker)))?;
+        (&rest[..index], false, rest[index + marker.len()..].split('-').next()?.parse().ok())
     };
-    (!dest.is_empty()).then_some((dest, kind, pid))
+    (!dest.is_empty()).then_some((dest, aside, pid))
 }
 
 fn is_write_sidecar(path: &Path) -> bool {
@@ -66,20 +53,16 @@ fn is_write_sidecar(path: &Path) -> bool {
 }
 
 fn pid_is_alive(pid: u32) -> bool {
-    if pid == 0 {
-        return false;
+    match pid {
+        0 => false,
+        _ if pid == std::process::id() => true,
+        #[cfg(windows)]
+        _ => win::pid_is_alive(pid),
+        #[cfg(target_os = "macos")]
+        _ => std::process::Command::new("kill").args(["-0", &pid.to_string()]).status().is_ok_and(|s| s.success()),
+        #[cfg(not(any(windows, target_os = "macos")))]
+        _ => Path::new(&format!("/proc/{pid}")).exists(),
     }
-    if pid == std::process::id() {
-        return true;
-    }
-    #[cfg(windows)]
-    let alive = win::pid_is_alive(pid);
-    #[cfg(target_os = "macos")]
-    let alive =
-        std::process::Command::new("kill").args(["-0", &pid.to_string()]).status().is_ok_and(|status| status.success());
-    #[cfg(not(any(windows, target_os = "macos")))]
-    let alive = Path::new(&format!("/proc/{pid}")).exists();
-    alive
 }
 
 #[cfg(windows)]
@@ -186,19 +169,18 @@ pub fn reclaim_write_sidecars(dir: &Path) -> Vec<PathBuf> {
         return Vec::new();
     };
 
-    let mut groups: HashMap<PathBuf, Vec<(PathBuf, SidecarKind, Option<u32>)>> = HashMap::new();
+    let mut groups: HashMap<PathBuf, Vec<(PathBuf, bool, Option<u32>)>> = HashMap::new();
     for path in entries.flatten().map(|entry| entry.path()) {
         let name = path.file_name().unwrap_or_default().to_string_lossy();
-        if let Some((dest_name, kind, pid)) = parse_write_sidecar(&name) {
-            let dest = path.with_file_name(dest_name);
-            groups.entry(dest).or_default().push((path, kind, pid));
+        if let Some((dest_name, aside, pid)) = parse_write_sidecar(&name) {
+            groups.entry(path.with_file_name(dest_name)).or_default().push((path, aside, pid));
         }
     }
 
     let mut restored = Vec::new();
     for (dest, sidecars) in groups {
         if !dest.exists()
-            && let Some((aside, _, _)) = sidecars.iter().find(|(_, kind, _)| *kind == SidecarKind::ReplaceOld)
+            && let Some((aside, ..)) = sidecars.iter().find(|(_, aside, _)| *aside)
         {
             if std::fs::rename(aside, &dest).is_err() && std::fs::copy(aside, &dest).is_ok() {
                 let _ = std::fs::remove_file(aside);
@@ -213,9 +195,9 @@ pub fn reclaim_write_sidecars(dir: &Path) -> Vec<PathBuf> {
         if !dest.exists() {
             continue;
         }
-        for (path, kind, pid) in sidecars {
-            let in_flight = kind == SidecarKind::Tmp && pid.is_some_and(pid_is_alive);
-            if !in_flight {
+        // Only unique temps carry a pid; a live one is a write still in flight.
+        for (path, _, pid) in sidecars {
+            if !pid.is_some_and(pid_is_alive) {
                 let _ = std::fs::remove_file(path);
             }
         }
@@ -275,20 +257,18 @@ mod tests {
     fn readonly_files_can_be_replaced_and_synced() {
         let dir = ScratchDir::new("readonly");
         let dest = dir.path().join("kick.wav");
-        let tmp = sidecar(&dest, TAG_TMP_SUFFIX);
-        for path in [&dest, &tmp] {
-            fs::write(path, b"audio").unwrap();
-            let mut perms = fs::metadata(path).unwrap().permissions();
-            perms.set_readonly(true);
-            fs::set_permissions(path, perms).unwrap();
-            ensure_writable(path).unwrap();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let mode = fs::metadata(path).unwrap().permissions().mode();
-                assert_eq!(mode & 0o222, 0o200, "only the owner may gain write access");
-            }
+        fs::write(&dest, b"audio").unwrap();
+        let mut perms = fs::metadata(&dest).unwrap().permissions();
+        perms.set_readonly(true);
+        fs::set_permissions(&dest, perms).unwrap();
+        ensure_writable(&dest).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&dest).unwrap().permissions().mode();
+            assert_eq!(mode & 0o222, 0o200, "only the owner may gain write access");
         }
+        let tmp = sidecar(&dest, TAG_TMP_SUFFIX);
         fs::write(&tmp, b"tagged").unwrap();
         sync_file(&tmp).unwrap();
         replace_file(&tmp, &dest).unwrap();

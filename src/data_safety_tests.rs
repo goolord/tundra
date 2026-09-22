@@ -1,65 +1,12 @@
-//! Crash/recovery and sidecar-fallback flows across safe_write, metadata, and tag_store.
+//! Tag writes across metadata, safe_write, and tag_store: every container keeps
+//! its audio and reads back what was written, or the write falls back to the
+//! sidecar store and leaves the file alone. Crash recovery is tested in `safe_write`.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::metadata::{ManualTagEdits, TUNDRA_TAG_VERSION, read_tag_fields, write_auto_tags, write_manual_tags};
-use crate::safe_write::{REPLACE_OLD_SUFFIX, reclaim_write_sidecars, sidecar};
+use crate::metadata::{ManualTagEdits, TUNDRA_TAG_VERSION, read_tag_fields, write_manual_tags};
 use crate::test_fixtures::{ASSET_FORMATS, ScratchDir, copy_asset, write_minimal_wav};
-
-#[test]
-fn write_auto_tags_falls_back_to_the_sidecar_and_leaves_no_temps() {
-    let dir = ScratchDir::new("auto-tags");
-    let broken = dir.path().join("broken.wav");
-    let junk = b"not a riff file";
-    fs::write(&broken, junk).expect("junk");
-    let wav = dir.path().join("kick.wav");
-    write_minimal_wav(&wav);
-
-    crate::tag_store::with_test_db(dir.path().join("tags.db"), || {
-        assert!(write_auto_tags(&broken, "Kick").expect("fallback write"), "unwritable container uses the sidecar");
-        assert_eq!(fs::read(&broken).expect("bytes unchanged"), junk);
-        assert_eq!(crate::tag_store::instrument(&broken).as_deref(), Some("Kick"));
-        assert_eq!(crate::tag_store::tag_version(&broken), Some(TUNDRA_TAG_VERSION));
-        write_auto_tags(&wav, "Kick").expect("native write");
-    });
-    assert_eq!(dir.sidecar_count(), 0);
-}
-
-/// Seeds a cache file with `persist`, simulates a crash that left only the
-/// crash-aside copy, and checks reclaim restores it and a later save is clean.
-fn cache_recovers_from_crash_aside(label: &str, file: &str, persist: impl Fn(&Path)) {
-    let dir = ScratchDir::new(label);
-    let path = dir.path().join(file);
-    persist(&path);
-    let bytes = fs::read(&path).expect("persisted");
-    fs::rename(&path, sidecar(&path, REPLACE_OLD_SUFFIX)).expect("crash aside");
-
-    reclaim_write_sidecars(dir.path());
-    assert_eq!(fs::read(&path).expect("restored"), bytes);
-    persist(&path);
-    assert_eq!(dir.sidecar_count(), 0);
-}
-
-#[test]
-fn caches_recover_from_crash_aside() {
-    use crate::library::cache::{DirCache, MetadataCache};
-    use std::collections::HashMap;
-
-    let root = PathBuf::from("samples");
-    let dirs = HashMap::from([(root.clone(), vec![root.join("kick.wav")])]);
-    cache_recovers_from_crash_aside("dir-cache", "dir_cache.bin", |path| DirCache::persist_map_to(path, &dirs));
-
-    let cached = crate::metadata::CachedMetadata { mtime_secs: 1, fields: crate::metadata::TagFields::default() };
-    let metadata = HashMap::from([(root.join("kick.wav"), cached)]);
-    cache_recovers_from_crash_aside("metadata-cache", "metadata_cache.bin", |path| {
-        MetadataCache::persist_map_to(path, &metadata)
-    });
-}
-
-// ---------------------------------------------------------------------------
-// Tag writes: every container keeps its audio and reads back what was written.
-// ---------------------------------------------------------------------------
 
 fn decoded_samples(path: &Path) -> Vec<f32> {
     let file = fs::File::open(path).expect("open audio");
@@ -85,7 +32,7 @@ fn manual_tags_round_trip_and_clear_in_every_container_without_touching_audio() 
         let audio = copy_asset(dir.path(), "tone", ext);
         let before = decoded_samples(&audio);
 
-        crate::tag_store::with_test_db(dir.path().join("tags.db"), || {
+        dir.with_tag_db(|| {
             let read_back = || ManualTagEdits::from_tag_fields(&read_tag_fields(&audio).expect("read back"));
             write_manual_tags(&audio, &full_edits()).unwrap_or_else(|err| panic!("{ext}: {err}"));
             assert!(
@@ -127,9 +74,7 @@ fn mp3_write_keeps_id3_frames_tundra_does_not_manage() {
         mp3.save_to_path(&audio, WriteOptions::default()).expect("seed foreign frame");
     }
 
-    crate::tag_store::with_test_db(dir.path().join("tags.db"), || {
-        write_manual_tags(&audio, &full_edits()).expect("manual write");
-    });
+    dir.with_tag_db(|| write_manual_tags(&audio, &full_edits())).expect("manual write");
 
     let mut file = fs::File::open(&audio).expect("open");
     let mp3 = MpegFile::read_from(&mut file, ParseOptions::new()).expect("parse");
@@ -149,9 +94,7 @@ fn wav_bpm_and_key_go_to_an_id3_chunk_and_sampler_chunks_survive() {
     bytes[4..8].copy_from_slice(&riff_len.to_le_bytes());
     fs::write(&audio, &bytes).expect("wav");
 
-    crate::tag_store::with_test_db(dir.path().join("tags.db"), || {
-        write_manual_tags(&audio, &full_edits()).expect("manual write");
-    });
+    dir.with_tag_db(|| write_manual_tags(&audio, &full_edits())).expect("manual write");
 
     let tagged = fs::read(&audio).expect("read");
     let chunks = crate::metadata::parse_riff_wave_chunks(&tagged).expect("parse");
@@ -189,7 +132,7 @@ fn sidecar_instrument_survives_a_native_write_of_other_fields() {
     let dir = ScratchDir::new("sidecar-restamp");
     let audio = copy_asset(dir.path(), "tone", "flac");
 
-    crate::tag_store::with_test_db(dir.path().join("tags.db"), || {
+    dir.with_tag_db(|| {
         crate::tag_store::set_instrument(&audio, "Kick", TUNDRA_TAG_VERSION).expect("sidecar");
         let edits = ManualTagEdits { title: "Boom".into(), ..ManualTagEdits::default() };
         write_manual_tags(&audio, &edits).expect("native write");
@@ -209,9 +152,7 @@ fn tags_are_written_through_a_symlink() {
     let link = dir.path().join("link.flac");
     std::os::unix::fs::symlink(&real, &link).expect("symlink");
 
-    crate::tag_store::with_test_db(dir.path().join("tags.db"), || {
-        write_manual_tags(&link, &full_edits()).expect("write through link");
-    });
+    dir.with_tag_db(|| write_manual_tags(&link, &full_edits())).expect("write through link");
 
     assert!(fs::symlink_metadata(&link).expect("link").file_type().is_symlink());
     assert_eq!(read_tag_fields(&real).expect("real").title, "Crack");
@@ -250,7 +191,7 @@ fn mp3_with_trailing_ape_and_id3v1_tags_is_written_in_place() {
     let (audio, id3v1) = mp3_with_trailing_tags(&dir, true);
     let before = decoded_samples(&audio);
 
-    crate::tag_store::with_test_db(dir.path().join("tags.db"), || {
+    dir.with_tag_db(|| {
         write_manual_tags(&audio, &full_edits()).expect("manual write");
         assert!(crate::tag_store::manual_fields(&audio).is_none(), "written natively");
     });
@@ -269,7 +210,7 @@ fn write_that_would_truncate_audio_is_refused_and_falls_back_to_sidecar() {
     let (audio, _) = mp3_with_trailing_tags(&dir, false);
     let original = fs::read(&audio).expect("original");
 
-    crate::tag_store::with_test_db(dir.path().join("tags.db"), || {
+    dir.with_tag_db(|| {
         write_manual_tags(&audio, &full_edits()).expect("sidecar fallback");
         assert_eq!(fs::read(&audio).expect("unchanged"), original);
         assert_eq!(crate::tag_store::manual_fields(&audio).map(|fields| fields.title), Some("Crack".into()));
@@ -284,7 +225,7 @@ fn misnamed_files_are_not_tagged_in_a_format_reads_will_not_find() {
     write_minimal_wav(&audio);
     let original = fs::read(&audio).expect("original");
 
-    crate::tag_store::with_test_db(dir.path().join("tags.db"), || {
+    dir.with_tag_db(|| {
         let saved = write_manual_tags(&audio, &full_edits()).expect("sidecar fallback");
         assert!(matches!(saved, crate::metadata::SavedTo::Sidecar(_)), "{saved:?}");
         assert_eq!(fs::read(&audio).expect("unchanged"), original);

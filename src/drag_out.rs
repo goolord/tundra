@@ -4,27 +4,12 @@
 //! from [guth](https://docs.rs/guth) (Apache-2.0 / MIT).
 
 use iced::window::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-#[cfg(any(windows, target_os = "macos"))]
-use {
-    iced::window::raw_window_handle::{HandleError, WindowHandle},
-    std::path::PathBuf,
-};
-
-/// `drag::start_drag` needs a sized handle, not a trait object.
-#[cfg(any(windows, target_os = "macos"))]
-struct WindowHandleBorrow<'a>(&'a dyn HasWindowHandle);
 
 #[cfg(any(windows, target_os = "macos"))]
-impl HasWindowHandle for WindowHandleBorrow<'_> {
-    fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
-        self.0.window_handle()
-    }
-}
-
-#[cfg(any(windows, target_os = "macos"))]
-pub fn start_blocking(window: &dyn HasWindowHandle, path: PathBuf) -> Result<(), String> {
+pub fn start_blocking(window: &dyn HasWindowHandle, path: std::path::PathBuf) -> Result<(), String> {
     let item = drag::DragItem::Files(vec![path.clone()]);
-    drag::start_drag(&WindowHandleBorrow(window), item, drag::Image::File(path), |_, _| {}, drag::Options::default())
+    // `&dyn HasWindowHandle` is itself a sized `HasWindowHandle`, as `start_drag` requires.
+    drag::start_drag(&window, item, drag::Image::File(path), |_, _| {}, drag::Options::default())
         .map_err(|err| err.to_string())
 }
 
@@ -82,34 +67,29 @@ mod x11 {
 
     /// XDND drag source, driven by polling from the UI's ticks.
     #[derive(Default)]
-    pub struct X11Drag {
-        source: Option<Source>,
-    }
+    pub struct X11Drag(Option<Source>);
 
     impl X11Drag {
-        pub fn new() -> Self {
-            Self::default()
-        }
-
         pub fn init_with_window_id(&mut self, app_window: u32) -> Result<(), String> {
-            if self.source.is_none() {
-                self.source = Some(Source::new(app_window).map_err(|X11Error(message)| message)?);
+            if self.0.is_none() {
+                self.0 = Some(Source::new(app_window).map_err(|X11Error(message)| message)?);
             }
             Ok(())
         }
 
         pub fn is_active(&self) -> bool {
-            self.source.as_ref().is_some_and(|source| source.drag.is_some())
+            self.0.as_ref().is_some_and(|source| source.drag.is_some())
         }
 
         pub fn start(&mut self, path: PathBuf) -> Result<(), String> {
-            let source = self.source.as_mut().ok_or("X11 drag is unavailable on this display")?;
+            let source = self.0.as_mut().ok_or("X11 drag is unavailable on this display")?;
             source.start(&path).map_err(|X11Error(message)| message)
         }
 
-        pub fn update(&mut self, pointer_down: bool, pointer_released: bool) {
-            if let Some(source) = self.source.as_mut() {
-                source.update(pointer_released || !pointer_down);
+        /// Advances the drag; `released` once the pointer button is up.
+        pub fn update(&mut self, released: bool) {
+            if let Some(source) = self.0.as_mut() {
+                source.update(released);
             }
         }
     }
@@ -159,22 +139,8 @@ mod x11 {
                 .background_pixel(screen.white_pixel)
                 .border_pixel(screen.black_pixel)
                 .event_mask(EventMask::PROPERTY_CHANGE);
-            let class = WindowClass::INPUT_OUTPUT;
-            connection
-                .create_window(
-                    screen.root_depth,
-                    source_window,
-                    root,
-                    0,
-                    0,
-                    42,
-                    28,
-                    1,
-                    class,
-                    screen.root_visual,
-                    &aux,
-                )?
-                .check()?;
+            let (depth, visual, class) = (screen.root_depth, screen.root_visual, WindowClass::INPUT_OUTPUT);
+            connection.create_window(depth, source_window, root, 0, 0, 42, 28, 1, class, visual, &aux)?.check()?;
             let atoms = Atoms::new(&connection)?.reply()?;
             let source = Self { connection, root, app_window, source_window, atoms, drag: None };
             let (window_type, dnd) = (source.atoms._NET_WM_WINDOW_TYPE, source.atoms._NET_WM_WINDOW_TYPE_DND);
@@ -485,10 +451,6 @@ pub struct NativeDrag;
 
 #[cfg(not(all(unix, not(target_os = "macos"))))]
 impl NativeDrag {
-    pub fn new() -> Self {
-        Self
-    }
-
     pub fn init_with_window_id(&mut self, _app_window: u32) -> Result<(), String> {
         Ok(())
     }
@@ -497,5 +459,5 @@ impl NativeDrag {
         false
     }
 
-    pub fn update(&mut self, _pointer_down: bool, _pointer_released: bool) {}
+    pub fn update(&mut self, _released: bool) {}
 }

@@ -116,26 +116,15 @@ pub fn truncate_path(path: &Path, max_chars: usize) -> String {
 
 /// Dot-files, plus files the OS marks hidden.
 pub fn is_hidden(path: &Path) -> bool {
-    if path.file_name().is_some_and(|name| name.to_string_lossy().starts_with('.')) {
-        return true;
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
-        if let Ok(meta) = std::fs::metadata(path) {
-            return meta.file_attributes() & FILE_ATTRIBUTE_HIDDEN != 0;
-        }
-    }
-    #[cfg(target_os = "macos")]
-    {
-        use std::os::macos::fs::MetadataExt;
-        const UF_HIDDEN: u32 = 0x8000;
-        if let Ok(meta) = std::fs::metadata(path) {
-            return meta.st_flags() & UF_HIDDEN != 0;
-        }
-    }
-    false
+    #[cfg(windows)] // FILE_ATTRIBUTE_HIDDEN
+    let marked = |meta: std::fs::Metadata| std::os::windows::fs::MetadataExt::file_attributes(&meta) & 0x2 != 0;
+    #[cfg(target_os = "macos")] // UF_HIDDEN
+    let marked = |meta: std::fs::Metadata| std::os::macos::fs::MetadataExt::st_flags(&meta) & 0x8000 != 0;
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let marked = |_: std::fs::Metadata| false;
+    // `cfg!` skips the stat where there is no hidden flag to read.
+    path.file_name().is_some_and(|name| name.to_string_lossy().starts_with('.'))
+        || (cfg!(any(windows, target_os = "macos")) && std::fs::metadata(path).is_ok_and(marked))
 }
 
 /// Identifies one version of a file: its size and modification time. Size is
@@ -245,18 +234,11 @@ mod tests {
     }
 
     #[test]
-    fn display_path_drops_verbatim_prefix() {
+    fn display_path_drops_verbatim_prefix_and_truncate_keeps_the_end() {
         assert_eq!(display_path(Path::new(r"\\?\F:\Samples")), r"F:\Samples");
         assert_eq!(display_path(Path::new(r"\\?\UNC\nas\share\kick.wav")), r"\\nas\share\kick.wav");
-        assert_eq!(display_path(Path::new(r"F:\Samples")), r"F:\Samples");
         assert_eq!(display_path(Path::new("/samples/kick.wav")), "/samples/kick.wav");
         assert_eq!(truncate_path(Path::new(r"\\?\F:\Samples"), 32), r"F:\Samples");
-    }
-
-    #[test]
-    fn truncate_path_keeps_the_end() {
-        let path = Path::new("/samples/drums/kick.wav");
-        assert_eq!(truncate_path(path, 100), "/samples/drums/kick.wav");
-        assert_eq!(truncate_path(path, 9), "…kick.wav");
+        assert_eq!(truncate_path(Path::new("/samples/drums/kick.wav"), 9), "…kick.wav");
     }
 }

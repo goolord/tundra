@@ -3,7 +3,6 @@ use clap::{Args, Parser, Subcommand};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::OnceLock;
 use std::time::Duration;
 
 /// Classifier Python, pinned for every platform by `scripts/.python-version`.
@@ -206,9 +205,7 @@ fn git_lfs_pull() -> Result<()> {
     if !root.join(".git").exists() {
         return Ok(());
     }
-    let mut version = Command::new("git");
-    version.args(["lfs", "version"]).stdout(Stdio::null()).stderr(Stdio::null());
-    if !version.status().is_ok_and(|status| status.success()) {
+    if !Command::new("git").args(["lfs", "version"]).output().is_ok_and(|out| out.status.success()) {
         eprintln!("warning: git-lfs not installed; SVG resources and models may be missing");
         return Ok(());
     }
@@ -230,17 +227,10 @@ fn matches_hash(path: &Path, sha256: &str) -> Result<bool> {
     Ok(path.is_file() && sha256_file(path)? == sha256)
 }
 
-/// Where a download or build of `dest` is staged until it is complete.
-fn part_path(dest: &Path) -> PathBuf {
-    let mut part = dest.as_os_str().to_owned();
-    part.push(".part");
-    PathBuf::from(part)
-}
-
 /// Download `url` to `dest` through a `.part` file, keeping it only if its
 /// SHA-256 matches.
 fn fetch_verified(url: &str, sha256: &str, dest: &Path) -> Result<()> {
-    let part = part_path(dest);
+    let part = dest.with_added_extension("part");
     let response = ureq::get(url).timeout(MODEL_DOWNLOAD_TIMEOUT).call().with_context(|| format!("GET {url}"))?;
     let mut file = std::fs::File::create(&part)?;
     std::io::copy(&mut response.into_reader(), &mut file).with_context(|| format!("write {}", part.display()))?;
@@ -262,7 +252,8 @@ fn convert_yamnet(dest: &Path) -> Result<()> {
         println!("models: downloading YAMNet weights");
         fetch_verified(YAMNET_WEIGHTS_URL, YAMNET_WEIGHTS_SHA256, &weights)?;
     }
-    let part = part_path(dest);
+    // Staged like a download, so an interrupted build never looks complete.
+    let part = dest.with_added_extension("part");
     let mut convert = Command::new("uv");
     convert.args(["run", "--no-project", "--python", python_version()]);
     for dependency in YAMNET_CONVERT_DEPS {
@@ -284,15 +275,10 @@ fn download_models() -> Result<()> {
             println!("models: {name} verified");
             continue;
         }
+        println!("models: {} {name}", if url.is_some() { "downloading" } else { "building" });
         match url {
-            Some(url) => {
-                println!("models: downloading {name}");
-                fetch_verified(url, sha256, &dest)?;
-            }
-            None => {
-                println!("models: building {name}");
-                convert_yamnet(&dest)?;
-            }
+            Some(url) => fetch_verified(url, sha256, &dest)?,
+            None => convert_yamnet(&dest)?,
         }
     }
     verify_models()
@@ -324,15 +310,10 @@ fn setup_classifiers(skip_dl: bool) -> Result<()> {
     run(&mut sync)
 }
 
-fn host_triple() -> Result<&'static str> {
-    static HOST: OnceLock<Option<String>> = OnceLock::new();
-    HOST.get_or_init(|| {
-        let output = Command::new("rustc").arg("-vV").output().ok()?;
-        let stdout = String::from_utf8(output.stdout).ok()?;
-        Some(stdout.lines().find_map(|line| line.strip_prefix("host: "))?.to_string())
-    })
-    .as_deref()
-    .context("could not detect the host triple; pass --target explicitly")
+fn host_triple() -> Result<String> {
+    let version = output(Command::new("rustc").arg("-vV")).unwrap_or_default();
+    let host = version.lines().find_map(|line| line.strip_prefix("host: "));
+    host.map(str::to_string).context("could not detect the host triple; pass --target explicitly")
 }
 
 /// Whether building `target` from this host needs the `cross` tool.
@@ -361,7 +342,6 @@ fn cross_targets_for_host() -> &'static [&'static str] {
 }
 
 fn cross_build_all(cross: bool) -> Result<()> {
-    install_release_targets()?;
     let mut failures = Vec::new();
     for &target in cross_targets_for_host() {
         println!("cross: building {target}");
@@ -404,9 +384,8 @@ fn cargo_run(release: bool, extra_args: &[String]) -> Result<()> {
 }
 
 fn label(command: &Command) -> String {
-    let words: Vec<_> =
-        std::iter::once(command.get_program()).chain(command.get_args()).map(|word| word.to_string_lossy()).collect();
-    words.join(" ")
+    let words = std::iter::once(command.get_program()).chain(command.get_args());
+    words.map(|word| word.to_string_lossy()).collect::<Vec<_>>().join(" ")
 }
 
 fn run(command: &mut Command) -> Result<()> {
@@ -468,7 +447,7 @@ fn package_release(version: &str, options: &PackageOptions) -> Result<Vec<PathBu
     let target = match &options.target {
         Some(target) => target.clone(),
         None if options.skip_build => bail!("--skip-build requires --target"),
-        None => host_triple()?.to_string(),
+        None => host_triple()?,
     };
     verify_models()?;
     if !options.skip_build {
