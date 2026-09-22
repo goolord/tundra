@@ -1,6 +1,6 @@
 //! The settings, auto-tag, and tag editor modals.
 
-use super::{App, Modal, background, pick_audio_file, pick_folder};
+use super::{App, Modal, background, pick_path};
 use crate::auto_tag::{self, ClassifyError};
 use crate::library::AddDirectory;
 use crate::metadata::{auto_tag_field_status, instrument_tag, write_auto_tags, write_manual_tags};
@@ -9,7 +9,7 @@ use crate::ui::message::{AutoTagMsg, Message, SettingsMsg, TagEditorMsg};
 use crate::ui::settings::{AUTO_TAG_ALREADY_COMPLETE, AUTO_TAG_INSTRUMENT_PRESENT, SELECT_AUDIO_FIRST};
 use crate::ui::tag_editor::TagEditorState;
 use iced::Task;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 impl App {
     /// Nothing else may open until the first-run settings are done.
@@ -18,7 +18,7 @@ impl App {
     }
 
     /// Opens `modal` in place of any dialog or bulk auto-tag. False if first-run settings block it.
-    fn open_modal(&mut self, modal: Modal) -> bool {
+    pub(super) fn open_modal(&mut self, modal: Modal) -> bool {
         if self.first_run_settings_open() {
             return false;
         }
@@ -53,9 +53,9 @@ impl App {
                     .startup_directory()
                     .or_else(dirs::home_dir)
                     .unwrap_or_else(super::startup_directory);
-                return pick_folder(start_dir, |picked| SettingsMsg::DirectoryPicked(picked).into());
+                return pick_path(&start_dir, false, |picked| SettingsMsg::DirectoryPicked(picked).into());
             }
-            SettingsMsg::DirectoryPicked(Some(path)) => match self.allowed_directories.add(&path) {
+            SettingsMsg::DirectoryPicked(path) => match self.allowed_directories.add(&path) {
                 AddDirectory::Added(resolved) => {
                     self.allowed_directories.persist();
                     self.settings_error = None;
@@ -68,7 +68,6 @@ impl App {
                 AddDirectory::Unresolved => self.settings_error = Some("Could not resolve that directory.".into()),
                 AddDirectory::Duplicate => {}
             },
-            SettingsMsg::DirectoryPicked(None) => {}
             SettingsMsg::RemoveDirectory(path) => {
                 self.allowed_directories.remove(&path);
                 self.allowed_directories.persist();
@@ -114,16 +113,11 @@ impl App {
             }
             AutoTagMsg::Close => self.modal = Modal::None,
             AutoTagMsg::PickFile => {
-                let start_dir = self
-                    .auto_tag
-                    .target
-                    .as_deref()
-                    .and_then(std::path::Path::parent)
-                    .map_or_else(|| self.file_selector.current_dir.clone(), |dir| dir.to_path_buf());
-                return pick_audio_file(start_dir, |picked| AutoTagMsg::FilePicked(picked).into());
+                let start_dir = self.auto_tag.target.as_deref().and_then(Path::parent);
+                let start_dir = start_dir.unwrap_or(&self.file_selector.current_dir);
+                return pick_path(start_dir, true, |picked| AutoTagMsg::FilePicked(picked).into());
             }
-            AutoTagMsg::FilePicked(Some(path)) => self.set_auto_tag_target(path),
-            AutoTagMsg::FilePicked(None) => {}
+            AutoTagMsg::FilePicked(path) => self.set_auto_tag_target(path),
             AutoTagMsg::Run => return self.run_auto_tag(),
             AutoTagMsg::Completed(path, result) => {
                 // The modal may have been closed and reopened on another file while
@@ -235,11 +229,7 @@ impl App {
             TagEditorMsg::OpenFor(path) => {
                 if self.open_modal(Modal::TagEditor) {
                     self.tag_editor = match self.allowed_audio_error(&path) {
-                        Some(err) => {
-                            let mut state = TagEditorState::default();
-                            state.set_error(err);
-                            state
-                        }
+                        Some(err) => TagEditorState { error: Some(err.into()), ..TagEditorState::default() },
                         None => TagEditorState::for_path(path.clone(), &self.metadata_cache.tag_fields_for(&path)),
                     };
                 }

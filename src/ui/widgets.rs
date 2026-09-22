@@ -1,10 +1,11 @@
 //! Small widget builders reused across views.
 
-use super::message::Message;
+use super::message::{AutoTagMsg, Message, TagEditorMsg};
 use super::style;
 use iced::widget::svg::Handle;
 use iced::widget::{Button, Column, Row, Space, Svg, button, column, container, row, text};
 use iced::{Alignment, Border, Color, Element, Length, Theme};
+use std::path::Path;
 
 mod embedded_resources {
     include!(concat!(env!("OUT_DIR"), "/embedded_resources.rs"));
@@ -114,28 +115,24 @@ pub fn context_menu_style(theme: &Theme, _status: iced_aw::style::Status) -> ice
     iced_aw::style::context_menu::Style { background: theme.extended_palette().background.base.color.into() }
 }
 
-/// Actions a file's right-click menu offers, beyond copy and reveal.
-#[derive(Default)]
-pub struct FileMenuExtras {
-    pub auto_tag: Option<Message>,
-    pub edit_tags: Option<Message>,
-    pub favorite: Option<(&'static str, Message)>,
-}
-
+/// A file's right-click menu. `favorite` is whether the file is starred; `None` hides that entry.
 pub fn file_context_menu(
-    copy_name: Message,
-    copy_path: Message,
-    reveal: Message,
-    extras: FileMenuExtras,
+    path: &Path,
+    auto_tag: bool,
+    edit_tags: bool,
+    favorite: Option<bool>,
 ) -> Element<'static, Message> {
-    let optional = [
-        extras.auto_tag.map(|message| ("Auto-tag", message)),
-        extras.edit_tags.map(|message| ("Edit tags…", message)),
-        extras.favorite,
+    let favorite_label = |starred| if starred { "Remove from favorites" } else { "Add to favorites" };
+    let entries: [(bool, &str, Message); 6] = [
+        (auto_tag, "Auto-tag", AutoTagMsg::OpenFor(path.into()).into()),
+        (edit_tags, "Edit tags…", TagEditorMsg::OpenFor(path.into()).into()),
+        (favorite.is_some(), favorite_label(favorite == Some(true)), Message::ToggleFavorite(path.into())),
+        (true, "Copy name", Message::FileCopyName(path.into())),
+        (true, "Copy full path", Message::FileCopyPath(path.into())),
+        (true, crate::platform::file_manager_label(), Message::FileRevealInFileManager(path.into())),
     ];
-    let always =
-        [("Copy name", copy_name), ("Copy full path", copy_path), (crate::platform::file_manager_label(), reveal)];
-    column(optional.into_iter().flatten().chain(always).map(|(label, message)| context_menu_button(label, message)))
+    let buttons = entries.into_iter().filter(|(shown, ..)| *shown);
+    column(buttons.map(|(_, label, message)| context_menu_button(label, message)))
         .spacing(2)
         .padding([4, 0])
         .width(220)

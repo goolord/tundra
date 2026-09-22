@@ -25,7 +25,8 @@ pub enum Message {
     MouseReleased,
     KeyPressed(Key, Modifiers),
     ModifiersChanged(Modifiers),
-    FileDropped(PathBuf),
+    /// Open a file or folder dropped on the window or picked in a dialog.
+    OpenPath(PathBuf),
     FileHovered(PathBuf),
     FilesHoverLeft,
 
@@ -47,8 +48,6 @@ pub enum Message {
     ChangeDirectory(PathBuf),
     OpenFolder,
     OpenFile,
-    FolderPicked(Option<PathBuf>),
-    FilePicked(Option<PathBuf>),
     GoHome,
     RefreshDirectory,
     InvalidateDircache,
@@ -80,7 +79,6 @@ pub enum Message {
     StopPlayback,
     VolumeChanged(f32),
     VolumeCommit,
-    PlaybackTick,
     Waveform(WaveformMsg),
 
     // App chrome (`app/mod.rs`).
@@ -89,7 +87,8 @@ pub enum Message {
     About,
     DismissDialog,
     Quit,
-    /// Enables iced button hover styling where the bar handles clicks itself.
+    /// Only redraws: enables iced button hover styling where the bar handles clicks
+    /// itself, refreshes the time label, and answers a cancelled file dialog.
     NoOp,
 
     // Modals (`app/modals.rs`, `app/bulk_auto_tag.rs`).
@@ -129,11 +128,6 @@ pub enum WaveformMsg {
     ZoomOut,
     Help,
     HoverChanged(bool),
-    CopyName,
-    CopyPath,
-    RevealInFileManager,
-    OpenAutoTag,
-    EditTags,
 }
 
 /// The custom title bar and window frame (the OS decorations are off).
@@ -153,7 +147,7 @@ pub enum SettingsMsg {
     Open,
     Close,
     PickDirectory,
-    DirectoryPicked(Option<PathBuf>),
+    DirectoryPicked(PathBuf),
     RemoveDirectory(PathBuf),
 }
 
@@ -164,7 +158,7 @@ pub enum AutoTagMsg {
     OpenFor(PathBuf),
     Close,
     PickFile,
-    FilePicked(Option<PathBuf>),
+    FilePicked(PathBuf),
     Run,
     Completed(PathBuf, Result<ClassificationResult, ClassifyError>),
     Apply,
@@ -187,7 +181,7 @@ pub enum BulkAutoTagMsg {
     Open,
     Close,
     PickDirectory,
-    DirectoryPicked(Option<PathBuf>),
+    DirectoryPicked(PathBuf),
     RunScan,
     ProgressTick,
     ScanCompleted(u64, Result<BulkScanSummary, ScanError>),

@@ -4,24 +4,24 @@ use super::message::Message;
 use super::style;
 use super::widgets::spacer;
 use iced::widget::{button, center, column, container, mouse_area, opaque, row, stack, text};
-use iced::{Alignment, Color, Element, Length};
+use iced::{Alignment, Color, Element, Length, Theme};
 
 #[derive(Debug, Clone)]
 pub struct Dialog {
-    pub title: String,
+    pub title: &'static str,
     pub body: String,
     /// Two-column table shown under the body, e.g. input/action pairs.
-    pub rows: Vec<(&'static str, &'static str)>,
+    pub rows: &'static [(&'static str, &'static str)],
 }
 
 impl Dialog {
-    pub fn new(title: &str, body: String) -> Self {
-        Self { title: title.into(), body, rows: Vec::new() }
+    pub fn new(title: &'static str, body: String) -> Self {
+        Self { title, body, rows: &[] }
     }
 
     pub fn waveform_help() -> Self {
         Self {
-            rows: vec![
+            rows: &[
                 ("Drag", "Seek"),
                 ("Ctrl+drag", "Drag file"),
                 ("Scroll", "Zoom"),
@@ -35,18 +35,18 @@ impl Dialog {
         }
     }
 
-    fn view(&self) -> Element<'_, Message> {
+    pub fn view(&self) -> Element<'_, Message> {
         let body = column![
-            text(&self.title).size(18),
+            text(self.title).size(18),
             (!self.body.is_empty()).then(|| text(&self.body).size(14).width(Length::Fill)),
-            (!self.rows.is_empty()).then(|| table(&self.rows)),
-            row![spacer(Length::Fill, Length::Shrink), button(text("OK")).on_press(Message::DismissDialog),],
+            (!self.rows.is_empty()).then(|| table(self.rows)),
+            row![spacer(Length::Fill, Length::Shrink), button(text("OK")).on_press(Message::DismissDialog)],
         ];
         opaque(container(body.spacing(12).padding(16).width(Length::Fixed(440.0))).style(style::card(8.0)))
     }
 }
 
-fn table(rows: &[(&'static str, &'static str)]) -> Element<'static, Message> {
+fn table(rows: &'static [(&'static str, &'static str)]) -> Element<'static, Message> {
     let line = |input, action, size, alpha| {
         let cell = move |label| text(label).size(size).width(Length::FillPortion(1)).style(style::faded_text(alpha));
         row![cell(input), cell(action)].spacing(12).align_y(Alignment::Center).width(Length::Fill)
@@ -56,42 +56,31 @@ fn table(rows: &[(&'static str, &'static str)]) -> Element<'static, Message> {
         .width(Length::Fill)
         .style(style::panel(0.32, 0.18, 0.0));
     let body = rows.iter().enumerate().map(|(index, &(input, action))| {
-        let zebra = index % 2 == 1;
-        container(line(input, action, 13, 1.0))
-            .padding([7, 10])
-            .width(Length::Fill)
-            .style(move |theme: &iced::Theme| {
-                let palette = theme.extended_palette();
-                container::background(if zebra {
-                    palette.background.weak.color.scale_alpha(0.18)
-                } else {
-                    Color::TRANSPARENT
-                })
+        // Zebra stripes on every other row.
+        let fill = if index % 2 == 1 { 0.18 } else { 0.0 };
+        let cells = container(line(input, action, 13, 1.0)).padding([7, 10]).width(Length::Fill);
+        cells
+            .style(move |theme: &Theme| {
+                container::background(theme.extended_palette().background.weak.color.scale_alpha(fill))
             })
             .into()
     });
     container(column![header].extend(body).width(Length::Fill))
         .width(Length::Fill)
-        .style(|theme: &iced::Theme| {
-            let strong = theme.extended_palette().background.strong.color;
-            container::Style::default().border(style::outline(strong.scale_alpha(0.22), 6.0))
+        .style(|theme: &Theme| {
+            container::Style::default()
+                .border(style::outline(theme.extended_palette().background.strong.color.scale_alpha(0.22), 6.0))
         })
         .into()
 }
 
-/// Dims `base` and centers `overlay` on top; clicks never reach `base`.
-pub fn with_dim_overlay<'a>(base: Element<'a, Message>, overlay: Element<'a, Message>) -> Element<'a, Message> {
-    stack![base, opaque(container(center(overlay)).style(dim_scrim))].width(Length::Fill).height(Length::Fill).into()
-}
-
-/// Shows `dialog` over `base`; clicking outside it dismisses.
-pub fn with_dialog<'a>(base: Element<'a, Message>, dialog: &'a Dialog) -> Element<'a, Message> {
-    stack![base, opaque(mouse_area(center(dialog.view()).style(dim_scrim)).on_press(Message::DismissDialog))]
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
-}
-
-fn dim_scrim(_theme: &iced::Theme) -> container::Style {
-    container::background(Color::from_rgba(0.0, 0.0, 0.0, 0.55))
+/// Dims `base` and centers `overlay` on top. Clicks never reach `base`; with `dismiss`, one outside `overlay` closes the dialog.
+pub fn with_overlay<'a>(
+    base: Element<'a, Message>,
+    overlay: Element<'a, Message>,
+    dismiss: bool,
+) -> Element<'a, Message> {
+    let scrim = mouse_area(center(overlay).style(|_| container::background(Color::from_rgba(0.0, 0.0, 0.0, 0.55))));
+    let scrim = if dismiss { scrim.on_press(Message::DismissDialog) } else { scrim };
+    stack![base, opaque(scrim)].width(Length::Fill).height(Length::Fill).into()
 }

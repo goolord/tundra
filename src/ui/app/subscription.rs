@@ -14,7 +14,7 @@ fn every(millis: u64) -> Subscription<()> {
 
 fn global_event(event: Event, status: event::Status, _window: window::Id) -> Option<Message> {
     match event {
-        Event::Window(window::Event::FileDropped(path)) => Some(Message::FileDropped(path)),
+        Event::Window(window::Event::FileDropped(path)) => Some(Message::OpenPath(path)),
         Event::Window(window::Event::FileHovered(path)) => Some(Message::FileHovered(path)),
         Event::Window(window::Event::FilesHoveredLeft) => Some(Message::FilesHoverLeft),
         Event::Mouse(mouse::Event::CursorMoved { position }) => Some(Message::CursorMoved(position)),
@@ -37,8 +37,8 @@ impl App {
             waveform.is_some_and(|waveform| waveform.view_state().overscroll_active() && !waveform.pan_active());
         let (dragging, bulk_running) = (self.native_drag.is_active(), self.bulk_auto_tag.job.is_some());
         let timers = [
-            // The waveform animates its own playhead; this only refreshes the time label.
-            (waveform.is_some() && self.player.is_playing()).then(|| every(250).map(|()| Message::PlaybackTick)),
+            // The waveform animates its own playhead; this only redraws the time label.
+            (waveform.is_some() && self.player.is_playing()).then(|| every(250).map(|()| Message::NoOp)),
             dragging.then(|| every(16).map(|()| Message::FileDragTick)),
             springing.then(|| every(16).map(|()| WaveformMsg::SpringTick.into())),
             bulk_running.then(|| every(100).map(|()| BulkAutoTagMsg::ProgressTick.into())),
